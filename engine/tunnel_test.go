@@ -353,16 +353,38 @@ func TestMemberFailoverAndNoRoute(t *testing.T) {
 	rc.Targets = []types.Target{{Host: target.Addr().String(), Port: target.Port(), Weight: 1}}
 	pol := types.TargetPolicy{SelfHostedNode: true}
 	c.apply(t, &types.RuntimeConfig{Version: 1, Rules: []types.Rule{rc}, Peers: []types.Peer{a.peer(false)}, TargetPolicy: pol})
-	// 下一组两个成员：D 的地址上没有服务（主），C 正常（备）
-	deadPort := freePort(t)
+	// 下一组两个成员：D（主）的地址只接受 TCP、从不完成握手（黑洞），选中时仍被视为健康；C 正常（备）
+	hole, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hole.Close()
+	go func() {
+		var held []net.Conn
+		for {
+			c, err := hole.Accept()
+			if err != nil {
+				for _, c := range held {
+					c.Close()
+				}
+				return
+			}
+			held = append(held, c)
+		}
+	}()
+	deadPort := netip.MustParseAddrPort(hole.Addr().String())
 	ra := hop(types.RoleEntry, 0, true)
 	ra.NextHop = &types.NextHop{MemberSchedule: types.SchedulePrimaryBackup, Dial: types.DialForward,
 		Members: []types.Member{{NodeID: nodeD, Weight: 1, Priority: 0}, {NodeID: nodeC, Weight: 1, Priority: 1}}}
 	l := tcpL(ruleT)
 	a.apply(t, &types.RuntimeConfig{Version: 1, Listeners: []types.Listener{l}, Rules: []types.Rule{ra}, TargetPolicy: pol,
 		Peers: []types.Peer{{NodeID: nodeD, Address: "127.0.0.1", LinkPort: deadPort.Port(), Outbound: true}, c.peer(true)}})
+	deadline := time.Now().Add(3 * time.Second) // 备用成员的预热链路就绪；D 的建链仍在等待握手超时
+	for a.rt.PeerStats(nodeC).Mux == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
 	if _, tag := dial(t, a.rt.ListenerAddr(l)); tag != 'T' {
-		t.Fatal("did not fail over to the backup member (ENG-022)")
+		t.Fatalf("did not fail over to the backup member (ENG-022); events %+v", a.ag.Events(0))
 	}
 	// 下一组只剩不可达成员：拒绝新会话，不跳过下一组
 	ra.NextHop = &types.NextHop{MemberSchedule: types.ScheduleWeightedRoundRobin, Dial: types.DialForward,
@@ -661,6 +683,10 @@ func TestReverseServedDigestMismatchFlaggedButConnects(t *testing.T) {
 
 func TestReverseReconnectsAfterLinkLoss(t *testing.T) {
 	tp, cfgC := reverseTopo(t, []types.UUID{ruleT})
+	deadline := time.Now().Add(3 * time.Second) // 出口异步建立反向链路
+	for tp.b.rt.NumPeerLinks(nodeC) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
 	if _, tag := dial(t, tp.entry); tag != 'T' {
 		t.Fatal("initial session")
 	}
@@ -668,7 +694,7 @@ func TestReverseReconnectsAfterLinkLoss(t *testing.T) {
 	cfgB := *tp.b.cfg
 	cfgB.Version, cfgB.Peers = 2, []types.Peer{tp.a.peer(false)}
 	tp.b.apply(t, &cfgB)
-	deadline := time.Now().Add(2 * time.Second)
+	deadline = time.Now().Add(2 * time.Second)
 	for tp.b.rt.NumPeerLinks(nodeC) != 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
