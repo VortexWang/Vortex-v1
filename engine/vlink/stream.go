@@ -1,6 +1,7 @@
 package vlink
 
 import (
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -30,6 +31,11 @@ type Stream struct {
 	recvWin   uint32 // 当前接收窗口（自适应增长）
 	recvUnack int64
 	lastGrant time.Time
+	// UDP 会话（OPEN 的网络类型为 udp）的入站数据报
+	dq       [][]byte
+	dqPool   []*[]byte
+	dhandler func([]byte)
+	onClose  []func()
 	// 发送
 	sendWin  int64
 	wwake    broadcaster
@@ -119,7 +125,12 @@ func (s *Stream) terminate(err error, local bool) {
 	s.dropBuf()
 	s.rwake.broadcast()
 	s.wwake.broadcast()
+	cbs := s.onClose
+	s.onClose = nil
 	s.mu.Unlock()
+	for _, f := range cbs {
+		f()
+	}
 	s.l.consumed(unread)
 	s.l.remove(s)
 }
@@ -129,6 +140,10 @@ func (s *Stream) dropBuf() {
 		framePool.Put(p)
 	}
 	s.rbuf, s.rpool, s.roff, s.rlen = nil, nil, 0, 0
+	for _, p := range s.dqPool {
+		framePool.Put(p)
+	}
+	s.dq, s.dqPool = nil, nil
 }
 
 // finishedLocked：两个方向都已结束，可以从链路摘除。
@@ -432,4 +447,139 @@ func (s *Stream) Err() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.err
+}
+
+// ---------------------------------------------------------------- UDP 会话（ENG-041、ENG-047、ENG-048）
+
+var (
+	ErrDgramTooLarge = errors.New("vlink: datagram exceeds single frame payload")
+	ErrDgramDropped  = errors.New("vlink: datagram dropped (link send queue full)")
+)
+
+// onDgram 在链路读 goroutine 中调用。设置了处理函数时直接交给它（p 只在调用期间有效）；
+// 否则排队（例如开流检查尚未完成时的 0-RTT 数据报），队列满时丢弃。
+func (s *Stream) onDgram(p []byte) {
+	s.mu.Lock()
+	if s.err != nil {
+		s.mu.Unlock()
+		s.l.dstats.DropUnknown.Add(1)
+		return
+	}
+	if h := s.dhandler; h != nil {
+		s.mu.Unlock()
+		h(p)
+		return
+	}
+	if len(s.dq) >= s.l.opt.DgramRecvQueue {
+		s.mu.Unlock()
+		s.l.dstats.DropRecvQueue.Add(1)
+		return
+	}
+	bp := framePool.Get().(*[]byte)
+	*bp = append((*bp)[:0], p...)
+	s.dq = append(s.dq, *bp)
+	s.dqPool = append(s.dqPool, bp)
+	s.rwake.broadcast()
+	s.mu.Unlock()
+}
+
+// OnDgram 改为回调方式接收：先按顺序交付已排队的数据报，之后在链路读 goroutine 中直接调用 h。
+// h 不得阻塞（会阻塞整条链路的读取）；p 只在调用期间有效。
+func (s *Stream) OnDgram(h func(p []byte)) {
+	for {
+		s.mu.Lock()
+		q, qp := s.dq, s.dqPool
+		s.dq, s.dqPool = nil, nil
+		if len(q) == 0 {
+			if s.err == nil {
+				s.dhandler = h
+			}
+			s.mu.Unlock()
+			return
+		}
+		s.mu.Unlock()
+		for i, p := range q {
+			h(p)
+			framePool.Put(qp[i])
+		}
+	}
+}
+
+// ReadDgram 读取一个数据报（阻塞，受读截止时间约束）；数据报大于 b 时截断。
+func (s *Stream) ReadDgram(b []byte) (int, error) {
+	for {
+		s.mu.Lock()
+		if len(s.dq) > 0 {
+			n := copy(b, s.dq[0])
+			framePool.Put(s.dqPool[0])
+			s.dq[0], s.dqPool[0] = nil, nil
+			s.dq, s.dqPool = s.dq[1:], s.dqPool[1:]
+			s.mu.Unlock()
+			return n, nil
+		}
+		if s.err != nil {
+			err := s.err
+			s.mu.Unlock()
+			return 0, err
+		}
+		if !s.rdl.IsZero() && !time.Now().Before(s.rdl) {
+			s.mu.Unlock()
+			return 0, errDeadline
+		}
+		w, dl := s.rwake.wait(), s.rdlWake
+		s.mu.Unlock()
+		select {
+		case <-w:
+		case <-dl:
+		}
+	}
+}
+
+// SendDgram 发送一个完整数据报。不受流控窗口约束，不阻塞；超过单帧上限或链路发送队列满时丢弃并计数。
+func (s *Stream) SendDgram(p []byte) error {
+	if len(p) > MaxPayload {
+		s.l.dstats.DropOversize.Add(1)
+		return ErrDgramTooLarge
+	}
+	s.mu.Lock()
+	err := s.err
+	s.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	bp := framePool.Get().(*[]byte)
+	*bp = AppendFrame((*bp)[:0], TypeDgram, s.id, p)
+	if !s.l.enqueueDgram(wframe{b: *bp, pool: bp}) {
+		if e := s.l.Err(); e != nil {
+			return e
+		}
+		return ErrDgramDropped
+	}
+	s.l.dstats.Sent.Add(1)
+	return nil
+}
+
+// DgramConn 把 UDP 会话流包装成与已连接 UDP socket 相同的接口（Read / Write 一次一个数据报）。
+type DgramConn struct{ S *Stream }
+
+func (c DgramConn) Read(b []byte) (int, error) { return c.S.ReadDgram(b) }
+func (c DgramConn) Write(b []byte) (int, error) {
+	if err := c.S.SendDgram(b); err != nil {
+		return 0, err
+	}
+	return len(b), nil
+}
+func (c DgramConn) SetReadDeadline(t time.Time) error { return c.S.SetReadDeadline(t) }
+func (c DgramConn) Close() error                      { return c.S.Close() }
+
+// OnClose 登记流终止时调用的函数（流已终止时立即调用）。
+func (s *Stream) OnClose(f func()) {
+	s.mu.Lock()
+	if s.err != nil {
+		s.mu.Unlock()
+		f()
+		return
+	}
+	s.onClose = append(s.onClose, f)
+	s.mu.Unlock()
 }

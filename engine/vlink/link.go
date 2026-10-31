@@ -11,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"vortex/engine/types"
 )
 
 // 流复用与流控（C1 第 2、3、5～9 节；ENG-014～ENG-016）。
@@ -64,6 +66,8 @@ type LinkOptions struct {
 	AcceptBacklog   int           // 等待 Accept 的入站流上限，默认 1024；超出回 OPEN_ERR(no_route)
 	MaxStreamID     uint32        // 测试用；默认 2^32 − 1
 	RTT             time.Duration // 初始 RTT 估计（用于接收窗口自适应），默认 50 ms，建链后由 PING 实测替换
+	DgramQueue      int           // DGRAM 发送队列字节上限，默认 1 MiB（ENG-048）
+	DgramRecvQueue  int           // 每会话待处理的入站数据报上限，默认 512
 }
 
 func (o *LinkOptions) fill() {
@@ -85,6 +89,12 @@ func (o *LinkOptions) fill() {
 	if o.RTT == 0 {
 		o.RTT = 50 * time.Millisecond
 	}
+	if o.DgramQueue == 0 {
+		o.DgramQueue = 1 << 20
+	}
+	if o.DgramRecvQueue == 0 {
+		o.DgramRecvQueue = 512
+	}
 }
 
 // broadcaster 是可广播的唤醒点：等待者取当前通道，广播时关闭并替换。
@@ -103,6 +113,19 @@ func (b *broadcaster) broadcast() {
 		b.ch = nil
 	}
 }
+
+// DgramStats 是 DGRAM 丢弃计数（指标 vortex_engine_dgram_dropped_total{reason}）。
+type DgramStats struct {
+	Sent, Received  atomic.Uint64
+	DropUnknown     atomic.Uint64 // 未开流或已关闭会话的 DGRAM（ENG-047）
+	DropOversize    atomic.Uint64 // 超过单帧上限（ENG-048）
+	DropSendQueue   atomic.Uint64 // 链路发送队列满
+	DropRecvQueue   atomic.Uint64 // 会话入站队列满（处理跟不上）
+	DropNotDatagram atomic.Uint64 // 发到 TCP 流上的 DGRAM
+}
+
+// Dgrams 返回本链路的 DGRAM 计数。
+func (l *Link) Dgrams() *DgramStats { return &l.dstats }
 
 type wframe struct {
 	b    []byte
@@ -136,14 +159,18 @@ type Link struct {
 
 	acceptCh chan *Stream
 
-	wmu   sync.Mutex
-	ctrl  []wframe
-	data  []wframe
-	wsig  chan struct{}
-	wbusy bool
+	wmu        sync.Mutex
+	ctrl       []wframe
+	data       []wframe
+	dgram      []wframe
+	dgramBytes int
+	wsig       chan struct{}
+	wbusy      bool
 
 	pmu   sync.Mutex
 	pings map[[8]byte]chan struct{}
+
+	dstats DgramStats
 
 	rtt      atomic.Int64 // 纳秒
 	lastRecv atomic.Int64 // 最近一次收到帧（单调时钟，纳秒）
@@ -230,12 +257,66 @@ func (l *Link) enqueue(ctrl bool, f wframe) {
 	}
 }
 
+// enqueueDgram 把 DGRAM 放入独立队列；队列满时丢弃（ENG-048）。
+func (l *Link) enqueueDgram(f wframe) bool {
+	l.wmu.Lock()
+	select {
+	case <-l.done:
+		l.wmu.Unlock()
+		framePool.Put(f.pool)
+		return false
+	default:
+	}
+	if l.dgramBytes+len(f.b) > l.opt.DgramQueue {
+		l.wmu.Unlock()
+		framePool.Put(f.pool)
+		l.dstats.DropSendQueue.Add(1)
+		return false
+	}
+	l.dgram = append(l.dgram, f)
+	l.dgramBytes += len(f.b)
+	l.wmu.Unlock()
+	select {
+	case l.wsig <- struct{}{}:
+	default:
+	}
+	return true
+}
+
 // sendCtrl 发送控制帧。控制帧可以越过排队的 DATA；FIN 必须在本流 DATA 之后，因此走数据队列。
 func (l *Link) sendCtrl(t FrameType, sid uint32, payload []byte) {
 	l.enqueue(true, wframe{b: AppendFrame(make([]byte, 0, HeaderLen+len(payload)), t, sid, payload)})
 }
 
 const writeBatch = 256 << 10
+
+// takeBatchLocked 取出下一批要写的帧：控制帧全部在前；DGRAM 优先于 DATA，但有 DATA 等待时
+// DGRAM 不超过本批剩余字节的一半（ENG-048），没有 DATA 时不受此限。
+func (l *Link) takeBatchLocked(batch []wframe) []wframe {
+	n := 0
+	i := 0
+	for ; i < len(l.ctrl) && n < writeBatch; i++ {
+		batch = append(batch, l.ctrl[i])
+		n += len(l.ctrl[i].b)
+	}
+	l.ctrl = append(l.ctrl[:0], l.ctrl[i:]...)
+	limit := writeBatch
+	if len(l.data) > 0 {
+		limit = n + (writeBatch-n)/2
+	}
+	for i = 0; i < len(l.dgram) && n < limit; i++ {
+		batch = append(batch, l.dgram[i])
+		n += len(l.dgram[i].b)
+		l.dgramBytes -= len(l.dgram[i].b)
+	}
+	l.dgram = append(l.dgram[:0], l.dgram[i:]...)
+	for i = 0; i < len(l.data) && n < writeBatch; i++ {
+		batch = append(batch, l.data[i])
+		n += len(l.data[i].b)
+	}
+	l.data = append(l.data[:0], l.data[i:]...)
+	return batch
+}
 
 // writeLoop 合并排队的帧，每批一次 TLS 写入（ENG-044 写合并）。控制帧先于数据帧。
 func (l *Link) writeLoop() {
@@ -250,22 +331,7 @@ func (l *Link) writeLoop() {
 		}
 		for {
 			l.wmu.Lock()
-			n := 0
-			batch = batch[:0]
-			take := func(q []wframe) []wframe {
-				i := 0
-				for ; i < len(q) && n < writeBatch; i++ {
-					batch = append(batch, q[i])
-					n += len(q[i].b)
-				}
-				rest := q[i:]
-				if len(rest) == 0 {
-					return q[:0]
-				}
-				return append(q[:0], rest...)
-			}
-			l.ctrl = take(l.ctrl)
-			l.data = take(l.data)
+			batch = l.takeBatchLocked(batch[:0])
 			l.wmu.Unlock()
 			if len(batch) == 0 {
 				break
@@ -484,7 +550,10 @@ func (l *Link) fail(err error, protocol bool) {
 				}
 			}
 		}
-		l.ctrl, l.data = nil, nil
+		for _, f := range l.dgram {
+			framePool.Put(f.pool)
+		}
+		l.ctrl, l.data, l.dgram, l.dgramBytes = nil, nil, nil, 0
 		l.wmu.Unlock()
 		_ = l.tc.Close()
 		l.mu.Lock()
@@ -587,7 +656,19 @@ func (l *Link) dispatch(h Header, p []byte) error {
 	case TypeOpen:
 		return l.onOpen(h.StreamID, p)
 	case TypeDgram:
-		return nil // ENG-T26 实现；在此之前丢弃（DGRAM 不消耗窗口）
+		l.mu.Lock()
+		s := l.streams[h.StreamID]
+		l.mu.Unlock()
+		switch {
+		case s == nil:
+			l.dstats.DropUnknown.Add(1)
+		case s.open == nil || s.open.Network != types.NetworkUDP:
+			l.dstats.DropNotDatagram.Add(1)
+		default:
+			l.dstats.Received.Add(1)
+			s.onDgram(p)
+		}
+		return nil
 	}
 
 	l.mu.Lock()

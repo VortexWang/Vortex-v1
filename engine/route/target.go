@@ -103,3 +103,42 @@ func (d *TargetDialer) Dial(ctx context.Context, r *types.Rule) (net.Conn, error
 	}
 	return nil, ErrNoRoute
 }
+
+// DialUDP 选目标并建立已连接 UDP socket（隧道出口，ENG-042）。UDP 没有握手，存活以探测结果为准，
+// 取第一个通过检查的地址。
+func (d *TargetDialer) DialUDP(ctx context.Context, r *types.Rule) (*net.UDPConn, error) {
+	sel := d.selector(r)
+	tried := map[string]bool{}
+	forbidden := 0
+	for len(tried) < sel.Len() {
+		i := sel.Pick(d.Healthy, func(k string) bool { return tried[k] })
+		if i < 0 {
+			break
+		}
+		cand := sel.At(i)
+		tried[cand.Key] = true
+		t := r.Targets[i]
+		aps, rejected, err := AllowedAddrs(ctx, d.Resolver, d.Guard(), t.Host, t.Port)
+		if errors.Is(err, ErrTargetForbidden) {
+			forbidden++
+			if d.Events != nil {
+				d.Events(types.Event{Kind: types.EventTargetRejected, RuleID: r.RuleID, TenantID: r.TenantID,
+					Detail: fmt.Sprintf("%s -> %s", cand.Key, rejected)})
+			}
+			continue
+		}
+		if err != nil || len(aps) == 0 {
+			continue
+		}
+		c, err := net.DialUDP("udp", nil, net.UDPAddrFromAddrPort(aps[0]))
+		if err == nil {
+			_ = c.SetReadBuffer(udpSockBuffer)
+			_ = c.SetWriteBuffer(udpSockBuffer)
+			return c, nil
+		}
+	}
+	if forbidden > 0 && forbidden == len(tried) {
+		return nil, ErrTargetForbidden
+	}
+	return nil, ErrNoRoute
+}

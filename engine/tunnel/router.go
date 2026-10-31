@@ -78,6 +78,23 @@ func (r *Router) Forget(keep func(types.UUID) bool) {
 // Open 在下一组中选择成员并开流（ENG-021、ENG-022）：排除已经过的节点与本节点，依次尝试；
 // 下一组没有可用成员时返回 route.ErrNoRoute。visited 不含本节点，由这里追加。
 func (r *Router) Open(ctx context.Context, rule *types.Rule, client netip.AddrPort, visited []types.UUID) (net.Conn, error) {
+	pc, err := r.open(ctx, rule, client, visited, types.NetworkTCP)
+	if err != nil {
+		return nil, err
+	}
+	return pc, nil
+}
+
+// OpenUDP 为 UDP 会话开流（ENG-047：首个 DGRAM 之前发送网络类型为 udp 的 OPEN）。
+func (r *Router) OpenUDP(ctx context.Context, rule *types.Rule, client netip.AddrPort, visited []types.UUID) (route.DatagramConn, error) {
+	pc, err := r.open(ctx, rule, client, visited, types.NetworkUDP)
+	if err != nil {
+		return nil, err
+	}
+	return udpPath{pc}, nil
+}
+
+func (r *Router) open(ctx context.Context, rule *types.Rule, client netip.AddrPort, visited []types.UUID, network types.Network) (*pathConn, error) {
 	if rule.HopIndex >= 255 {
 		return nil, route.ErrNoRoute
 	}
@@ -96,7 +113,7 @@ func (r *Router) Open(ctx context.Context, rule *types.Rule, client netip.AddrPo
 	}
 	healthy := func(k string) bool { return r.Peers.Healthy(types.UUID([]byte(k))) }
 	o := &vlink.Open{RuleID: rule.RuleID, RuleVersion: rule.RuleVersion, PathGeneration: rule.PathGeneration,
-		HopIndex: uint8(rule.HopIndex + 1), Network: types.NetworkTCP, Visited: path, Client: client}
+		HopIndex: uint8(rule.HopIndex + 1), Network: network, Visited: path, Client: client}
 	for {
 		i := ms.sel.Pick(healthy, excluded)
 		if i < 0 {
@@ -115,6 +132,17 @@ func (r *Router) Open(ctx context.Context, rule *types.Rule, client netip.AddrPo
 			}
 		}
 	}
+}
+
+// udpPath 以数据报方式使用出站 UDP 会话流。
+type udpPath struct{ *pathConn }
+
+func (u udpPath) Read(b []byte) (int, error) { return u.Stream.ReadDgram(b) }
+func (u udpPath) Write(b []byte) (int, error) {
+	if err := u.Stream.SendDgram(b); err != nil {
+		return 0, err
+	}
+	return len(b), nil
 }
 
 // pathConn 是出站流；入口在关闭时把下游回传的原因码记为事件（ENG-015：按段指出原因）。
@@ -139,9 +167,14 @@ func (c *pathConn) Close() error {
 }
 
 // remoteError 返回下游流被对端终止的原因。
-func remoteError(c net.Conn) *vlink.StreamError {
-	pc, ok := c.(*pathConn)
-	if !ok {
+func remoteError(c any) *vlink.StreamError {
+	var pc *pathConn
+	switch x := c.(type) {
+	case *pathConn:
+		pc = x
+	case udpPath:
+		pc = x.pathConn
+	default:
 		return nil
 	}
 	var se *vlink.StreamError
@@ -181,7 +214,7 @@ func (r *Router) check(rule *types.Rule, peer types.UUID, o *vlink.Open) (vlink.
 		return vlink.CodeUnauthorized, fmt.Sprintf("hop_index %d, local %d", o.HopIndex, rule.HopIndex)
 	case slices.Contains(o.Visited, r.Self):
 		return vlink.CodeUnauthorized, "loop: this node already visited"
-	case o.Network != types.NetworkTCP || !slices.Contains(rule.Networks, o.Network):
+	case !slices.Contains(rule.Networks, o.Network):
 		return vlink.CodeUnauthorized, "network not enabled"
 	}
 	return 0, ""
@@ -212,6 +245,10 @@ func (r *Router) HandleInbound(ctx context.Context, sess *lifecycle.Scope, l *vl
 	}
 	defer release()
 	s.Accept()
+	if o.Network == types.NetworkUDP {
+		r.handleUDP(ctx, sess, rule, s, hook)
+		return
+	}
 
 	var down net.Conn
 	if rule.NextHop != nil {

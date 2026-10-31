@@ -317,7 +317,7 @@ func tightened(old, cur *types.Rule) bool {
 // ruleEqual 比较规则内容（%#v 会打印指针地址，NextHop 等指针字段必须按值比较）。
 func ruleEqual(a, b *types.Rule) bool { return reflect.DeepEqual(*a, *b) }
 
-// unsupported 返回当前实现还不支持的规则形态（M1 进行中：UDP 隧道 ENG-T26、反向建链 ENG-T28）。
+// unsupported 返回当前实现还不支持的规则形态（M1 进行中：反向建链 ENG-T28）。
 func (rt *Runtime) unsupported(r *types.Rule) string {
 	tunnelled := r.NextHop != nil || r.Role != types.RoleEntry
 	switch {
@@ -325,8 +325,6 @@ func (rt *Runtime) unsupported(r *types.Rule) string {
 		return "tunnel forwarding is not enabled on this engine (no node identity)"
 	case r.NextHop != nil && r.NextHop.Dial == types.DialReverse:
 		return "reverse dialing is not implemented yet"
-	case tunnelled && slices.Contains(r.Networks, types.NetworkUDP):
-		return "udp over tunnel is not implemented yet"
 	}
 	return ""
 }
@@ -570,6 +568,11 @@ func (rt *Runtime) start(k listenerKey, r *route.Reserved, cfg *types.RuntimeCon
 	}
 	a.udp = &route.UDPEntry{RuleID: rule, Tables: &rt.tables, Conn: conn, Scope: a.scope, Admission: &rt.adm,
 		Resolver: rt.resolver, GuardRef: &rt.guard, Healthy: rt.opt.Healthy, Events: rt.emit}
+	if rt.router != nil {
+		a.udp.NextHop = func(ctx context.Context, r *types.Rule, client netip.AddrPort) (route.DatagramConn, error) {
+			return rt.router.OpenUDP(ctx, r, client, nil)
+		}
+	}
 	if err := a.udp.Start(); err != nil {
 		_ = r.ReleaseUDP(conn)
 		a.scope.Shutdown()

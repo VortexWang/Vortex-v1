@@ -400,3 +400,125 @@ func TestNextHopExcludesVisitedNodes(t *testing.T) {
 		}
 	}
 }
+
+// threeHopUDP 与 threeHop 相同，但规则为 UDP，目标为回显服务。
+func threeHopUDP(t *testing.T, exitIdle time.Duration, exitPolicy types.TargetPolicy) (*topo, netip.AddrPort) {
+	pki := enginetest.NewPKI()
+	a, b, c := newNode(t, pki, nodeA), newNode(t, pki, nodeB), newNode(t, pki, nodeC)
+	echo := udpEcho(t)
+	udp := []types.Network{types.NetworkUDP}
+	ra := hop(types.RoleEntry, 0, true)
+	ra.Networks, ra.NextHop = udp, members(b)
+	rb := hop(types.RoleRelay, 1, false, a)
+	rb.Networks, rb.NextHop = udp, members(c)
+	rc := hop(types.RoleExit, 2, false, b)
+	rc.Networks, rc.UDPIdle = udp, exitIdle
+	rc.Targets = []types.Target{{Host: echo.Addr().String(), Port: echo.Port(), Weight: 1}}
+	l := types.Listener{Bind: anyLocal, Network: types.NetworkUDP, RuleID: ruleT}
+	pol := types.TargetPolicy{SelfHostedNode: true}
+	c.apply(t, &types.RuntimeConfig{Version: 1, Rules: []types.Rule{rc}, Peers: []types.Peer{b.peer(false)}, TargetPolicy: exitPolicy})
+	b.apply(t, &types.RuntimeConfig{Version: 1, Rules: []types.Rule{rb}, Peers: []types.Peer{a.peer(false), c.peer(true)}, TargetPolicy: pol})
+	a.apply(t, &types.RuntimeConfig{Version: 1, Listeners: []types.Listener{l}, Rules: []types.Rule{ra}, Peers: []types.Peer{b.peer(true)}, TargetPolicy: pol})
+	return &topo{pki: pki, a: a, b: b, c: c}, a.rt.ListenerAddr(l)
+}
+
+func udpRoundTrips(t *testing.T, addr netip.AddrPort, n int) int {
+	t.Helper()
+	c, err := net.Dial("udp", addr.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	buf := make([]byte, 2000)
+	ok := 0
+	for i := 0; i < n; i++ {
+		p := bytes.Repeat([]byte{byte(i)}, 1200)
+		_, _ = c.Write(p)
+		_ = c.SetReadDeadline(time.Now().Add(time.Second))
+		m, err := c.Read(buf)
+		if err == nil && bytes.Equal(buf[:m], p) {
+			ok++
+		}
+	}
+	return ok
+}
+
+func TestUDPThreeHopTunnel(t *testing.T) {
+	tp, addr := threeHopUDP(t, 0, types.TargetPolicy{SelfHostedNode: true})
+	if ok := udpRoundTrips(t, addr, 200); ok != 200 {
+		t.Fatalf("%d of 200 datagrams echoed through 3 hops", ok)
+	}
+	for _, n := range []*node{tp.a, tp.b, tp.c} { // 每一跳整包计量
+		if up := waitUsage(n, types.DirUp, 200*1200); up != 200*1200 {
+			t.Errorf("node %x metered up %d", n.id[0], up)
+		}
+		if down := waitUsage(n, types.DirDown, 200*1200); down != 200*1200 {
+			t.Errorf("node %x metered down %d", n.id[0], down)
+		}
+	}
+}
+
+func TestUDPTunnelIdleAndReopen(t *testing.T) {
+	_, addr := threeHopUDP(t, 300*time.Millisecond, types.TargetPolicy{SelfHostedNode: true})
+	c, _ := net.Dial("udp", addr.String())
+	defer c.Close()
+	buf := make([]byte, 2000)
+	echo := func() bool {
+		_, _ = c.Write([]byte("ping"))
+		_ = c.SetReadDeadline(time.Now().Add(time.Second))
+		n, err := c.Read(buf)
+		return err == nil && string(buf[:n]) == "ping"
+	}
+	if !echo() {
+		t.Fatal("first datagram")
+	}
+	// 出口空闲 300 ms 后回收会话并 RST 回传；入口会话随之结束，下一个数据报重新开流
+	time.Sleep(900 * time.Millisecond)
+	ok := false
+	for i := 0; i < 3 && !ok; i++ {
+		ok = echo()
+	}
+	if !ok {
+		t.Fatal("session not re-established after exit idle timeout")
+	}
+}
+
+func TestUDPTunnelTargetForbiddenReason(t *testing.T) {
+	tp, addr := threeHopUDP(t, 0, types.TargetPolicy{}) // 平台出口：回环目标被 SEC-011 拒绝
+	if ok := udpRoundTrips(t, addr, 1); ok != 0 {
+		t.Fatal("forbidden target reached")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, ev := range tp.a.ag.Events(types.EventOpenRejected) {
+			if strings.Contains(ev.Detail, "target_unreachable") {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("entry events %+v", tp.a.ag.Events(types.EventOpenRejected))
+}
+
+func TestUDPOpenChecks(t *testing.T) {
+	tp, _ := threeHopUDP(t, 0, types.TargetPolicy{SelfHostedNode: true})
+	d := attacker(t, tp, nodeD, tp.c)
+	o := &vlink.Open{RuleID: ruleT, RuleVersion: 3, PathGeneration: 2, HopIndex: 2, Network: types.NetworkUDP,
+		Visited: []types.UUID{nodeA, nodeB}, Client: netip.MustParseAddrPort("198.51.100.1:5000")}
+	if code := openErr(t, d, o); code != vlink.CodeUnauthorized {
+		t.Fatalf("udp open from unknown node: %v", code)
+	}
+	b := attacker(t, tp, nodeB, tp.c)
+	tcp := *o
+	tcp.Network = types.NetworkTCP // 规则只启用了 UDP
+	if code := openErr(t, b, &tcp); code != vlink.CodeUnauthorized {
+		t.Fatalf("tcp open on udp-only rule: %v", code)
+	}
+	s, _ := b.Open(o)
+	_ = s.SendDgram([]byte("hi"))
+	_ = s.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 100)
+	if n, err := s.ReadDgram(buf); err != nil || string(buf[:n]) != "hi" {
+		t.Fatalf("valid udp open: %q %v", buf[:n], err)
+	}
+}

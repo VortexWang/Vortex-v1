@@ -36,9 +36,17 @@ type UDPStats struct {
 	Forwarded       atomic.Int64
 }
 
+// DatagramConn 是 UDP 会话的上游：直接转发时为到目标的已连接 UDP socket，隧道时为 UDP 会话流。
+type DatagramConn interface {
+	Read(b []byte) (int, error)
+	Write(b []byte) (int, error)
+	SetReadDeadline(t time.Time) error
+	Close() error
+}
+
 type udpSession struct {
 	client  netip.AddrPort
-	target  *net.UDPConn
+	target  DatagramConn
 	hook    pipe.Hook
 	release func()
 	scope   *lifecycle.Scope
@@ -65,6 +73,8 @@ type UDPEntry struct {
 	Events      func(types.Event)
 	MaxSessions int // 0 = 默认 100,000；超出时新会话的数据报被丢弃
 	GuardRef    *atomic.Pointer[Guard]
+	// NextHop 为下一跳规则打开 UDP 会话流；nil 表示只支持直接转发
+	NextHop func(ctx context.Context, rule *types.Rule, client netip.AddrPort) (DatagramConn, error)
 
 	ruleRef atomic.Pointer[types.UUID]
 
@@ -205,16 +215,29 @@ func (e *UDPEntry) session(ctx context.Context, client, local netip.AddrPort) *u
 	if err != nil {
 		return nil
 	}
-	target, err := e.dial(ctx, rule)
+	var target DatagramConn
+	if rule.NextHop != nil {
+		if e.NextHop == nil {
+			release()
+			return nil
+		}
+		target, err = e.NextHop(ctx, rule, client)
+	} else {
+		var uc *net.UDPConn
+		uc, err = e.dial(ctx, rule)
+		if err == nil {
+			_ = uc.SetReadBuffer(udpSockBuffer)
+			target = uc
+		}
+	}
 	if err != nil {
 		release()
 		return nil
 	}
 	var header []byte
-	if rule.ProxyProtocol == types.ProxyV2 {
+	if rule.NextHop == nil && rule.ProxyProtocol == types.ProxyV2 { // 隧道由出口添加
 		header, _ = ProxyHeader(types.ProxyV2, true, client, local)
 	}
-	_ = target.SetReadBuffer(udpSockBuffer)
 	scope := e.Scope.Child()
 	s := &udpSession{client: client, target: target, hook: hook, release: release, scope: scope, header: header}
 	s.last.Store(e.mono())
@@ -256,8 +279,9 @@ func (e *UDPEntry) returnLoop(ctx context.Context, s *udpSession, idle time.Dura
 		_ = s.target.SetReadDeadline(time.Now().Add(idle))
 		n, err := s.target.Read(buf)
 		if err != nil {
-			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
-				return
+			var ne net.Error
+			if ctx.Err() != nil || !errors.As(err, &ne) || !ne.Timeout() {
+				return // 关闭、或上游（例如隧道流被对端 RST）已结束
 			}
 			// 截止时间到：若上行最近仍有数据，则会话仍活跃，续期
 			if time.Duration(e.mono()-s.last.Load()) < idle {
