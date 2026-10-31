@@ -131,6 +131,11 @@ func TestSpliceActuallyUsed(t *testing.T) {
 	if n != int64(len(data)) {
 		t.Fatalf("got %d", n)
 	}
+	// 计数在每次 splice 写出之后才累加：目标收完数据时最后一批可能还没计入，等待计数到位
+	deadline := time.Now().Add(2 * time.Second)
+	for SplicedBytes()-before < int64(len(data)) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
 	if SplicedBytes()-before < int64(len(data)) {
 		t.Fatalf("splice path not used: %d bytes spliced", SplicedBytes()-before)
 	}
