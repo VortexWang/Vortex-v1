@@ -1,6 +1,6 @@
 # M0 进度（引擎数据面）
 
-> 更新：2026-10-31 · 对应开发方案 01（转发引擎）与 06（测试与交付）
+> 更新：2026-10-31（第二批）· 对应开发方案 01（转发引擎）与 06（测试与交付）
 
 ## 已完成
 
@@ -12,6 +12,28 @@
 | ENG-T03 | 缓冲路径双向拷贝、半关闭、空闲超时 | 见下表 |
 | ENG-T04 | splice 零拷贝路径与拷贝点钩子 | 见下表 |
 | ENG-T05 | 分级缓冲池（16 / 64 / 256 KiB 自适应） | 稳态 0 次分配 |
+
+| ENG-T06 | 监听预留：TCP 只 bind 不 listen、UDP bind 不读并在提交时丢弃积压；进程内端口登记表 | 见“路由”表 |
+| ENG-T07 | 规则表不可变快照、单调版本、原子切换 | 并发读写 2,000 次切换无撕裂读 |
+| ENG-T08 | 平滑加权轮询、主备（同优先级分摊）、健康过滤、排除已经过节点 | 见“路由”表 |
+| ENG-T09 | 直接转发 TCP 端到端：接入、准入钩子、选目标与故障切换、计量钩子、会话生命周期 | 见“路由”表 |
+| ENG-T12 | 目标地址检查（SEC-011）：内置禁止类别、私有网段按组放开、自托管例外、本机端口 | 19 个用例 |
+| ENG-T41 | 目标域名解析：缓存 30 秒（≤ 60 秒）、每个解析结果逐一检查、按检查过的 IP 连接 | 含 DNS 重绑定用例 |
+
+## 路由（engine/route）测试
+
+| 测试 | 覆盖 |
+| --- | --- |
+| TestReserveTCPRefusesUntilCommit | 准备阶段端口已占用但拒绝连接；提交后可连接（ENG-031、ENG-032） |
+| TestReserveWildcardConflict / TestKernelConflictWithForeignListener | 通配与具体地址冲突、TCP 与 UDP 同号独立（PRT-002、PRT-006）；其他进程已监听的端口被拒 |
+| TestAbortReleasesPort / TestClosedListenerReleasesPort | 中止与关闭后端口可重新预留（ENG-033） |
+| TestReserveUDPDropsBacklogOnCommit | 提交前积压的 5 个数据报被丢弃，之后的正常收到 |
+| TestWeightedRoundRobinDistribution / TestSmoothnessCheckRejectsNaiveWRR | 分布严格按权重；平滑性检查能区分朴素加权轮询 |
+| TestPrimaryBackupFailover / TestUnhealthyAndVisitedExcluded | 主备切换与恢复；无可用候选时返回 no_route，不跳过（RUL-006、ENG-022） |
+| TestGuardPolicy / TestResolverCachesAndGuardsEveryAddress | SEC-011 全部类别；缓存、DNS 重绑定、混合解析结果 |
+| TestDirect* | 回显、3:1 权重得到 300/100 个连接、主目标宕机切到备用、全部宕机快速关闭、跳过被禁目标并产生审计事件、准入拒绝时不连目标、计量字节准确、关闭后无泄漏且端口释放 |
+| TestRuleSwapKeepsExistingSessions | 规则移除后新会话被拒、已有会话继续（ENG-032） |
+| TestDirectShutdownLeakFree | 20 个活动会话时恰好 41 个 goroutine（每会话 2 个 + 接入循环 1 个，ENG-045），关闭后归零 |
 
 ## 管道（engine/pipe）测试
 
@@ -40,6 +62,12 @@
 
 | 问题 | 发现方式 | 修正 |
 | --- | --- | --- |
+| **Linux 上两个都设置 SO_REUSEADDR 且都未 listen 的 socket 可以 bind 到同一端口**：只 bind 不 listen 的预留实际上不排他，两阶段应用的端口保证失效 | 测试：第二次预留没有失败 | 进程内端口登记表判定本进程的冲突（规则同数据库）；保留 SO_REUSEADDR 以便重启后立即重新 bind；其他进程的冲突仍由内核在 bind 与 listen 时报告 |
+| UDP 提交前丢弃积压的循环一个数据报也没丢：Go 在截止时间已过时根本不尝试读取 | 测试 | 改为非阻塞 recvfrom 直到 EAGAIN |
+| 选择器按规则快照缓存，每次配置切换都会新增一份，长期运行内存无限增长 | 代码审查 | 只保留当前快照的选择器（目标只在会话开始时选择） |
+| 平滑性测试最初只检查“每 7 次恰好 5/1/1”，朴素加权轮询同样满足，测试不能区分 | 复查测试 | 改为“轻权重从不相邻、重权重连续不超过 4 次”，并用朴素序列证明检查会失败 |
+| goroutine 计数测试偶发失败（40 / 41） | 重复运行 10 次 | 会话的第二个 goroutine 在连上目标后才启动：改为等待到达预期值，并在等待中确认从未超出预算 |
+| “已有会话不受规则切换影响”的测试挡不住错误实现：故意改成会话周期性重查规则后关闭，测试仍通过 | 变异检查 | 切换后等待 100 ms 再使用已有会话，变异随即被发现 |
 | 子 Scope 先行关闭后从父 Scope 摘除，父 Scope 的 Wait 不再等待其仍在退出的 goroutine，`Close` 提前返回 | 泄漏断言失败 | goroutine 同时计入本 Scope 与全部祖先，Wait 任一 Scope 即覆盖整棵子树 |
 | `abortErr` 被两个方向并发读写 | 代码审查 | 改为原子访问 |
 | 对端停止读取时写入可能永久阻塞（另一方向已结束时无人检测空闲） | 代码审查 | 写入同样受空闲时长约束 |
@@ -48,4 +76,4 @@
 
 ## 下一步（M0 剩余）
 
-ENG-T02 模拟 Agent → ENG-T06～T08 监听与规则表、选路 → ENG-T09 直接转发 TCP 端到端 → ENG-T10 UDP → ENG-T12 目标地址检查与 ENG-T41 域名解析 → ENG-T13～T18 计量与门控 → ENG-T36 网络命名空间基准框架。M0 退出标准：NFR-001、NFR-005。
+ENG-T10 UDP 会话表与直接转发 UDP → ENG-T11 PROXY protocol → ENG-T13～T18 计量与门控（替换准入与计量桩）→ ENG-T02 模拟 Agent → ENG-T36 网络命名空间基准框架。M0 退出标准：NFR-001、NFR-005。
