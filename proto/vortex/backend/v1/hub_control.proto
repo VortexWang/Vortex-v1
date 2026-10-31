@@ -1,0 +1,284 @@
+// VORTEX Edge Hub ↔ 后端控制协议（契约 C2 · HubControl v1，已锁定）
+// 需求基线：《VORTEX 需求规格说明书 V1.7（已冻结）》第 9.2～9.3 节、HUB-001～HUB-018、MTR-004、MTR-006、MTR-013
+// 通道：Edge Hub 主动发起（HUB-005），mTLS；实例身份取自证书（hub_id）。
+// 额度单位：区域额度与结算一律为“计费字节”；授权内部额度为“原始字节”。换算规则见 GrantSettled 注释。
+syntax = "proto3";
+
+package vortex.backend.v1;
+
+import "google/protobuf/timestamp.proto";
+import "vortex/common/v1/common.proto";
+import "vortex/edgehub/v1/node_control.proto";
+import "vortex/runtime/v1/runtime.proto";
+
+option go_package = "vortex/proto/gen/go/vortex/backend/v1;backendv1";
+
+service HubControl {
+  // Edge Hub 实例引导：一次性引导令牌 + CSR 换取组件证书（HUB-T19）。允许无客户端证书调用。
+  rpc EnrollHub(EnrollHubRequest) returns (EnrollHubResponse);
+  // 代理节点注册与续签（AGT-001、AGT-012）：Edge Hub 把节点请求转给后端 CA。
+  rpc EnrollNode(EnrollNodeRequest) returns (vortex.edgehub.v1.EnrollResponse);
+  rpc RenewNodeCert(RenewNodeCertRequest) returns (vortex.edgehub.v1.RenewCertResponse);
+  // 控制主通道。
+  rpc Connect(stream HubUpMessage) returns (stream BackendMessage);
+}
+
+message EnrollHubRequest {
+  string bootstrap_token = 1;
+  bytes csr_der = 2;
+  string region = 3;
+  string hub_version = 4;
+}
+
+message EnrollHubResponse {
+  vortex.common.v1.Uuid hub_id = 1;
+  repeated bytes certificate_chain_der = 2;
+  repeated bytes ca_bundle_der = 3;
+}
+
+message EnrollNodeRequest {
+  vortex.edgehub.v1.EnrollRequest request = 1;
+  string observed_remote_address = 2;         // Edge Hub 看到的节点来源地址，辅助校验公网地址
+}
+
+message RenewNodeCertRequest {
+  vortex.common.v1.Uuid node_id = 1;          // 取自节点 mTLS 证书，由 Edge Hub 填写
+  bytes csr_der = 2;
+}
+
+// ------------------------------------------------------------------
+// Edge Hub → 后端
+// ------------------------------------------------------------------
+
+message HubUpMessage {
+  oneof body {
+    HubRegister register = 1;
+    NodeStatusBatch node_status = 2;                      // HUB-004
+    NodeApplyProgress apply_progress = 3;                 // RUL-010～013
+    LedgerEntries ledger = 4;                             // HUB-012、HUB-013
+    BudgetRequest budget_request = 5;                     // HUB-006
+    ForeignGrants foreign_grants = 6;                     // HUB-015 回收判定
+    NodeEventForward node_event = 7;                      // 审计与限制状态（LIM-008、ENG-023）
+    ProbeSummary probes = 8;                              // FE-006
+  }
+}
+
+// 每条 Connect 流的第一条消息。
+message HubRegister {
+  string region = 1;
+  string hub_version = 2;
+  vortex.common.v1.HubMode mode = 3;
+  uint64 ledger_last_seq = 4;                 // 本地账本最大序号
+  google.protobuf.Timestamp autonomy_started_at = 5;  // 自治中时填写（HUB-008 起算点）
+  repeated TenantBudgetVersion budget_versions = 6;   // 本地已应用的额度版本
+}
+
+message TenantBudgetVersion {
+  vortex.common.v1.Uuid tenant_id = 1;
+  uint64 budget_version = 2;
+}
+
+message NodeStatusBatch {
+  repeated NodeStatus nodes = 1;
+}
+
+message NodeStatus {
+  vortex.common.v1.Uuid node_id = 1;
+  vortex.common.v1.Uuid boot_id = 2;
+  bool connected = 3;
+  uint64 applied_config_version = 4;
+  string agent_version = 5;
+  google.protobuf.Timestamp last_seen_at = 6;
+  vortex.runtime.v1.RuntimeState state = 7;   // 可选，变化时携带
+}
+
+message NodeApplyProgress {
+  vortex.common.v1.Uuid node_id = 1;
+  oneof report {
+    vortex.edgehub.v1.PrepareReport prepare = 2;
+    vortex.edgehub.v1.ApplyReport apply = 3;
+  }
+}
+
+// 账本条目按 (hub_id, seq) 幂等应用；seq 在实例内从 1 起连续递增。
+message LedgerEntries {
+  repeated LedgerEntry entries = 1;
+}
+
+message LedgerEntry {
+  uint64 seq = 1;
+  google.protobuf.Timestamp recorded_at = 2;
+  oneof body {
+    GrantIssued grant_issued = 3;
+    GrantSettled grant_settled = 4;
+    NodeUsage node_usage = 5;
+    GrantTransferred grant_transferred = 6;   // LIM-010
+  }
+}
+
+message GrantIssued {
+  vortex.common.v1.Uuid grant_id = 1;
+  vortex.edgehub.v1.GrantKind kind = 2;
+  vortex.common.v1.Uuid tenant_id = 3;
+  vortex.common.v1.Uuid node_id = 4;
+  vortex.common.v1.Uuid boot_id = 5;
+  vortex.common.v1.Uuid rule_id = 6;
+  uint64 billing_version = 7;
+  uint64 path_coefficient_milli = 8;
+  uint64 raw_bytes = 9;                       // 计费授权额度（原始字节）
+  // 从区域额度预留的计费字节 = ceil(raw_bytes × path_coefficient_milli / 1000)。
+  uint64 reserved_billing_bytes = 10;
+}
+
+// 计费授权结算。
+// 换算规则（评审决定 H3）：settled_billing_bytes = ceil(used_raw_bytes × path_coefficient_milli / 1000)，
+// 每份授权只在 final 结算时换算一次。Edge Hub 用该值维护 settled_local_total，后端用同一数值下调
+// delegated 并累加 settled_acked_total，因此双方区域额度账目逐字节一致。
+// 租户余额的扣减由后端按 MTR-002 以定点数累计余量精确计算，可能比本值少不足 1 字节 / 份授权；
+// 由于 delegated 的下调不少于余额扣减，Σ delegated ≤ 租户余额 的不变量始终成立。
+message GrantSettled {
+  vortex.common.v1.Uuid grant_id = 1;
+  vortex.common.v1.Uuid tenant_id = 2;
+  uint64 used_raw_bytes = 3;
+  uint64 settled_billing_bytes = 4;
+  bool final = 5;                             // 只有 final 结算计入 settled_local_total
+}
+
+message NodeUsage {
+  vortex.common.v1.Uuid node_id = 1;
+  vortex.edgehub.v1.UsageBatch batch = 2;     // 幂等键 (node_id, boot_id, seq)，MTR-006
+}
+
+message GrantTransferred {
+  vortex.common.v1.Uuid node_id = 1;
+  vortex.common.v1.Uuid old_boot_id = 2;
+  vortex.common.v1.Uuid new_boot_id = 3;
+  repeated vortex.common.v1.Uuid revoked_grant_ids = 4;
+  repeated vortex.common.v1.Uuid new_grant_ids = 5;
+}
+
+message BudgetRequest {
+  vortex.common.v1.Uuid tenant_id = 1;
+  uint64 rate_billing_bps_1h = 2;             // 近 1 小时平均计费速率（HUB-006 额度计算）
+}
+
+message ForeignGrants {
+  vortex.common.v1.Uuid node_id = 1;
+  repeated vortex.edgehub.v1.HeldGrant grants = 2;
+}
+
+message NodeEventForward {
+  vortex.common.v1.Uuid node_id = 1;
+  vortex.runtime.v1.EngineEvent event = 2;
+}
+
+message ProbeSummary {
+  vortex.common.v1.Uuid node_id = 1;
+  vortex.edgehub.v1.ProbeReport report = 2;
+}
+
+// ------------------------------------------------------------------
+// 后端 → Edge Hub
+// ------------------------------------------------------------------
+
+message BackendMessage {
+  oneof body {
+    NodeDesiredConfig desired = 1;
+    NodeApplyCommand command = 2;
+    RestrictionSnapshot restrictions = 3;                 // HUB-009
+    vortex.runtime.v1.RevocationList revocations = 4;     // HUB-010：恢复后最先下发
+    BudgetUpdate budget = 5;                              // HUB-006、MTR-004、MTR-013
+    ShareLeaseUpdate leases = 6;                          // LIM-004、LIM-009
+    LedgerAck ledger_ack = 7;
+    BillingVersionSync billing_versions = 8;              // HUB-018
+    ReconcileDirective reconcile = 9;                     // HUB-013、HUB-017
+    NodeOperation node_operation = 10;                    // 排空、升级
+  }
+}
+
+message NodeDesiredConfig {
+  vortex.common.v1.Uuid node_id = 1;
+  vortex.runtime.v1.RuntimeConfig config = 2;
+}
+
+message NodeApplyCommand {
+  vortex.common.v1.Uuid node_id = 1;
+  vortex.edgehub.v1.ApplyCommand command = 2;
+}
+
+// 全量快照，按 snapshot_version 单调替换。
+message RestrictionSnapshot {
+  uint64 snapshot_version = 1;
+  repeated TenantRestriction tenants = 2;
+}
+
+message TenantRestriction {
+  vortex.common.v1.Uuid tenant_id = 1;
+  AccountStatus account_status = 2;           // TEN-007
+  google.protobuf.Timestamp plan_expires_at = 3;
+  bool traffic_exhausted = 4;
+  repeated vortex.common.v1.Uuid stopped_rule_ids = 5;  // 手动停止、超限等规则级限制
+}
+
+enum AccountStatus {
+  ACCOUNT_STATUS_UNSPECIFIED = 0;
+  ACCOUNT_STATUS_ACTIVE = 1;
+  ACCOUNT_STATUS_SUSPENDED = 2;
+  ACCOUNT_STATUS_BANNED = 3;
+}
+
+// 区域额度更新（C2 第 7 节）。Edge Hub 只应用 budget_version 更大的更新，并按以下顺序原子应用：
+// ① 记录 settled_acked_total；② settled_pending = settled_local_total − settled_acked_total；
+// ③ available = max(0, delegated − issued − settled_pending)。
+message BudgetUpdate {
+  vortex.common.v1.Uuid tenant_id = 1;
+  uint64 budget_version = 2;
+  uint64 delegated = 3;                       // 绝对值：尚未结算入账的委托（计费字节）
+  uint64 settled_acked_total = 4;             // 本实例已入账结算的累计值（计费字节）
+}
+
+message ShareLeaseUpdate {
+  vortex.common.v1.Uuid node_id = 1;
+  repeated vortex.runtime.v1.ShareLease leases = 2;
+}
+
+// 累计确认：seq ≤ acked_through_seq 的账本条目均已入账。
+message LedgerAck {
+  uint64 acked_through_seq = 1;
+}
+
+message BillingVersionSync {
+  repeated BillingVersion versions = 1;
+}
+
+message BillingVersion {
+  uint64 version = 1;
+  google.protobuf.Timestamp effective_at = 2;
+  repeated GroupMultiplier multipliers = 3;
+}
+
+message GroupMultiplier {
+  vortex.common.v1.Uuid node_group_id = 1;
+  uint64 multiplier_milli = 2;                // 平台组 > 0（NOD-014）
+}
+
+message ReconcileDirective {
+  ReconcilePhase phase = 1;
+  uint64 new_generation = 2;                  // 12.4 恢复流程提升代次时填写
+  // HUB-015 已回收额度的租户：对账完成前本实例不得为其签发（HUB-017）。
+  repeated vortex.common.v1.Uuid budget_revoked_tenant_ids = 3;
+}
+
+enum ReconcilePhase {
+  RECONCILE_PHASE_UNSPECIFIED = 0;
+  RECONCILE_PHASE_STARTED = 1;                // 已下发吊销与限制，开始接收账本
+  RECONCILE_PHASE_COMPLETED = 2;              // 可切回 online
+}
+
+message NodeOperation {
+  vortex.common.v1.Uuid node_id = 1;
+  oneof op {
+    vortex.edgehub.v1.DrainCommand drain = 2;
+    vortex.edgehub.v1.UpgradeCommand upgrade = 3;
+  }
+}

@@ -1,0 +1,8 @@
+# 生成物
+api/tests/vortex-api.d.ts
+*.test
+*.out
+__pycache__/
+# 本地环境
+.env
+*.local

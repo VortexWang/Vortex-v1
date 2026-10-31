@@ -1,0 +1,4407 @@
+openapi: 3.1.0
+info:
+  title: VORTEX 对外 API
+  version: 1.0.0
+  license:
+    name: Proprietary（闭源商业发布，ENGR-002）
+    identifier: LicenseRef-VORTEX-Proprietary
+  description: '契约 C4（v1，已锁定）。基线：《VORTEX 需求规格说明书 V1.7（已冻结）》。
+
+
+    约定：字段 snake_case；时间 RFC 3339 UTC；流量为整数字节；速率为 bit/s。写请求必须携带 X-CSRF-Token 头并校验 Origin。跨租户访问统一返回 404 RESOURCE_NOT_FOUND，不暴露存在性。控制面降级时写请求返回
+    503 CONTROL_DEGRADED（FE-012）。运行配置与 VLink 不通过本 API 暴露（GEN-007）。'
+servers:
+- url: /api/v1
+security:
+- sessionCookie: []
+tags:
+- name: auth
+  description: 登录、二步验证、退出
+- name: me
+  description: 用户端概览与实时事件
+- name: me-rules
+  description: 规则、路径编辑、变更预检、延迟
+- name: me-nodes
+  description: 自托管节点与个人组
+- name: me-billing
+  description: 套餐、流量包、兑换、用量
+- name: me-account
+  description: 通知、公告、个人设置与账号安全
+- name: admin
+  description: 管理员概览与实时事件
+- name: admin-users
+  description: 用户与跨租户规则查看
+- name: admin-fleet
+  description: 节点、节点组、段许可、Edge Hub
+- name: admin-billing
+  description: 计费版本、套餐、权益码、争议
+- name: admin-dns
+  description: DNS 服务商与解析记录
+- name: admin-ops
+  description: 公告、审计、系统设置
+paths:
+  /auth/login:
+    post:
+      operationId: login
+      summary: 登录
+      tags:
+      - auth
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '400': &id001
+          $ref: '#/components/responses/BadRequest'
+        '409': &id002
+          $ref: '#/components/responses/Conflict'
+        '422': &id003
+          $ref: '#/components/responses/Unprocessable'
+        '429': &id004
+          $ref: '#/components/responses/TooManyRequests'
+      security: []
+  /auth/totp/verify:
+    post:
+      operationId: verifyTotp
+      summary: 二步验证
+      tags:
+      - auth
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TotpVerifyRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '400': *id001
+        '401': &id005
+          $ref: '#/components/responses/Unauthorized'
+        '403': &id006
+          $ref: '#/components/responses/Forbidden'
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': &id007
+          $ref: '#/components/responses/ControlDegraded'
+      security:
+      - sessionCookie: []
+        csrfToken: []
+  /auth/logout:
+    post:
+      operationId: logout
+      summary: 退出
+      tags:
+      - auth
+      responses:
+        '204':
+          description: No Content
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+  /me/overview:
+    get:
+      operationId: getOverview
+      summary: 概览
+      tags:
+      - me
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Overview'
+        '400': *id001
+        '401': *id005
+        '429': *id004
+  /me/rules:
+    get:
+      operationId: listRules
+      summary: 规则列表（第一列名称、第二列入口地址）
+      tags:
+      - me-rules
+      parameters:
+      - name: q
+        in: query
+        required: false
+        schema:
+          type: string
+        description: 按名称搜索
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RulePage'
+        '400': *id001
+        '401': *id005
+        '429': *id004
+    post:
+      operationId: createRule
+      summary: 创建规则（两阶段应用异步进行）
+      tags:
+      - me-rules
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RuleInput'
+      responses:
+        '201':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Rule'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+  /me/rules/{rule_id}:
+    get:
+      operationId: getRule
+      summary: 规则详情（含五层状态与逐节点版本）
+      tags:
+      - me-rules
+      parameters:
+      - name: rule_id
+        in: path
+        required: true
+        schema: &id008
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuleDetail'
+          headers:
+            ETag:
+              schema:
+                type: string
+              description: = row_version
+        '400': *id001
+        '401': *id005
+        '404': &id009
+          $ref: '#/components/responses/NotFound'
+        '429': *id004
+    patch:
+      operationId: updateRule
+      summary: 修改规则
+      tags:
+      - me-rules
+      parameters:
+      - name: rule_id
+        in: path
+        required: true
+        schema: *id008
+      - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RulePatch'
+      responses:
+        '202':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Accepted'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '404': *id009
+        '409': *id002
+        '412': &id010
+          $ref: '#/components/responses/PreconditionFailed'
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+    delete:
+      operationId: deleteRule
+      summary: 删除规则（立即发起端口释放）
+      tags:
+      - me-rules
+      parameters:
+      - name: rule_id
+        in: path
+        required: true
+        schema: *id008
+      - $ref: '#/components/parameters/IfMatch'
+      responses:
+        '204':
+          description: No Content
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '404': *id009
+        '409': *id002
+        '412': *id010
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+      x-vortex-recent-totp: true
+      description: 敏感操作：要求最近 10 分钟内完成 TOTP 校验，否则返回 403 AUTH_TOTP_REQUIRED。
+  /me/rule-previews:
+    post:
+      operationId: previewRule
+      summary: 变更预检：影响分类、受影响会话数、路径系数
+      tags:
+      - me-rules
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RulePreviewRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RulePreview'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+  /me/rules/{rule_id}/enable:
+    post:
+      operationId: enableRule
+      summary: 启用
+      tags:
+      - me-rules
+      parameters:
+      - name: rule_id
+        in: path
+        required: true
+        schema: *id008
+      responses:
+        '202':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Accepted'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '404': *id009
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+  /me/rules/{rule_id}/disable:
+    post:
+      operationId: disableRule
+      summary: 停用（端口保留）
+      tags:
+      - me-rules
+      parameters:
+      - name: rule_id
+        in: path
+        required: true
+        schema: *id008
+      responses:
+        '202':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Accepted'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '404': *id009
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+  /me/rules/{rule_id}/release-port:
+    post:
+      operationId: releaseRulePort
+      summary: 主动释放端口（不可逆）
+      tags:
+      - me-rules
+      parameters:
+      - name: rule_id
+        in: path
+        required: true
+        schema: *id008
+      responses:
+        '202':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Accepted'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '404': *id009
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+      x-vortex-recent-totp: true
+      description: 敏感操作：要求最近 10 分钟内完成 TOTP 校验，否则返回 403 AUTH_TOTP_REQUIRED。
+  /me/rules/{rule_id}/latency:
+    get:
+      operationId: getRuleLatency
+      summary: 按段实测延迟
+      tags:
+      - me-rules
+      parameters:
+      - name: rule_id
+        in: path
+        required: true
+        schema: *id008
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuleLatency'
+        '400': *id001
+        '401': *id005
+        '404': *id009
+        '429': *id004
+  /me/path-options:
+    get:
+      operationId: getPathOptions
+      summary: 路径编辑器候选（有权限且有段许可）
+      tags:
+      - me-rules
+      parameters:
+      - name: entry_group_id
+        in: query
+        required: false
+        schema: *id008
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PathOptions'
+        '400': *id001
+        '401': *id005
+        '429': *id004
+  /me/nodes:
+    get:
+      operationId: listMyNodes
+      summary: 自托管节点
+      tags:
+      - me-nodes
+      parameters:
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodePage'
+        '400': *id001
+        '401': *id005
+        '429': *id004
+  /me/nodes/{node_id}:
+    delete:
+      operationId: deleteMyNode
+      summary: 删除自托管节点
+      tags:
+      - me-nodes
+      parameters:
+      - name: node_id
+        in: path
+        required: true
+        schema: *id008
+      responses:
+        '204':
+          description: No Content
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '404': *id009
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+      x-vortex-recent-totp: true
+      description: 敏感操作：要求最近 10 分钟内完成 TOTP 校验，否则返回 403 AUTH_TOTP_REQUIRED。
+  /me/enroll-tokens:
+    post:
+      operationId: createMyEnrollToken
+      summary: 生成注册令牌与安装命令
+      tags:
+      - me-nodes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EnrollTokenRequest'
+      responses:
+        '201':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnrollToken'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+  /me/node-groups:
+    get:
+      operationId: listMyNodeGroups
+      summary: 个人组
+      tags:
+      - me-nodes
+      parameters:
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodeGroupPage'
+        '400': *id001
+        '401': *id005
+        '429': *id004
+    post:
+      operationId: createMyNodeGroup
+      summary: 创建个人组
+      tags:
+      - me-nodes
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NodeGroupInput'
+      responses:
+        '201':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodeGroup'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+  /me/node-groups/{group_id}:
+    get:
+      operationId: getMyNodeGroup
+      summary: 个人组详情
+      tags:
+      - me-nodes
+      parameters:
+      - name: group_id
+        in: path
+        required: true
+        schema: *id008
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodeGroup'
+          headers:
+            ETag:
+              schema:
+                type: string
+              description: = row_version
+        '400': *id001
+        '401': *id005
+        '404': *id009
+        '429': *id004
+    patch:
+      operationId: updateMyNodeGroup
+      summary: 修改个人组
+      tags:
+      - me-nodes
+      parameters:
+      - name: group_id
+        in: path
+        required: true
+        schema: *id008
+      - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NodeGroupPatch'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodeGroup'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '404': *id009
+        '409': *id002
+        '412': *id010
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+    delete:
+      operationId: deleteMyNodeGroup
+      summary: 删除个人组
+      tags:
+      - me-nodes
+      parameters:
+      - name: group_id
+        in: path
+        required: true
+        schema: *id008
+      - $ref: '#/components/parameters/IfMatch'
+      responses:
+        '204':
+          description: No Content
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '404': *id009
+        '409': *id002
+        '412': *id010
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+  /me/node-groups/{group_id}/members/{node_id}:
+    put:
+      operationId: putMyGroupMember
+      summary: 加入或更新成员
+      tags:
+      - me-nodes
+      parameters:
+      - name: group_id
+        in: path
+        required: true
+        schema: *id008
+      - name: node_id
+        in: path
+        required: true
+        schema: *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MemberInput'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GroupMember'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '404': *id009
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+    delete:
+      operationId: deleteMyGroupMember
+      summary: 移除成员
+      tags:
+      - me-nodes
+      parameters:
+      - name: group_id
+        in: path
+        required: true
+        schema: *id008
+      - name: node_id
+        in: path
+        required: true
+        schema: *id008
+      responses:
+        '204':
+          description: No Content
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '404': *id009
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+  /me/subscription:
+    get:
+      operationId: getSubscription
+      summary: 我的套餐与余额
+      tags:
+      - me-billing
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subscription'
+        '400': *id001
+        '401': *id005
+        '429': *id004
+  /me/traffic-packs:
+    get:
+      operationId: listTrafficPacks
+      summary: 流量包
+      tags:
+      - me-billing
+      parameters:
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrafficPackPage'
+        '400': *id001
+        '401': *id005
+        '429': *id004
+  /me/redemption-previews:
+    post:
+      operationId: previewRedemption
+      summary: 兑换预览（展示损失）
+      tags:
+      - me-billing
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RedemptionRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RedemptionPreview'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+  /me/redemptions:
+    post:
+      operationId: redeem
+      summary: 兑换权益码
+      tags:
+      - me-billing
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RedemptionRequest'
+      responses:
+        '201':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Redemption'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+  /me/usage:
+    get:
+      operationId: getUsage
+      summary: 流量统计（原始与计费）
+      tags:
+      - me-billing
+      parameters:
+      - name: granularity
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - minute
+          - day
+      - name: from
+        in: query
+        required: false
+        schema: &id011
+          type: string
+          format: date-time
+          description: RFC 3339 UTC
+      - name: to
+        in: query
+        required: false
+        schema: *id011
+      - name: rule_id
+        in: query
+        required: false
+        schema: *id008
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsageSeries'
+        '400': *id001
+        '401': *id005
+        '429': *id004
+  /me/notifications:
+    get:
+      operationId: listNotifications
+      summary: 站内通知
+      tags:
+      - me-account
+      parameters:
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationPage'
+        '400': *id001
+        '401': *id005
+        '429': *id004
+  /me/notifications/mark-read:
+    post:
+      operationId: markNotificationsRead
+      summary: 标记已读
+      tags:
+      - me-account
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MarkReadRequest'
+      responses:
+        '204':
+          description: No Content
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+  /me/announcements:
+    get:
+      operationId: listAnnouncements
+      summary: 公告
+      tags:
+      - me-account
+      parameters:
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnnouncementPage'
+        '400': *id001
+        '401': *id005
+        '429': *id004
+  /me/profile:
+    get:
+      operationId: getProfile
+      summary: 个人资料
+      tags:
+      - me-account
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+          headers:
+            ETag:
+              schema:
+                type: string
+              description: = row_version
+        '400': *id001
+        '401': *id005
+        '429': *id004
+    patch:
+      operationId: updateProfile
+      summary: 修改个人资料
+      tags:
+      - me-account
+      parameters:
+      - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProfilePatch'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '409': *id002
+        '412': *id010
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+  /me/password:
+    post:
+      operationId: changePassword
+      summary: 修改密码
+      tags:
+      - me-account
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordChange'
+      responses:
+        '204':
+          description: No Content
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+      x-vortex-recent-totp: true
+      description: 敏感操作：要求最近 10 分钟内完成 TOTP 校验，否则返回 403 AUTH_TOTP_REQUIRED。
+  /me/totp:
+    post:
+      operationId: setupTotp
+      summary: 开启二步验证
+      tags:
+      - me-account
+      responses:
+        '201':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TotpSetup'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+    delete:
+      operationId: disableTotp
+      summary: 关闭二步验证
+      tags:
+      - me-account
+      responses:
+        '204':
+          description: No Content
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+      x-vortex-recent-totp: true
+      description: 敏感操作：要求最近 10 分钟内完成 TOTP 校验，否则返回 403 AUTH_TOTP_REQUIRED。
+  /me/events:
+    get:
+      operationId: streamMyEvents
+      summary: 实时事件（SSE）
+      tags:
+      - me
+      responses:
+        '200':
+          description: 事件流（4 节）；用 Last-Event-ID 续传，每 15 秒注释行心跳
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '400': *id001
+        '401': *id005
+        '429': *id004
+  /admin/overview:
+    get:
+      operationId: adminOverview
+      summary: 平台概览
+      tags:
+      - admin
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Overview'
+        '400': *id001
+        '401': *id005
+        '429': *id004
+  /admin/users:
+    get:
+      operationId: adminListUsers
+      summary: 用户
+      tags:
+      - admin-users
+      parameters:
+      - name: q
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: status
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - active
+          - suspended
+          - banned
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserPage'
+        '400': *id001
+        '401': *id005
+        '429': *id004
+    post:
+      operationId: adminCreateUser
+      summary: 创建用户
+      tags:
+      - admin-users
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserCreate'
+      responses:
+        '201':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+  /admin/users/{user_id}:
+    get:
+      operationId: adminGetUser
+      summary: 用户详情
+      tags:
+      - admin-users
+      parameters:
+      - name: user_id
+        in: path
+        required: true
+        schema: *id008
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400': *id001
+        '401': *id005
+        '404': *id009
+        '429': *id004
+  /admin/users/{user_id}/suspend:
+    post:
+      operationId: adminUserSuspend
+      summary: 暂停账号（写审计）
+      tags:
+      - admin-users
+      parameters:
+      - name: user_id
+        in: path
+        required: true
+        schema: *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StatusChange'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '404': *id009
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+      x-vortex-recent-totp: true
+      description: 敏感操作：要求最近 10 分钟内完成 TOTP 校验，否则返回 403 AUTH_TOTP_REQUIRED。
+  /admin/users/{user_id}/ban:
+    post:
+      operationId: adminUserBan
+      summary: 封禁账号（写审计）
+      tags:
+      - admin-users
+      parameters:
+      - name: user_id
+        in: path
+        required: true
+        schema: *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StatusChange'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '404': *id009
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+      x-vortex-recent-totp: true
+      description: 敏感操作：要求最近 10 分钟内完成 TOTP 校验，否则返回 403 AUTH_TOTP_REQUIRED。
+  /admin/users/{user_id}/activate:
+    post:
+      operationId: adminUserActivate
+      summary: 恢复账号（写审计）
+      tags:
+      - admin-users
+      parameters:
+      - name: user_id
+        in: path
+        required: true
+        schema: *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StatusChange'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '404': *id009
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+      x-vortex-recent-totp: true
+      description: 敏感操作：要求最近 10 分钟内完成 TOTP 校验，否则返回 403 AUTH_TOTP_REQUIRED。
+  /admin/rules:
+    get:
+      operationId: adminListRules
+      summary: 跨租户规则查看（写审计，TEN-005）
+      tags:
+      - admin-users
+      parameters:
+      - name: tenant_id
+        in: query
+        required: false
+        schema: *id008
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RulePage'
+        '400': *id001
+        '401': *id005
+        '429': *id004
+  /admin/rules/{rule_id}:
+    get:
+      operationId: adminGetRule
+      summary: 规则详情
+      tags:
+      - admin-users
+      parameters:
+      - name: rule_id
+        in: path
+        required: true
+        schema: *id008
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuleDetail'
+        '400': *id001
+        '401': *id005
+        '404': *id009
+        '429': *id004
+  /admin/nodes:
+    get:
+      operationId: adminListNodes
+      summary: 节点
+      tags:
+      - admin-fleet
+      parameters:
+      - name: region
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: owner
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - platform
+          - self
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodePage'
+        '400': *id001
+        '401': *id005
+        '429': *id004
+    post:
+      operationId: adminCreateNode
+      summary: 登记平台节点（随后用注册令牌接入）
+      tags:
+      - admin-fleet
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NodeCreate'
+      responses:
+        '201':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Node'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+  /admin/nodes/{node_id}:
+    get:
+      operationId: adminGetNode
+      summary: 节点详情
+      tags:
+      - admin-fleet
+      parameters:
+      - name: node_id
+        in: path
+        required: true
+        schema: *id008
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Node'
+          headers:
+            ETag:
+              schema:
+                type: string
+              description: = row_version
+        '400': *id001
+        '401': *id005
+        '404': *id009
+        '429': *id004
+    patch:
+      operationId: adminUpdateNode
+      summary: 修改节点
+      tags:
+      - admin-fleet
+      parameters:
+      - name: node_id
+        in: path
+        required: true
+        schema: *id008
+      - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NodePatch'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Node'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '404': *id009
+        '409': *id002
+        '412': *id010
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+    delete:
+      operationId: adminDeleteNode
+      summary: 删除节点（检查依赖与待结算，NOD-004）
+      tags:
+      - admin-fleet
+      parameters:
+      - name: node_id
+        in: path
+        required: true
+        schema: *id008
+      - $ref: '#/components/parameters/IfMatch'
+      responses:
+        '204':
+          description: No Content
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '404': *id009
+        '409': *id002
+        '412': *id010
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+      x-vortex-recent-totp: true
+      description: 敏感操作：要求最近 10 分钟内完成 TOTP 校验，否则返回 403 AUTH_TOTP_REQUIRED。
+  /admin/nodes/{node_id}/drain-preview:
+    get:
+      operationId: adminDrainPreview
+      summary: 排空影响预览（NOD-003）
+      tags:
+      - admin-fleet
+      parameters:
+      - name: node_id
+        in: path
+        required: true
+        schema: *id008
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DrainPreview'
+        '400': *id001
+        '401': *id005
+        '404': *id009
+        '429': *id004
+  /admin/nodes/{node_id}/drain:
+    post:
+      operationId: adminDrainNode
+      summary: 维护排空
+      tags:
+      - admin-fleet
+      parameters:
+      - name: node_id
+        in: path
+        required: true
+        schema: *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DrainRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Node'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '404': *id009
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+      x-vortex-recent-totp: true
+      description: 敏感操作：要求最近 10 分钟内完成 TOTP 校验，否则返回 403 AUTH_TOTP_REQUIRED。
+  /admin/nodes/{node_id}/disable:
+    post:
+      operationId: adminDisableNode
+      summary: 停用
+      tags:
+      - admin-fleet
+      parameters:
+      - name: node_id
+        in: path
+        required: true
+        schema: *id008
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Node'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '404': *id009
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+      x-vortex-recent-totp: true
+      description: 敏感操作：要求最近 10 分钟内完成 TOTP 校验，否则返回 403 AUTH_TOTP_REQUIRED。
+  /admin/nodes/{node_id}/enable:
+    post:
+      operationId: adminEnableNode
+      summary: 恢复
+      tags:
+      - admin-fleet
+      parameters:
+      - name: node_id
+        in: path
+        required: true
+        schema: *id008
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Node'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '404': *id009
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+  /admin/enroll-tokens:
+    post:
+      operationId: adminCreateEnrollToken
+      summary: 平台节点注册令牌
+      tags:
+      - admin-fleet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EnrollTokenRequest'
+      responses:
+        '201':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnrollToken'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+  /admin/node-groups:
+    get:
+      operationId: adminListNodeGroups
+      summary: 节点组
+      tags:
+      - admin-fleet
+      parameters:
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodeGroupPage'
+        '400': *id001
+        '401': *id005
+        '429': *id004
+    post:
+      operationId: adminCreateNodeGroup
+      summary: 创建平台组（初始倍率立即生效）
+      tags:
+      - admin-fleet
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NodeGroupInput'
+      responses:
+        '201':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodeGroup'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+  /admin/node-groups/{group_id}:
+    get:
+      operationId: adminGetNodeGroup
+      summary: 节点组详情
+      tags:
+      - admin-fleet
+      parameters:
+      - name: group_id
+        in: path
+        required: true
+        schema: *id008
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodeGroup'
+          headers:
+            ETag:
+              schema:
+                type: string
+              description: = row_version
+        '400': *id001
+        '401': *id005
+        '404': *id009
+        '429': *id004
+    patch:
+      operationId: adminUpdateNodeGroup
+      summary: 修改节点组
+      tags:
+      - admin-fleet
+      parameters:
+      - name: group_id
+        in: path
+        required: true
+        schema: *id008
+      - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NodeGroupPatch'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodeGroup'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '404': *id009
+        '409': *id002
+        '412': *id010
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+    delete:
+      operationId: adminDeleteNodeGroup
+      summary: 删除节点组
+      tags:
+      - admin-fleet
+      parameters:
+      - name: group_id
+        in: path
+        required: true
+        schema: *id008
+      - $ref: '#/components/parameters/IfMatch'
+      responses:
+        '204':
+          description: No Content
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '404': *id009
+        '409': *id002
+        '412': *id010
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+      x-vortex-recent-totp: true
+      description: 敏感操作：要求最近 10 分钟内完成 TOTP 校验，否则返回 403 AUTH_TOTP_REQUIRED。
+  /admin/node-groups/{group_id}/members/{node_id}:
+    put:
+      operationId: adminPutGroupMember
+      summary: 加入或更新成员
+      tags:
+      - admin-fleet
+      parameters:
+      - name: group_id
+        in: path
+        required: true
+        schema: *id008
+      - name: node_id
+        in: path
+        required: true
+        schema: *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MemberInput'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GroupMember'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '404': *id009
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+    delete:
+      operationId: adminDeleteGroupMember
+      summary: 移除成员
+      tags:
+      - admin-fleet
+      parameters:
+      - name: group_id
+        in: path
+        required: true
+        schema: *id008
+      - name: node_id
+        in: path
+        required: true
+        schema: *id008
+      responses:
+        '204':
+          description: No Content
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '404': *id009
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+  /admin/segment-permits:
+    get:
+      operationId: adminListSegmentPermits
+      summary: 段许可
+      tags:
+      - admin-fleet
+      parameters:
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SegmentPermitPage'
+        '400': *id001
+        '401': *id005
+        '429': *id004
+    post:
+      operationId: adminCreateSegmentPermit
+      summary: 新增段许可
+      tags:
+      - admin-fleet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SegmentPermit'
+      responses:
+        '201':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SegmentPermit'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+  /admin/segment-permits/{upstream_group_id}/{downstream_group_id}:
+    delete:
+      operationId: adminDeleteSegmentPermit
+      summary: 撤销段许可（已有会话关闭，ENG-032）
+      tags:
+      - admin-fleet
+      parameters:
+      - name: upstream_group_id
+        in: path
+        required: true
+        schema: *id008
+      - name: downstream_group_id
+        in: path
+        required: true
+        schema: *id008
+      responses:
+        '204':
+          description: No Content
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '404': *id009
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+      x-vortex-recent-totp: true
+      description: 敏感操作：要求最近 10 分钟内完成 TOTP 校验，否则返回 403 AUTH_TOTP_REQUIRED。
+  /admin/edge-hubs:
+    get:
+      operationId: adminListEdgeHubs
+      summary: Edge Hub 实例与模式
+      tags:
+      - admin-fleet
+      parameters:
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EdgeHubPage'
+        '400': *id001
+        '401': *id005
+        '429': *id004
+  /admin/hub-bootstrap-tokens:
+    post:
+      operationId: adminCreateHubToken
+      summary: Edge Hub 引导令牌
+      tags:
+      - admin-fleet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EnrollTokenRequest'
+      responses:
+        '201':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HubBootstrapToken'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+      x-vortex-recent-totp: true
+      description: 敏感操作：要求最近 10 分钟内完成 TOTP 校验，否则返回 403 AUTH_TOTP_REQUIRED。
+  /admin/billing-versions:
+    get:
+      operationId: adminListBillingVersions
+      summary: 计费版本
+      tags:
+      - admin-billing
+      parameters:
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BillingVersionPage'
+        '400': *id001
+        '401': *id005
+        '429': *id004
+    post:
+      operationId: adminCreateBillingVersion
+      summary: 修改组倍率（新计费版本，≥ 24 小时后生效）
+      tags:
+      - admin-billing
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BillingVersionInput'
+      responses:
+        '201':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BillingVersion'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+      x-vortex-recent-totp: true
+      description: 敏感操作：要求最近 10 分钟内完成 TOTP 校验，否则返回 403 AUTH_TOTP_REQUIRED。
+  /admin/plans:
+    get:
+      operationId: adminListPlans
+      summary: 套餐
+      tags:
+      - admin-billing
+      parameters:
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanPage'
+        '400': *id001
+        '401': *id005
+        '429': *id004
+    post:
+      operationId: adminCreatePlan
+      summary: 创建套餐
+      tags:
+      - admin-billing
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlanInput'
+      responses:
+        '201':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Plan'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+  /admin/plans/{plan_id}:
+    get:
+      operationId: adminGetPlan
+      summary: 套餐详情
+      tags:
+      - admin-billing
+      parameters:
+      - name: plan_id
+        in: path
+        required: true
+        schema: *id008
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Plan'
+          headers:
+            ETag:
+              schema:
+                type: string
+              description: = row_version
+        '400': *id001
+        '401': *id005
+        '404': *id009
+        '429': *id004
+    patch:
+      operationId: adminUpdatePlan
+      summary: 修改套餐（只影响新订阅）
+      tags:
+      - admin-billing
+      parameters:
+      - name: plan_id
+        in: path
+        required: true
+        schema: *id008
+      - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlanInput'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Plan'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '404': *id009
+        '409': *id002
+        '412': *id010
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+  /admin/redeem-codes:
+    get:
+      operationId: adminListRedeemCodes
+      summary: 权益码
+      tags:
+      - admin-billing
+      parameters:
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RedeemCodePage'
+        '400': *id001
+        '401': *id005
+        '429': *id004
+    post:
+      operationId: adminCreateRedeemCodes
+      summary: 批量生成权益码（码值只返回一次）
+      tags:
+      - admin-billing
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RedeemCodeBatchInput'
+      responses:
+        '201':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RedeemCodeBatch'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+      x-vortex-recent-totp: true
+      description: 敏感操作：要求最近 10 分钟内完成 TOTP 校验，否则返回 403 AUTH_TOTP_REQUIRED。
+  /admin/redeem-codes/{code_id}/void:
+    post:
+      operationId: adminVoidRedeemCode
+      summary: 作废权益码
+      tags:
+      - admin-billing
+      parameters:
+      - name: code_id
+        in: path
+        required: true
+        schema: *id008
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RedeemCode'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '404': *id009
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+      x-vortex-recent-totp: true
+      description: 敏感操作：要求最近 10 分钟内完成 TOTP 校验，否则返回 403 AUTH_TOTP_REQUIRED。
+  /admin/disputes:
+    get:
+      operationId: adminListDisputes
+      summary: 争议授权
+      tags:
+      - admin-billing
+      parameters:
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DisputePage'
+        '400': *id001
+        '401': *id005
+        '429': *id004
+  /admin/disputes/{grant_id}/resolve:
+    post:
+      operationId: adminResolveDispute
+      summary: 人工结算争议授权（MTR-009）
+      tags:
+      - admin-billing
+      parameters:
+      - name: grant_id
+        in: path
+        required: true
+        schema: *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DisputeResolution'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Dispute'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '404': *id009
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+      x-vortex-recent-totp: true
+      description: 敏感操作：要求最近 10 分钟内完成 TOTP 校验，否则返回 403 AUTH_TOTP_REQUIRED。
+  /admin/dns/providers:
+    get:
+      operationId: adminListDnsProviders
+      summary: DNS 服务商
+      tags:
+      - admin-dns
+      parameters:
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DnsProviderPage'
+        '400': *id001
+        '401': *id005
+        '429': *id004
+    post:
+      operationId: adminCreateDnsProvider
+      summary: 添加 DNS 服务商（令牌加密存储）
+      tags:
+      - admin-dns
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DnsProviderInput'
+      responses:
+        '201':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DnsProvider'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+      x-vortex-recent-totp: true
+      description: 敏感操作：要求最近 10 分钟内完成 TOTP 校验，否则返回 403 AUTH_TOTP_REQUIRED。
+  /admin/dns/providers/{provider_id}:
+    delete:
+      operationId: adminDeleteDnsProvider
+      summary: 删除 DNS 服务商
+      tags:
+      - admin-dns
+      parameters:
+      - name: provider_id
+        in: path
+        required: true
+        schema: *id008
+      responses:
+        '204':
+          description: No Content
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '404': *id009
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+      x-vortex-recent-totp: true
+      description: 敏感操作：要求最近 10 分钟内完成 TOTP 校验，否则返回 403 AUTH_TOTP_REQUIRED。
+  /admin/dns/records:
+    get:
+      operationId: adminListDnsRecords
+      summary: 解析记录与一致性
+      tags:
+      - admin-dns
+      parameters:
+      - name: entry_group_id
+        in: query
+        required: false
+        schema: *id008
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DnsRecordPage'
+        '400': *id001
+        '401': *id005
+        '429': *id004
+  /admin/announcements:
+    get:
+      operationId: adminListAnnouncements
+      summary: 公告
+      tags:
+      - admin-ops
+      parameters:
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnnouncementPage'
+        '400': *id001
+        '401': *id005
+        '429': *id004
+    post:
+      operationId: adminCreateAnnouncement
+      summary: 发布公告
+      tags:
+      - admin-ops
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AnnouncementInput'
+      responses:
+        '201':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Announcement'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+  /admin/announcements/{announcement_id}:
+    patch:
+      operationId: adminUpdateAnnouncement
+      summary: 修改公告
+      tags:
+      - admin-ops
+      parameters:
+      - name: announcement_id
+        in: path
+        required: true
+        schema: *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AnnouncementInput'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Announcement'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '404': *id009
+        '409': *id002
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+  /admin/audit-logs:
+    get:
+      operationId: adminListAuditLogs
+      summary: 审计查询
+      tags:
+      - admin-ops
+      parameters:
+      - name: tenant_id
+        in: query
+        required: false
+        schema: *id008
+      - name: action
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: from
+        in: query
+        required: false
+        schema: *id011
+      - name: to
+        in: query
+        required: false
+        schema: *id011
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditLogPage'
+        '400': *id001
+        '401': *id005
+        '429': *id004
+  /admin/settings:
+    get:
+      operationId: adminGetSettings
+      summary: 系统设置
+      tags:
+      - admin-ops
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Settings'
+          headers:
+            ETag:
+              schema:
+                type: string
+              description: = row_version
+        '400': *id001
+        '401': *id005
+        '429': *id004
+    patch:
+      operationId: adminUpdateSettings
+      summary: 修改系统设置
+      tags:
+      - admin-ops
+      parameters:
+      - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Settings'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Settings'
+        '400': *id001
+        '401': *id005
+        '403': *id006
+        '409': *id002
+        '412': *id010
+        '422': *id003
+        '429': *id004
+        '503': *id007
+      security:
+      - sessionCookie: []
+        csrfToken: []
+      x-vortex-recent-totp: true
+      description: 敏感操作：要求最近 10 分钟内完成 TOTP 校验，否则返回 403 AUTH_TOTP_REQUIRED。
+  /admin/events:
+    get:
+      operationId: streamAdminEvents
+      summary: 管理员实时事件（SSE）
+      tags:
+      - admin
+      responses:
+        '200':
+          description: 事件流（4 节）；用 Last-Event-ID 续传，每 15 秒注释行心跳
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '400': *id001
+        '401': *id005
+        '429': *id004
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: vortex_session
+      description: HttpOnly、Secure、SameSite=Strict
+    csrfToken:
+      type: apiKey
+      in: header
+      name: X-CSRF-Token
+      description: 双提交令牌，登录响应中下发
+  parameters:
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      schema:
+        type: string
+      description: 资源的 ETag（row_version），不匹配返回 412
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+      description: 相同键的重复请求返回首次结果（PLN-004）
+  responses:
+    BadRequest:
+      description: 请求格式错误
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: 未登录或会话失效
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: 无权限、CSRF 校验失败或需要近期 TOTP
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: 资源不存在（含跨租户访问）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Conflict:
+      description: 与当前状态冲突，如端口占用、依赖存在
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    PreconditionFailed:
+      description: If-Match 与当前版本不符
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unprocessable:
+      description: 业务校验失败，如路径无段许可、超出套餐限制
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    TooManyRequests:
+      description: 限流（SEC-005）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ControlDegraded:
+      description: 控制面降级，暂不接受写操作（FE-012）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+  schemas:
+    Accepted:
+      type: object
+      properties:
+        desired_version:
+          type: integer
+          format: int64
+      additionalProperties: false
+      description: 保存成功不等于已生效（7.5 节）；后续状态经 SSE 推送
+    Announcement:
+      type: object
+      properties:
+        id: *id008
+        title: &id012
+          type: string
+        body: *id012
+        published_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+      additionalProperties: false
+      required:
+      - id
+      - title
+      - body
+    AnnouncementInput:
+      type: object
+      properties:
+        title: *id012
+        body: *id012
+        publish: &id014
+          type: boolean
+      additionalProperties: false
+      required:
+      - title
+      - body
+    AnnouncementPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Announcement'
+        next_cursor:
+          type:
+          - string
+          - 'null'
+      additionalProperties: false
+      required:
+      - items
+      - next_cursor
+    AuditLog:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        created_at: *id011
+        actor_kind:
+          type: string
+          enum:
+          - user
+          - system
+          - node
+          - hub
+        actor_id:
+          type:
+          - string
+          - 'null'
+        tenant_id:
+          type:
+          - string
+          - 'null'
+        action: *id012
+        target_kind:
+          type:
+          - string
+          - 'null'
+        target_id:
+          type:
+          - string
+          - 'null'
+        detail:
+          type: object
+          additionalProperties: true
+      additionalProperties: false
+      required:
+      - id
+      - created_at
+      - actor_kind
+      - action
+    AuditLogPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditLog'
+        next_cursor:
+          type:
+          - string
+          - 'null'
+      additionalProperties: false
+      required:
+      - items
+      - next_cursor
+    BillingVersion:
+      type: object
+      properties:
+        version:
+          type: integer
+          format: int64
+        effective_at: *id011
+        created_at: *id011
+        multipliers:
+          type: array
+          items:
+            $ref: '#/components/schemas/GroupMultiplier'
+      additionalProperties: false
+      required:
+      - version
+      - effective_at
+      - multipliers
+    BillingVersionInput:
+      type: object
+      properties:
+        effective_at:
+          type: string
+          format: date-time
+          description: 不得早于当前时间 + 24 小时（MTR-003）
+        multipliers:
+          type: array
+          items:
+            $ref: '#/components/schemas/GroupMultiplier'
+          minItems: 1
+      additionalProperties: false
+      required:
+      - effective_at
+      - multipliers
+    BillingVersionPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/BillingVersion'
+        next_cursor:
+          type:
+          - string
+          - 'null'
+      additionalProperties: false
+      required:
+      - items
+      - next_cursor
+    Dispute:
+      type: object
+      properties:
+        grant_id: *id008
+        tenant_id: *id008
+        opened_at: *id011
+        auto_settle_at: *id011
+        last_reported_bytes: &id013
+          type: integer
+          format: int64
+          minimum: 0
+          description: 字节
+        hub_ledger_bytes: *id013
+      additionalProperties: false
+      required:
+      - grant_id
+      - tenant_id
+      - opened_at
+      - auto_settle_at
+    DisputePage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Dispute'
+        next_cursor:
+          type:
+          - string
+          - 'null'
+      additionalProperties: false
+      required:
+      - items
+      - next_cursor
+    DisputeResolution:
+      type: object
+      properties:
+        settled_billing_bytes: *id013
+        note: *id012
+      additionalProperties: false
+      required:
+      - settled_billing_bytes
+      - note
+    DnsProvider:
+      type: object
+      properties:
+        id: *id008
+        kind:
+          type: string
+          enum:
+          - cloudflare
+        zone: *id012
+        created_at: *id011
+      additionalProperties: false
+      required:
+      - id
+      - kind
+      - zone
+    DnsProviderInput:
+      type: object
+      properties:
+        kind:
+          type: string
+          enum:
+          - cloudflare
+        zone: *id012
+        api_token:
+          type: string
+          writeOnly: true
+      additionalProperties: false
+      required:
+      - kind
+      - zone
+      - api_token
+    DnsProviderPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/DnsProvider'
+        next_cursor:
+          type:
+          - string
+          - 'null'
+      additionalProperties: false
+      required:
+      - items
+      - next_cursor
+    DnsRecord:
+      type: object
+      properties:
+        name: *id012
+        address: *id012
+        ttl: &id015
+          type: integer
+          format: int32
+        entry_group_id: *id008
+        in_sync: *id014
+      additionalProperties: false
+      required:
+      - name
+      - address
+      - ttl
+    DnsRecordPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/DnsRecord'
+        next_cursor:
+          type:
+          - string
+          - 'null'
+      additionalProperties: false
+      required:
+      - items
+      - next_cursor
+    DrainPreview:
+      type: object
+      properties:
+        affected_rules: *id015
+        active_sessions: *id015
+      additionalProperties: false
+      required:
+      - affected_rules
+      - active_sessions
+    DrainRequest:
+      type: object
+      properties:
+        timeout_seconds:
+          type: integer
+          minimum: 0
+          default: 300
+      additionalProperties: false
+    EdgeHub:
+      type: object
+      properties:
+        id: *id008
+        region: *id012
+        address: *id012
+        mode:
+          type: string
+          enum:
+          - online
+          - autonomous
+          - reconciling
+          - autonomy_expired
+          - offline
+        connected_nodes: *id015
+        autonomy_started_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        frozen_budget_tenants: *id015
+      additionalProperties: false
+      required:
+      - id
+      - region
+      - address
+      - mode
+    EdgeHubPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/EdgeHub'
+        next_cursor:
+          type:
+          - string
+          - 'null'
+      additionalProperties: false
+      required:
+      - items
+      - next_cursor
+    EnrollToken:
+      type: object
+      properties:
+        token:
+          type: string
+          description: 只返回一次
+        install_command: *id012
+        expires_at: *id011
+      additionalProperties: false
+      required:
+      - token
+      - install_command
+      - expires_at
+    EnrollTokenRequest:
+      type: object
+      properties:
+        region: *id012
+      additionalProperties: false
+      required:
+      - region
+    Entitlement:
+      type: object
+      properties:
+        kind:
+          type: string
+          enum:
+          - node_group
+          - protocol
+          - forward_mode
+          - reverse_dial
+          - self_hosted
+        value: *id012
+      additionalProperties: false
+      required:
+      - kind
+      - value
+    Error:
+      type: object
+      properties:
+        code:
+          type: string
+          pattern: ^[A-Z]+_[A-Z0-9_]+$
+          description: 域_原因，前端映射中文与处理建议（FE-008）
+        message: *id012
+        details:
+          type: object
+          additionalProperties: true
+        trace_id: *id012
+      additionalProperties: false
+      required:
+      - code
+      - message
+      - trace_id
+    GroupMember:
+      type: object
+      properties:
+        node_id: *id008
+        weight:
+          type: integer
+          minimum: 1
+        priority:
+          type: integer
+          minimum: 0
+        entry_state:
+          type:
+          - string
+          - 'null'
+          enum:
+          - joining
+          - serving
+          - draining
+          - unavailable
+          - null
+      additionalProperties: false
+      required:
+      - node_id
+      - weight
+      - priority
+    GroupMultiplier:
+      type: object
+      properties:
+        node_group_id: *id008
+        multiplier:
+          type: number
+          exclusiveMinimum: 0
+      additionalProperties: false
+      required:
+      - node_group_id
+      - multiplier
+    GroupOption:
+      type: object
+      properties:
+        id: *id008
+        name: *id012
+        purpose:
+          type: string
+          enum:
+          - entry
+          - relay
+          - exit
+        owner:
+          type: string
+          enum:
+          - platform
+          - self
+        has_public_members: *id014
+        multiplier:
+          type: number
+      additionalProperties: false
+      required:
+      - id
+      - name
+      - purpose
+      - owner
+    HubBootstrapToken:
+      type: object
+      properties:
+        token: *id012
+        expires_at: *id011
+      additionalProperties: false
+      required:
+      - token
+      - expires_at
+    LoginRequest:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+        password: *id012
+      additionalProperties: false
+      required:
+      - email
+      - password
+    MarkReadRequest:
+      type: object
+      properties:
+        ids:
+          type: array
+          items: *id008
+        all: *id014
+      additionalProperties: false
+    MemberInput:
+      type: object
+      properties:
+        weight:
+          type: integer
+          minimum: 1
+          default: 1
+        priority:
+          type: integer
+          minimum: 0
+          default: 0
+      additionalProperties: false
+    Node:
+      type: object
+      properties:
+        id: *id008
+        name: *id012
+        region: *id012
+        owner:
+          type: string
+          enum:
+          - platform
+          - self
+        capabilities:
+          $ref: '#/components/schemas/NodeCapabilities'
+        lifecycle:
+          type: string
+          enum:
+          - pending
+          - online
+          - offline
+          - draining
+          - disabled
+        agent_version:
+          type:
+          - string
+          - 'null'
+        edge_hub_id:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        created_at: *id011
+      additionalProperties: false
+      required:
+      - id
+      - name
+      - region
+      - owner
+      - capabilities
+      - lifecycle
+      - created_at
+    NodeCapabilities:
+      type: object
+      properties:
+        can_entry: *id014
+        can_relay: *id014
+        can_exit: *id014
+        public_addresses:
+          type: array
+          items: *id012
+      additionalProperties: false
+    NodeCreate:
+      type: object
+      properties:
+        name: *id012
+        region: *id012
+      additionalProperties: false
+      required:
+      - name
+      - region
+    NodeGroup:
+      type: object
+      properties:
+        id: *id008
+        name: *id012
+        purpose:
+          type: string
+          enum:
+          - entry
+          - relay
+          - exit
+        owner:
+          type: string
+          enum:
+          - platform
+          - self
+        member_schedule:
+          type: string
+          enum:
+          - weighted_round_robin
+          - primary_backup
+        multiplier:
+          type: number
+        entry_domain:
+          type:
+          - string
+          - 'null'
+        members:
+          type: array
+          items:
+            $ref: '#/components/schemas/GroupMember'
+      additionalProperties: false
+      required:
+      - id
+      - name
+      - purpose
+      - owner
+      - member_schedule
+      - members
+    NodeGroupInput:
+      type: object
+      properties:
+        name: *id012
+        purpose:
+          type: string
+          enum:
+          - entry
+          - relay
+          - exit
+        member_schedule:
+          type: string
+          enum:
+          - weighted_round_robin
+          - primary_backup
+        initial_multiplier:
+          type: number
+          exclusiveMinimum: 0
+          description: 仅管理员创建平台组时必填，立即生效（NOD-014）；个人组固定 0
+      additionalProperties: false
+      required:
+      - name
+      - purpose
+    NodeGroupPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/NodeGroup'
+        next_cursor:
+          type:
+          - string
+          - 'null'
+      additionalProperties: false
+      required:
+      - items
+      - next_cursor
+    NodeGroupPatch:
+      type: object
+      properties:
+        name: *id012
+        member_schedule:
+          type: string
+          enum:
+          - weighted_round_robin
+          - primary_backup
+      additionalProperties: false
+      description: 用途与归属不可修改；倍率只能通过计费版本修改（NOD-014）
+    NodePage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Node'
+        next_cursor:
+          type:
+          - string
+          - 'null'
+      additionalProperties: false
+      required:
+      - items
+      - next_cursor
+    NodePatch:
+      type: object
+      properties:
+        name: *id012
+        region: *id012
+      additionalProperties: false
+    NodeVersion:
+      type: object
+      properties:
+        node_id: *id008
+        node_name: *id012
+        role:
+          type: string
+          enum:
+          - entry
+          - relay
+          - exit
+        actual_version:
+          type:
+          - integer
+          - 'null'
+        state:
+          type: string
+          enum:
+          - pending
+          - prepared
+          - prepare_failed
+          - active
+          - commit_failed
+          - aborted
+          - unknown
+      additionalProperties: false
+      required:
+      - node_id
+      - role
+      - state
+    Notification:
+      type: object
+      properties:
+        id: *id008
+        kind:
+          type: string
+          enum:
+          - plan_expiring
+          - traffic_low
+          - node_offline
+          - config_failed
+          - announcement
+        payload:
+          type: object
+          additionalProperties: true
+        read: *id014
+        created_at: *id011
+      additionalProperties: false
+      required:
+      - id
+      - kind
+      - read
+      - created_at
+    NotificationPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Notification'
+        next_cursor:
+          type:
+          - string
+          - 'null'
+      additionalProperties: false
+      required:
+      - items
+      - next_cursor
+    Overview:
+      type: object
+      properties:
+        rules_total: *id015
+        rules_running: *id015
+        balance_bytes: *id013
+        plan_expires_at: *id011
+        alerts:
+          type: array
+          items: *id012
+      additionalProperties: false
+      required:
+      - rules_total
+      - rules_running
+    PasswordChange:
+      type: object
+      properties:
+        current_password: *id012
+        new_password:
+          type: string
+          minLength: 12
+      additionalProperties: false
+      required:
+      - current_password
+      - new_password
+    PathOptions:
+      type: object
+      properties:
+        groups:
+          type: array
+          items:
+            $ref: '#/components/schemas/GroupOption'
+        permitted_segments:
+          type: array
+          items:
+            type: object
+            properties:
+              upstream_group_id: *id008
+              downstream_group_id: *id008
+            additionalProperties: false
+            required:
+            - upstream_group_id
+            - downstream_group_id
+        reverse_dial_allowed: *id014
+      additionalProperties: false
+      required:
+      - groups
+      - permitted_segments
+      - reverse_dial_allowed
+    PathSegment:
+      type: object
+      properties:
+        node_group_id: *id008
+        dial_direction:
+          type: string
+          enum:
+          - auto
+          - forward
+          - reverse
+          description: RUL-004；权益不含反向建链时只能为 auto
+      additionalProperties: false
+      required:
+      - node_group_id
+    Plan:
+      type: object
+      properties:
+        id: *id008
+        name: *id012
+        duration_days: &id016
+          type: integer
+          minimum: 1
+        base_traffic_bytes: *id013
+        traffic_reset: &id017
+          type: string
+          enum:
+          - none
+          - monthly
+        max_rules: &id018
+          type: integer
+          minimum: 0
+        rate_bps: &id019
+          type: integer
+          format: int64
+          minimum: 0
+          description: bit/s
+        max_conns: &id020
+          type: integer
+          minimum: 1
+        entitlements: &id021
+          type: array
+          items:
+            $ref: '#/components/schemas/Entitlement'
+        active: *id014
+      additionalProperties: false
+      required:
+      - id
+      - name
+      - duration_days
+      - base_traffic_bytes
+      - traffic_reset
+    PlanInput:
+      type: object
+      properties:
+        name: *id012
+        duration_days: *id016
+        base_traffic_bytes: *id013
+        traffic_reset: *id017
+        max_rules: *id018
+        rate_bps: *id019
+        max_conns: *id020
+        entitlements: *id021
+        active: *id014
+      additionalProperties: false
+      required:
+      - name
+      - duration_days
+      - base_traffic_bytes
+      - traffic_reset
+      - max_rules
+      - rate_bps
+      - max_conns
+      - entitlements
+    PlanPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Plan'
+        next_cursor:
+          type:
+          - string
+          - 'null'
+      additionalProperties: false
+      required:
+      - items
+      - next_cursor
+    Profile:
+      type: object
+      properties:
+        email: *id012
+        display_name: *id012
+        timezone:
+          type: string
+          description: IANA 时区，界面按此显示（2.3 节）
+        totp_enabled: *id014
+      additionalProperties: false
+      required:
+      - email
+      - timezone
+      - totp_enabled
+    ProfilePatch:
+      type: object
+      properties:
+        display_name: *id012
+        timezone: *id012
+      additionalProperties: false
+    RedeemCode:
+      type: object
+      properties:
+        id: *id008
+        kind:
+          type: string
+          enum:
+          - plan
+          - duration
+          - traffic
+        used_count: *id015
+        max_uses: *id015
+        valid_until: *id011
+        voided: *id014
+        code:
+          type: string
+          description: 仅批量创建响应中返回一次
+      additionalProperties: false
+      required:
+      - id
+      - kind
+      - used_count
+      - max_uses
+      - valid_until
+      - voided
+    RedeemCodeBatch:
+      type: object
+      properties:
+        codes:
+          type: array
+          items:
+            $ref: '#/components/schemas/RedeemCode'
+      additionalProperties: false
+      required:
+      - codes
+    RedeemCodeBatchInput:
+      type: object
+      properties:
+        kind:
+          type: string
+          enum:
+          - plan
+          - duration
+          - traffic
+        count:
+          type: integer
+          minimum: 1
+          maximum: 1000
+        plan_id: *id008
+        duration_days:
+          type: integer
+          minimum: 1
+        traffic_bytes: *id013
+        pack_valid_days:
+          type: integer
+          minimum: 1
+        max_uses:
+          type: integer
+          minimum: 1
+          default: 1
+        valid_until: *id011
+      additionalProperties: false
+      required:
+      - kind
+      - count
+      - valid_until
+    RedeemCodePage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/RedeemCode'
+        next_cursor:
+          type:
+          - string
+          - 'null'
+      additionalProperties: false
+      required:
+      - items
+      - next_cursor
+    Redemption:
+      type: object
+      properties:
+        id: *id008
+        kind:
+          type: string
+          enum:
+          - plan_same
+          - plan_replace
+          - duration
+          - traffic
+        created_at: *id011
+      additionalProperties: false
+      required:
+      - id
+      - kind
+      - created_at
+    RedemptionPreview:
+      type: object
+      properties:
+        kind:
+          type: string
+          enum:
+          - plan_same
+          - plan_replace
+          - duration
+          - traffic
+        losses:
+          type: array
+          items:
+            type: object
+            properties:
+              item: *id012
+              amount: *id012
+            additionalProperties: false
+            required:
+            - item
+        result:
+          type: object
+          properties:
+            plan_name: *id012
+            expires_at: *id011
+            balance_bytes: *id013
+          additionalProperties: false
+      additionalProperties: false
+      required:
+      - kind
+      - losses
+    RedemptionRequest:
+      type: object
+      properties:
+        code:
+          type: string
+          minLength: 8
+          maxLength: 64
+        accept_losses:
+          type: boolean
+          description: 替换套餐时必须为 true（FE-009）
+      additionalProperties: false
+      required:
+      - code
+    Rule:
+      type: object
+      properties:
+        id: *id008
+        name: &id022
+          type: string
+          minLength: 1
+          maxLength: 64
+        network: &id023
+          type: string
+          enum:
+          - tcp
+          - udp
+          - tcp_udp
+        forward_mode: &id024
+          type: string
+          enum:
+          - direct
+          - tunnel
+          - multi_hop
+        entry_group_id: *id008
+        service_port: &id025
+          type: integer
+          minimum: 1
+          maximum: 65535
+          description: 留空自动分配（PRT-003）
+        path: &id026
+          type: array
+          items:
+            $ref: '#/components/schemas/PathSegment'
+          maxItems: 4
+          description: 入口之后的各段：中继 0～3 个，最后一段为出口组
+        targets: &id027
+          type: array
+          items:
+            $ref: '#/components/schemas/Target'
+          minItems: 1
+        target_schedule: &id028
+          type: string
+          enum:
+          - weighted_round_robin
+          - primary_backup
+        proxy_protocol: &id029
+          type: string
+          enum:
+          - 'off'
+          - v1
+          - v2
+          description: v1 仅 TCP（ENG-009）
+        limit_rate_bps: *id019
+        limit_max_conns: &id030
+          type: integer
+          minimum: 1
+        enabled: *id014
+        entry_address:
+          type: string
+          description: 域名:端口（FE-003）
+        path_coefficient:
+          type: number
+          description: 路径系数（MTR-010）
+        status:
+          $ref: '#/components/schemas/RuleStatus'
+        created_at: *id011
+        updated_at: *id011
+      additionalProperties: false
+      required:
+      - id
+      - name
+      - network
+      - forward_mode
+      - entry_group_id
+      - targets
+      - entry_address
+      - status
+      - created_at
+      - updated_at
+    RuleDetail:
+      type: object
+      properties:
+        rule:
+          $ref: '#/components/schemas/Rule'
+        node_versions:
+          type: array
+          items:
+            $ref: '#/components/schemas/NodeVersion'
+        coefficient_breakdown:
+          type: array
+          items:
+            type: object
+            properties:
+              node_group_id: *id008
+              name: *id012
+              multiplier:
+                type: number
+            additionalProperties: false
+      additionalProperties: false
+      required:
+      - rule
+      - node_versions
+    RuleInput:
+      type: object
+      properties: &id031
+        name: *id022
+        network: *id023
+        forward_mode: *id024
+        entry_group_id: *id008
+        service_port: *id025
+        path: *id026
+        targets: *id027
+        target_schedule: *id028
+        proxy_protocol: *id029
+        limit_rate_bps: *id019
+        limit_max_conns: *id030
+        enabled: *id014
+      additionalProperties: false
+      required:
+      - name
+      - network
+      - forward_mode
+      - entry_group_id
+      - targets
+    RuleLatency:
+      type: object
+      properties:
+        segments:
+          type: array
+          items:
+            $ref: '#/components/schemas/SegmentLatency'
+      additionalProperties: false
+      required:
+      - segments
+    RulePage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Rule'
+        next_cursor:
+          type:
+          - string
+          - 'null'
+      additionalProperties: false
+      required:
+      - items
+      - next_cursor
+    RulePatch:
+      type: object
+      properties: *id031
+      additionalProperties: false
+      required: []
+      description: 部分更新；未给出的字段不变
+    RulePreview:
+      type: object
+      properties:
+        valid: *id014
+        errors:
+          type: array
+          items:
+            $ref: '#/components/schemas/Error'
+        change_class:
+          type: string
+          enum:
+          - none
+          - hot
+          - rebuild
+          - stop
+          description: FE-007
+        affected_sessions: *id015
+        path_coefficient:
+          type: number
+        resolved_dial_directions:
+          type: array
+          items:
+            type: string
+            enum:
+            - forward
+            - reverse
+      additionalProperties: false
+      required:
+      - valid
+      - errors
+    RulePreviewRequest:
+      type: object
+      properties:
+        rule_id:
+          type: string
+          format: uuid
+          description: 修改已有规则时填写
+        rule:
+          $ref: '#/components/schemas/RuleInput'
+      additionalProperties: false
+      required:
+      - rule
+    RuleStatus:
+      type: object
+      properties:
+        saved:
+          type: object
+          properties:
+            desired_version:
+              type: integer
+              format: int64
+          additionalProperties: false
+          required:
+          - desired_version
+        applied:
+          type: object
+          properties:
+            sync_status:
+              type: string
+              enum:
+              - pending
+              - preparing
+              - committing
+              - applied
+              - partially_applied
+              - rolling_back
+              - failed
+              - unknown
+            nodes_total: *id015
+            nodes_applied: *id015
+          additionalProperties: false
+          required:
+          - sync_status
+        available:
+          type: object
+          properties:
+            run_status:
+              type: string
+              enum:
+              - running
+              - stopped
+              - degraded
+            restrictions:
+              type: array
+              items:
+                type: string
+                enum:
+                - manual_stop
+                - account_suspended
+                - account_banned
+                - plan_expired
+                - traffic_exhausted
+                - over_limit
+                - grant_pending
+            quota_pending_settlement:
+              type: boolean
+              description: 额度待结算（MTR-005）
+          additionalProperties: false
+          required:
+          - run_status
+          - restrictions
+      additionalProperties: false
+      required:
+      - saved
+      - applied
+      - available
+      description: 三栏展示（FE-004），五层数据见 RuleDetail.node_versions
+    SegmentLatency:
+      type: object
+      properties:
+        from_group: *id012
+        to: *id012
+        rtt_ms:
+          type:
+          - number
+          - 'null'
+          description: 未测得为 null（FE-006）
+        reachable:
+          type:
+          - boolean
+          - 'null'
+      additionalProperties: false
+      required:
+      - from_group
+      - to
+      - rtt_ms
+    SegmentPermit:
+      type: object
+      properties:
+        upstream_group_id: *id008
+        downstream_group_id: *id008
+        created_at: *id011
+      additionalProperties: false
+      required:
+      - upstream_group_id
+      - downstream_group_id
+    SegmentPermitPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/SegmentPermit'
+        next_cursor:
+          type:
+          - string
+          - 'null'
+      additionalProperties: false
+      required:
+      - items
+      - next_cursor
+    Session:
+      type: object
+      properties:
+        user_id: *id008
+        role:
+          type: string
+          enum:
+          - admin
+          - member
+        tenant_id:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        totp_required: *id014
+        csrf_token:
+          type: string
+          description: 写请求放入 X-CSRF-Token 头
+      additionalProperties: false
+      required:
+      - user_id
+      - role
+      - totp_required
+      - csrf_token
+    Settings:
+      type: object
+      properties:
+        values:
+          type: object
+          additionalProperties: true
+          description: 附录 A 中标记为可调的参数
+      additionalProperties: false
+      required:
+      - values
+    StatusChange:
+      type: object
+      properties:
+        reason:
+          type: string
+          minLength: 1
+      additionalProperties: false
+      required:
+      - reason
+    Subscription:
+      type: object
+      properties:
+        plan_id: *id008
+        plan_name: *id012
+        started_at: *id011
+        expires_at: *id011
+        base_period_end: *id011
+        base_remaining_bytes: *id013
+        balance_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          description: 租户余额（MTR-004）
+        quota_pending_settlement: *id014
+        limits:
+          type: object
+          properties:
+            max_rules: *id015
+            rate_bps: *id019
+            max_conns: *id015
+          additionalProperties: false
+      additionalProperties: false
+      required:
+      - plan_id
+      - plan_name
+      - expires_at
+      - balance_bytes
+    Target:
+      type: object
+      properties:
+        host:
+          type: string
+          minLength: 1
+          maxLength: 253
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        weight:
+          type: integer
+          minimum: 1
+          default: 1
+        priority:
+          type: integer
+          minimum: 0
+          default: 0
+      additionalProperties: false
+      required:
+      - host
+      - port
+    TotpSetup:
+      type: object
+      properties:
+        otpauth_uri: *id012
+        recovery_codes:
+          type: array
+          items: *id012
+      additionalProperties: false
+      required:
+      - otpauth_uri
+    TotpVerifyRequest:
+      type: object
+      properties:
+        code:
+          type: string
+          pattern: ^[0-9]{6}$
+      additionalProperties: false
+      required:
+      - code
+    TrafficPack:
+      type: object
+      properties:
+        id: *id008
+        bytes_total: *id013
+        bytes_remaining: *id013
+        expires_at: *id011
+        paused: *id014
+      additionalProperties: false
+      required:
+      - id
+      - bytes_total
+      - bytes_remaining
+      - expires_at
+      - paused
+    TrafficPackPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/TrafficPack'
+        next_cursor:
+          type:
+          - string
+          - 'null'
+      additionalProperties: false
+      required:
+      - items
+      - next_cursor
+    UsagePoint:
+      type: object
+      properties:
+        t: *id011
+        raw_bytes_up: *id013
+        raw_bytes_down: *id013
+        billed_bytes: *id013
+      additionalProperties: false
+      required:
+      - t
+      - raw_bytes_up
+      - raw_bytes_down
+      - billed_bytes
+    UsageSeries:
+      type: object
+      properties:
+        granularity:
+          type: string
+          enum:
+          - minute
+          - day
+        points:
+          type: array
+          items:
+            $ref: '#/components/schemas/UsagePoint'
+      additionalProperties: false
+      required:
+      - granularity
+      - points
+    User:
+      type: object
+      properties:
+        id: *id008
+        email: *id012
+        role:
+          type: string
+          enum:
+          - admin
+          - member
+        status:
+          type: string
+          enum:
+          - active
+          - suspended
+          - banned
+        tenant_id:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        created_at: *id011
+      additionalProperties: false
+      required:
+      - id
+      - email
+      - role
+      - status
+      - created_at
+    UserCreate:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+        role:
+          type: string
+          enum:
+          - admin
+          - member
+        initial_password: *id012
+      additionalProperties: false
+      required:
+      - email
+      - role
+      - initial_password
+    UserPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/User'
+        next_cursor:
+          type:
+          - string
+          - 'null'
+      additionalProperties: false
+      required:
+      - items
+      - next_cursor

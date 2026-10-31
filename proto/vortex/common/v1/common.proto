@@ -1,0 +1,62 @@
+// VORTEX 公共类型（契约 C2 · 运行配置子集 v1，已锁定）
+// 需求基线：《VORTEX 需求规格说明书 V1.7（已冻结）》
+// 变更须按需求 0.3 节流程评审，并通过 buf breaking 检查（QA-T03）。
+syntax = "proto3";
+
+package vortex.common.v1;
+
+option go_package = "vortex/proto/gen/go/vortex/common/v1;commonv1";
+
+// UUIDv7，固定 16 字节（需求 2.3 节：主键 UUIDv7）。
+message Uuid {
+  bytes value = 1;
+}
+
+// 节点在规则中的跳位角色（需求 2.2 节 hop_role）。
+enum HopRole {
+  HOP_ROLE_UNSPECIFIED = 0;
+  HOP_ROLE_ENTRY = 1;
+  HOP_ROLE_RELAY = 2;
+  HOP_ROLE_EXIT = 3;
+}
+
+// 监听与会话的网络类型。规则级的 tcp_udp 由编译器拆成两个监听，因此这里只有 TCP 与 UDP。
+enum Network {
+  NETWORK_UNSPECIFIED = 0;
+  NETWORK_TCP = 1;
+  NETWORK_UDP = 2;
+}
+
+// 业务流向（需求 8.8 节计量点表）。
+enum Direction {
+  DIRECTION_UNSPECIFIED = 0;
+  DIRECTION_UP = 1;   // 客户端 → 目标
+  DIRECTION_DOWN = 2; // 目标 → 客户端
+}
+
+// 调度方式（NOD-009 组内成员、RUL-007 目标）。
+enum Schedule {
+  SCHEDULE_UNSPECIFIED = 0;
+  SCHEDULE_WEIGHTED_ROUND_ROBIN = 1;
+  SCHEDULE_PRIMARY_BACKUP = 2;
+}
+
+// 开流失败与限制原因码，与 VLink OPEN_ERR / RST 原因码一一对应（契约 C1 第 6 节、ENG-015）。
+enum OpenErrorCode {
+  OPEN_ERROR_CODE_UNSPECIFIED = 0;
+  OPEN_ERROR_CODE_NO_ROUTE = 1;
+  OPEN_ERROR_CODE_UNAUTHORIZED = 2;
+  OPEN_ERROR_CODE_QUOTA_EXHAUSTED = 3;
+  OPEN_ERROR_CODE_RATE_LIMITED = 4;
+  OPEN_ERROR_CODE_CONN_LIMITED = 5;
+  OPEN_ERROR_CODE_TARGET_UNREACHABLE = 6;
+}
+
+// Edge Hub 模式（HUB-007、HUB-014）。M3 控制协议使用，提前定义以固定枚举值。
+enum HubMode {
+  HUB_MODE_UNSPECIFIED = 0;
+  HUB_MODE_ONLINE = 1;
+  HUB_MODE_AUTONOMOUS = 2;
+  HUB_MODE_RECONCILING = 3;
+  HUB_MODE_AUTONOMY_EXPIRED = 4;
+}

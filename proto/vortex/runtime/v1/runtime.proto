@@ -1,0 +1,374 @@
+// VORTEX 运行配置、授权、用量与引擎结果（契约 C2 · 运行配置子集 v1，已锁定）
+// 需求基线：《VORTEX 需求规格说明书 V1.7（已冻结）》
+// 用途：后端规则编译器的输出（BE-002）、Agent 与 Engine 进程内接口的数据类型（需求 8.2 节）。
+// 性质：内部契约，不对外承诺兼容（GEN-007）；变更须按需求 0.3 节评审并通过 buf breaking 检查。
+syntax = "proto3";
+
+package vortex.runtime.v1;
+
+import "google/protobuf/duration.proto";
+import "vortex/common/v1/common.proto";
+
+option go_package = "vortex/proto/gen/go/vortex/runtime/v1;runtimev1";
+
+// ===================================================================
+// 1. 运行配置（ENG-029）
+// ===================================================================
+
+// 后端为单个节点编译的完整运行配置。每次下发均为全量，由引擎 Prepare 时与当前生效配置做差异（ENG-030）。
+// 约定：运行配置中任何枚举字段取 *_UNSPECIFIED 均视为非法，Prepare 校验失败；编译器必须显式赋值。
+message RuntimeConfig {
+  uint64 version = 1;                         // 单调递增（需求 2.3 节）
+  vortex.common.v1.Uuid node_id = 2;
+  uint64 generation = 3;                      // 平台授权代次
+  repeated Listener listeners = 4;
+  repeated Rule rules = 5;
+  repeated Peer peers = 6;
+  RevocationList revocations = 7;             // ENG-010、SEC-002
+  TargetPolicy target_policy = 8;             // SEC-011
+}
+
+// 业务监听。一条 tcp_udp 规则在入口节点生成两个 Listener（PRT-006）。
+message Listener {
+  string bind_address = 1;                    // "0.0.0.0"、"::" 或具体地址（PRT-002）
+  uint32 port = 2;
+  vortex.common.v1.Network network = 3;
+  vortex.common.v1.Uuid rule_id = 4;
+}
+
+// 本节点在一条规则中的全部执行信息。
+message Rule {
+  vortex.common.v1.Uuid rule_id = 1;
+  vortex.common.v1.Uuid tenant_id = 2;
+  uint64 rule_version = 3;
+  uint64 path_generation = 4;
+  vortex.common.v1.HopRole role = 5;
+  uint32 hop_index = 6;                       // 入口为 0（需求 2.2 节）
+  // 执行点（ENG-049、需求 2.2 节）：仅执行点维护令牌桶、连接计数与计费授权。
+  bool enforcement_point = 7;
+  // 允许作为上游开流的节点（ENG-020 ②）。入口节点为空。
+  repeated vortex.common.v1.Uuid allowed_upstreams = 8;
+  // 下一跳（入口与中继在隧道 / 多跳中使用）；与 targets 互斥。
+  NextHop next_hop = 9;
+  // 最终目标（出口，或直接转发的入口使用）；与 next_hop 互斥。
+  repeated Target targets = 10;
+  vortex.common.v1.Schedule target_schedule = 11;   // RUL-007
+  RuleLimits limits = 12;                     // 规则级限制，仅执行点生效
+  ProxyProtocol proxy_protocol = 13;          // ENG-009，仅最终连接目标的节点生效
+  SessionTimeouts timeouts = 14;              // ENG-006、RUL-008
+  // 路径系数 × 1000（定点，MTR-002）。仅执行点有效；全部由自托管节点组成的规则无执行点。
+  uint64 path_coefficient_milli = 15;
+  uint64 billing_version = 16;                // 生成路径系数所依据的计费版本（MTR-003）
+  repeated vortex.common.v1.Network networks = 17;  // 规则启用的网络类型
+}
+
+message NextHop {
+  vortex.common.v1.Uuid group_id = 1;
+  repeated Member members = 2;
+  vortex.common.v1.Schedule member_schedule = 3;    // NOD-009
+  // 本段建链方向，已由编译器把 auto 解析为确定值（RUL-004）。
+  DialDirection dial_direction = 4;
+  ProbeParams probe = 5;                      // AGT-007 使用的组健康参数
+}
+
+// 成员只引用 node_id；地址与端口统一取自 RuntimeConfig.peers，避免重复与不一致。
+message Member {
+  vortex.common.v1.Uuid node_id = 1;
+  reserved 2, 3;                              // 评审时移除的 address、link_port，编号不复用
+  reserved "address", "link_port";
+  uint32 weight = 4;                          // 加权轮询
+  uint32 priority = 5;                        // 主备：数值小者优先
+}
+
+// 建链方向：本段由谁发起连接（需求 2.2 节 dial_direction）。
+enum DialDirection {
+  DIAL_DIRECTION_UNSPECIFIED = 0;
+  DIAL_DIRECTION_FORWARD = 1;                 // 上游拨下游
+  DIAL_DIRECTION_REVERSE = 2;                 // 下游拨上游（反向隧道）
+}
+
+message ProbeParams {
+  google.protobuf.Duration interval = 1;      // 默认 3 秒（附录 A）
+  uint32 fail_threshold = 2;                  // 默认 3
+  uint32 recover_threshold = 3;               // 默认 2
+}
+
+message Target {
+  string host = 1;                            // IP 或域名（RUL-001）；域名由本节点解析（ENG-T41）
+  uint32 port = 2;
+  uint32 weight = 3;
+  uint32 priority = 4;
+}
+
+enum ProxyProtocol {
+  PROXY_PROTOCOL_UNSPECIFIED = 0;
+  PROXY_PROTOCOL_OFF = 1;
+  PROXY_PROTOCOL_V1 = 2;                      // 仅 TCP
+  PROXY_PROTOCOL_V2 = 3;
+}
+
+message RuleLimits {
+  uint64 rate_bps = 1;                        // 0 = 不设规则级限速
+  uint32 max_conns = 2;                       // 0 = 不设规则级连接上限
+}
+
+message SessionTimeouts {
+  google.protobuf.Duration tcp_idle = 1;      // 未设置或 0 = 不超时（ENG-006 默认）
+  google.protobuf.Duration udp_idle = 2;      // 默认 60 秒
+}
+
+// 本节点需要维持链路的对端；也是 NextHop.members 的地址来源。每个 node_id 只出现一次。
+message Peer {
+  vortex.common.v1.Uuid node_id = 1;
+  string address = 2;
+  uint32 link_port = 3;
+  // 从本节点视角看由谁发起连接。
+  PeerDial dial = 4;
+  LinkMode link_mode = 5;                     // ENG-017，默认 AUTO
+  // 本节点作为反向建链发起方时，在 HELLO 中声明所服务的规则（ENG-018、C1 HELLO tag 0x07）。
+  repeated vortex.common.v1.Uuid served_rule_ids = 6;
+}
+
+enum PeerDial {
+  PEER_DIAL_UNSPECIFIED = 0;
+  PEER_DIAL_OUTBOUND = 1;                     // 本节点主动连接对端
+  PEER_DIAL_INBOUND = 2;                      // 等待对端连接本节点
+}
+
+enum LinkMode {
+  LINK_MODE_UNSPECIFIED = 0;
+  LINK_MODE_AUTO = 1;
+  LINK_MODE_MUX = 2;
+  LINK_MODE_POOL = 3;
+}
+
+message RevocationList {
+  uint64 serial = 1;                          // 单调递增
+  repeated bytes cert_serials = 2;
+  repeated vortex.common.v1.Uuid node_ids = 3;
+}
+
+// 目标地址策略（SEC-011）。固定禁止的类别（回环、链路本地、组播、保留、本节点 link/control/metrics 端口）
+// 由引擎内置，不在此下发，以免配置遗漏。
+message TargetPolicy {
+  repeated string deny_cidrs = 1;             // 平台组件地址与管理员黑名单
+  repeated uint32 deny_ports = 2;             // 如 25
+  repeated string allow_private_cidrs = 3;    // 按节点组放开的私有网段
+  bool self_hosted_node = 4;                  // 自托管节点：出口时豁免“本机与回环”限制
+}
+
+// ===================================================================
+// 2. 授权与份额（Engine.UpdateGrants 输入，LIM-001～LIM-010、10.4 节）
+// ===================================================================
+
+message GrantSet {
+  repeated RunGrant run_grants = 1;
+  repeated BillingGrant billing_grants = 2;
+  repeated ShareLease share_leases = 3;
+}
+
+message GrantMeta {
+  vortex.common.v1.Uuid grant_id = 1;
+  vortex.common.v1.Uuid issuer_hub_id = 2;
+  vortex.common.v1.Uuid boot_id = 3;          // 只对该次启动有效（AGT-009、LIM-007）
+  uint64 generation = 4;
+  // 相对有效期；引擎以收到时刻的单调时钟换算截止点（ENG-025）。
+  google.protobuf.Duration ttl = 5;
+}
+
+message RunGrant {
+  GrantMeta meta = 1;
+  repeated vortex.common.v1.Uuid rule_ids = 2;
+}
+
+// 仅签发给执行点（10.4 节）。
+message BillingGrant {
+  GrantMeta meta = 1;
+  vortex.common.v1.Uuid rule_id = 2;
+  uint64 billing_version = 3;
+  uint64 raw_bytes = 4;                       // 已按路径系数折算的原始字节额度（ENG-037）
+}
+
+message ShareLease {
+  GrantMeta meta = 1;
+  vortex.common.v1.Uuid tenant_id = 2;
+  ShareKind kind = 3;
+  uint64 amount = 4;                          // RATE：bit/s；CONN：个
+}
+
+enum ShareKind {
+  SHARE_KIND_UNSPECIFIED = 0;
+  SHARE_KIND_RATE = 1;
+  SHARE_KIND_CONN = 2;
+}
+
+// ===================================================================
+// 3. 用量（Engine.DrainUsage 输出，ENG-039）
+// ===================================================================
+
+message UsageSnapshot {
+  repeated UsageDelta deltas = 1;
+  repeated TenantDemand demands = 2;          // LIM-009 需求信号
+  repeated GrantConsumption grant_consumptions = 3;
+}
+
+message UsageDelta {
+  vortex.common.v1.Uuid rule_id = 1;
+  vortex.common.v1.HopRole role = 2;
+  vortex.common.v1.Direction direction = 3;
+  uint64 raw_bytes = 4;
+  // 仅执行点填写；其他节点为空（ENG-039 累计口径）。
+  vortex.common.v1.Uuid billing_grant_id = 5;
+}
+
+message TenantDemand {
+  vortex.common.v1.Uuid tenant_id = 1;
+  uint64 bytes_60s = 2;                       // 近 60 秒用量
+  uint32 starved_permille = 3;                // 令牌耗尽时间占比 × 1000（ENG-026）
+}
+
+message GrantConsumption {
+  vortex.common.v1.Uuid grant_id = 1;
+  uint64 used_raw_bytes = 2;                  // 累计已提交字节
+  bool final = 3;                             // 授权已停止消费，可结算
+}
+
+// ===================================================================
+// 4. 配置应用结果与状态（ENG-030～ENG-034、RUL-014）
+// ===================================================================
+
+enum ObjectKind {
+  OBJECT_KIND_UNSPECIFIED = 0;
+  OBJECT_KIND_LISTENER = 1;
+  OBJECT_KIND_RULE = 2;
+  OBJECT_KIND_PEER = 3;
+}
+
+enum ChangeClass {
+  CHANGE_CLASS_UNSPECIFIED = 0;
+  CHANGE_CLASS_NONE = 1;                      // 无变化
+  CHANGE_CLASS_HOT = 2;                       // 可热更新
+  CHANGE_CLASS_REBUILD = 3;                   // 需重建监听
+  CHANGE_CLASS_STOP = 4;                      // 强制停止
+}
+
+message ObjectRef {
+  ObjectKind kind = 1;
+  string id = 2;                              // 规则与对端为 UUID 字符串；监听为 "地址/网络/端口"
+}
+
+message PrepareResult {
+  uint64 version = 1;
+  repeated ObjectChange changes = 2;
+  repeated ResourceError errors = 3;          // 非空表示准备失败（RUL-011）
+}
+
+message ObjectChange {
+  ObjectRef object = 1;
+  ChangeClass change_class = 2;
+  uint32 affected_sessions = 3;               // FE-007 展示
+}
+
+message ResourceError {
+  ObjectRef object = 1;
+  string code = 2;                            // 错误码，格式“域_原因”，如 PORT_IN_USE
+  string detail = 3;
+}
+
+message ApplyResult {
+  uint64 version = 1;
+  repeated ObjectState objects = 2;
+}
+
+enum ObjectStatus {
+  OBJECT_STATUS_UNSPECIFIED = 0;
+  OBJECT_STATUS_PREPARED = 1;
+  OBJECT_STATUS_ACTIVE = 2;
+  OBJECT_STATUS_FAILED = 3;
+  OBJECT_STATUS_STOPPED = 4;
+  OBJECT_STATUS_RESTRICTED = 5;
+}
+
+message ObjectState {
+  ObjectRef object = 1;
+  uint64 actual_version = 2;
+  ObjectStatus status = 3;
+  string error_code = 4;
+  repeated RestrictionReason restrictions = 5;
+}
+
+// 引擎侧可观察到的限制原因（需求 7.5 节限制层中与节点执行相关的部分）。
+enum RestrictionReason {
+  RESTRICTION_REASON_UNSPECIFIED = 0;
+  RESTRICTION_REASON_RUN_GRANT_EXPIRED = 1;
+  RESTRICTION_REASON_BILLING_GRANT_EXHAUSTED = 2;
+  RESTRICTION_REASON_SHARE_EXPIRED = 3;
+  RESTRICTION_REASON_GRANT_PENDING = 4;       // 授权待确认（AGT-010）
+  RESTRICTION_REASON_DRAINING = 5;
+}
+
+message RuntimeState {
+  uint64 actual_version = 1;
+  repeated ObjectState objects = 2;
+}
+
+// ===================================================================
+// 5. 引擎事件（Engine.Events）
+// ===================================================================
+
+message EngineEvent {
+  google.protobuf.Duration monotonic_at = 1;  // 引擎启动后的单调时间
+  oneof body {
+    RestrictionStarted restriction_started = 2;     // ENG-028
+    RestrictionCompleted restriction_completed = 3;
+    OpenRejected open_rejected = 4;                 // ENG-023 审计
+    GrantLow grant_low = 5;                         // ENG-037 剩余 30%
+    GrantNeeded grant_needed = 6;                   // ENG-050 同步申请
+    PeerDown peer_down = 7;                         // ENG-019
+    TargetRejected target_rejected = 8;             // SEC-011 审计
+  }
+}
+
+message RestrictionStarted {
+  vortex.common.v1.Uuid tenant_id = 1;
+  repeated vortex.common.v1.Uuid rule_ids = 2;
+  RestrictionReason reason = 3;
+  uint32 affected_sessions = 4;
+}
+
+message RestrictionCompleted {
+  vortex.common.v1.Uuid tenant_id = 1;
+  repeated vortex.common.v1.Uuid rule_ids = 2;
+  RestrictionReason reason = 3;
+}
+
+message OpenRejected {
+  vortex.common.v1.Uuid peer_node_id = 1;     // 取自证书
+  vortex.common.v1.Uuid rule_id = 2;
+  vortex.common.v1.OpenErrorCode code = 3;
+  string check = 4;                           // 未通过的检查项，如 "hop_index"
+}
+
+message GrantLow {
+  vortex.common.v1.Uuid grant_id = 1;
+  vortex.common.v1.Uuid rule_id = 2;
+  uint64 remaining_raw_bytes = 3;
+  uint64 rate_bps_60s = 4;                    // 供签发方计算下一份额度
+}
+
+message GrantNeeded {
+  vortex.common.v1.Uuid rule_id = 1;
+  vortex.common.v1.Uuid tenant_id = 2;
+}
+
+message PeerDown {
+  vortex.common.v1.Uuid peer_node_id = 1;
+  string reason = 2;
+}
+
+message TargetRejected {
+  vortex.common.v1.Uuid rule_id = 1;
+  string host = 2;
+  string resolved_address = 3;
+  uint32 port = 4;
+}

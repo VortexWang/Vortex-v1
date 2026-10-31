@@ -1,0 +1,244 @@
+// VORTEX Agent ↔ Edge Hub 控制协议（契约 C2 · NodeControl v1，已锁定）
+// 需求基线：《VORTEX 需求规格说明书 V1.7（已冻结）》第 9.1～9.2 节、HUB-002～HUB-018、LIM-010
+// 通道：Agent 发起，mTLS；节点身份取自客户端证书（node_id），消息中的身份字段只用于一致性校验。
+syntax = "proto3";
+
+package vortex.edgehub.v1;
+
+import "google/protobuf/duration.proto";
+import "vortex/common/v1/common.proto";
+import "vortex/runtime/v1/runtime.proto";
+
+option go_package = "vortex/proto/gen/go/vortex/edgehub/v1;edgehubv1";
+
+service NodeControl {
+  // 注册：一次性注册令牌 + CSR 换取节点证书（AGT-001）。此 RPC 允许无客户端证书调用。
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
+  // 证书续签（AGT-012）。私钥在本地重新生成，只上传 CSR。
+  rpc RenewCert(RenewCertRequest) returns (RenewCertResponse);
+  // 控制主通道：一条长期双向流。
+  rpc Connect(stream AgentMessage) returns (stream HubMessage);
+}
+
+// ------------------------------------------------------------------
+// 注册与证书
+// ------------------------------------------------------------------
+
+message EnrollRequest {
+  string enroll_token = 1;
+  bytes csr_der = 2;                          // PKCS#10，ECDSA P-256
+  string agent_version = 3;
+  NodeCapabilities capabilities = 4;
+}
+
+message NodeCapabilities {
+  bool can_entry = 1;
+  bool can_relay = 2;
+  bool can_exit = 3;
+  repeated string public_addresses = 4;       // 空表示无公网地址（NOD-005）
+  string arch = 5;                            // "amd64" / "arm64"
+}
+
+message EnrollResponse {
+  vortex.common.v1.Uuid node_id = 1;
+  repeated bytes certificate_chain_der = 2;   // 叶证书在前
+  repeated bytes ca_bundle_der = 3;
+  repeated HubEndpoint edge_hubs = 4;         // 同区域 Edge Hub 列表（AGT-002）
+}
+
+message HubEndpoint {
+  vortex.common.v1.Uuid hub_id = 1;
+  string address = 2;
+  string region = 3;
+}
+
+message RenewCertRequest {
+  bytes csr_der = 1;
+}
+
+message RenewCertResponse {
+  repeated bytes certificate_chain_der = 1;
+}
+
+// ------------------------------------------------------------------
+// Agent → Edge Hub
+// ------------------------------------------------------------------
+
+message AgentMessage {
+  oneof body {
+    AgentHello hello = 1;
+    HeldGrantsReport held_grants = 2;                     // HUB-014
+    PrepareReport prepare_result = 3;                     // RUL-010 ②
+    ApplyReport apply_result = 4;                         // RUL-010 ④
+    GrantRequest grant_request = 5;                       // AGT-005、ENG-050
+    UsageBatch usage = 6;                                 // AGT-006
+    ProbeReport probes = 7;                               // AGT-007
+    vortex.runtime.v1.EngineEvent event = 8;              // 限制、拒绝审计、授权水位
+    StateReport state = 9;                                // 定期上报实际状态
+    UpgradeStatus upgrade = 10;                           // AGT-008
+  }
+}
+
+// 每条 Connect 流的第一条消息。
+message AgentHello {
+  vortex.common.v1.Uuid node_id = 1;
+  vortex.common.v1.Uuid boot_id = 2;
+  // 上一次启动的 boot_id；与 boot_id 不同表示节点刚重启，签发方据此执行 LIM-010 转移。
+  vortex.common.v1.Uuid previous_boot_id = 3;
+  string agent_version = 4;
+  uint64 applied_config_version = 5;
+  uint64 unacked_usage_from_seq = 6;          // 本次启动最早未确认批次，便于 Edge Hub 预期重发
+}
+
+// Agent 切换实例后立即报告持有的全部授权（HUB-014）。
+message HeldGrantsReport {
+  repeated HeldGrant grants = 1;
+}
+
+message HeldGrant {
+  vortex.common.v1.Uuid grant_id = 1;
+  vortex.common.v1.Uuid issuer_hub_id = 2;
+  GrantKind kind = 3;
+  vortex.common.v1.Uuid tenant_id = 4;
+  vortex.common.v1.Uuid rule_id = 5;          // 计费授权填写
+  uint64 amount = 6;                          // 计费授权：原始字节；份额：bit/s 或个
+  uint64 used = 7;                            // 计费授权已提交的原始字节
+  google.protobuf.Duration remaining_ttl = 8;
+}
+
+enum GrantKind {
+  GRANT_KIND_UNSPECIFIED = 0;
+  GRANT_KIND_RUN = 1;
+  GRANT_KIND_BILLING = 2;
+  GRANT_KIND_SHARE_RATE = 3;
+  GRANT_KIND_SHARE_CONN = 4;
+}
+
+message PrepareReport {
+  vortex.runtime.v1.PrepareResult result = 1;
+}
+
+message ApplyReport {
+  ApplyAction action = 1;
+  vortex.runtime.v1.ApplyResult result = 2;
+}
+
+message GrantRequest {
+  uint64 request_id = 1;                      // 本流内单调递增，响应原样带回
+  bool sync = 2;                              // 同步申请，目标 200 ms 内应答（ENG-050）
+  GrantKind kind = 3;
+  vortex.common.v1.Uuid tenant_id = 4;
+  vortex.common.v1.Uuid rule_id = 5;
+  vortex.common.v1.Uuid current_grant_id = 6; // 续期时填写
+  uint64 rate_bps_60s = 7;                    // 计费授权额度计算依据（ENG-037）
+}
+
+// 计量批次（AGT-006）。幂等键 (node_id, boot_id, seq)，node_id 取自证书。
+message UsageBatch {
+  vortex.common.v1.Uuid boot_id = 1;
+  uint64 seq = 2;                             // 每个 boot_id 内从 1 起连续递增
+  vortex.runtime.v1.UsageSnapshot snapshot = 3;
+}
+
+message ProbeReport {
+  repeated ProbeResult results = 1;
+}
+
+message ProbeResult {
+  oneof subject {
+    vortex.common.v1.Uuid node_id = 1;        // 下一组成员
+    string target = 2;                        // "host:port"
+  }
+  bool reachable = 3;
+  google.protobuf.Duration rtt = 4;           // 未测得时不设置（FE-006）
+}
+
+message StateReport {
+  vortex.runtime.v1.RuntimeState state = 1;
+}
+
+message UpgradeStatus {
+  string target_version = 1;
+  UpgradePhase phase = 2;
+  string error = 3;
+}
+
+enum UpgradePhase {
+  UPGRADE_PHASE_UNSPECIFIED = 0;
+  UPGRADE_PHASE_DOWNLOADING = 1;
+  UPGRADE_PHASE_DRAINING = 2;
+  UPGRADE_PHASE_SWITCHED = 3;
+  UPGRADE_PHASE_HEALTHY = 4;
+  UPGRADE_PHASE_ROLLED_BACK = 5;
+  UPGRADE_PHASE_FAILED = 6;
+}
+
+// ------------------------------------------------------------------
+// Edge Hub → Agent
+// ------------------------------------------------------------------
+
+message HubMessage {
+  oneof body {
+    HubHello hello = 1;
+    ModeChange mode = 2;                                  // HUB-014
+    DesiredConfig desired = 3;                            // 只触发 Prepare
+    ApplyCommand command = 4;                             // Commit / Abort
+    GrantResponse grants = 5;
+    UsageAck usage_ack = 6;
+    DrainCommand drain = 7;
+    UpgradeCommand upgrade = 8;
+  }
+}
+
+message HubHello {
+  vortex.common.v1.Uuid hub_id = 1;
+  string region = 2;
+  vortex.common.v1.HubMode mode = 3;
+}
+
+message ModeChange {
+  vortex.common.v1.HubMode mode = 1;
+}
+
+message DesiredConfig {
+  vortex.runtime.v1.RuntimeConfig config = 1;
+}
+
+message ApplyCommand {
+  uint64 version = 1;
+  ApplyAction action = 2;
+}
+
+enum ApplyAction {
+  APPLY_ACTION_UNSPECIFIED = 0;
+  APPLY_ACTION_COMMIT = 1;
+  APPLY_ACTION_ABORT = 2;
+}
+
+// 对 GrantRequest 的响应；request_id = 0 表示 Edge Hub 主动推送（如 LIM-010 转移、份额再平衡）。
+// Agent 只接受当前所连实例发出的 GrantResponse（HUB-014）。
+message GrantResponse {
+  uint64 request_id = 1;
+  vortex.runtime.v1.GrantSet grants = 2;
+  repeated vortex.common.v1.Uuid revoked_grant_ids = 3;  // 例如重启后作废的旧授权
+  string error_code = 4;                                  // 空表示成功；如 QUOTA_EXHAUSTED
+}
+
+// 累计确认：本 boot_id 下 seq ≤ acked_through_seq 的批次均已确认（在线时为后端入账后，自治时为本地落盘后，HUB-003）。
+message UsageAck {
+  vortex.common.v1.Uuid boot_id = 1;
+  uint64 acked_through_seq = 2;
+}
+
+message DrainCommand {
+  google.protobuf.Duration timeout = 1;       // 默认 300 秒（NOD-003）
+  repeated vortex.common.v1.Uuid rule_ids = 2; // 空表示整个节点
+}
+
+message UpgradeCommand {
+  string version = 1;
+  string download_url = 2;
+  bytes sha256 = 3;
+  bytes signature = 4;                        // 平台发布签名
+  bool irreversible_migration = 5;            // 为真时禁止自动回退（AGT-008）
+}
