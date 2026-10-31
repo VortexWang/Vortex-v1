@@ -453,3 +453,23 @@ func TestDrainingPeerNotSelectedAndNotRedialed(t *testing.T) {
 		t.Fatalf("existing stream on draining peer: %v", err)
 	}
 }
+
+// AGT-007：Agent 的探测结果判定对端不可用时不再选它；恢复后重新可选。
+func TestProbeResultMarksPeerDown(t *testing.T) {
+	var down atomic.Bool
+	pr := newPair(t, types.LinkModeMux, vlink.LinkOptions{}, func(up, _ *Peers) {
+		up.Probe = func(types.UUID) bool { return !down.Load() }
+	})
+	eventually(t, "links", func() bool { return pr.up.Stats(downID).Mux >= 1 })
+	if !pr.up.Healthy(downID) {
+		t.Fatal("healthy peer reported down")
+	}
+	down.Store(true)
+	if pr.up.Healthy(downID) {
+		t.Fatal("probe result ignored")
+	}
+	down.Store(false)
+	if !pr.up.Healthy(downID) {
+		t.Fatal("not recovered")
+	}
+}

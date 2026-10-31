@@ -60,6 +60,7 @@ type TunnelOptions struct {
 	LinkListener net.Listener // 接受入站链路；nil 表示本节点不接受（例如只做入口）
 	Link         vlink.LinkOptions
 	DialTimeout  time.Duration
+	PeerHealthy  func(types.UUID) bool // 下一组成员的探测结果（AGT-007）；nil 表示只按链路状态判断
 }
 
 type listenerKey struct {
@@ -172,7 +173,7 @@ func New(opt Options) *Runtime {
 				return &vlink.Local{Identity: t.Identity, Trust: trust, BootID: t.BootID, Generation: rt.generation.Load(),
 					Capabilities: vlink.CapDgram, Mode: vlink.ModeMux}
 			},
-			Emit: rt.emit, LinkOptions: t.Link, DialTimeout: t.DialTimeout,
+			Emit: rt.emit, LinkOptions: t.Link, DialTimeout: t.DialTimeout, Probe: t.PeerHealthy,
 		}
 		rt.peers.Served = func(peer types.UUID) (send, expect []vlink.ServedRule) {
 			if d := rt.served.Load(); d != nil {

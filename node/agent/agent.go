@@ -20,11 +20,15 @@ import (
 	"vortex/engine/types"
 	"vortex/node/agent/boot"
 	"vortex/node/agent/grants"
+	"vortex/node/agent/probe"
 	"vortex/node/agent/reconcile"
 	"vortex/node/agent/report"
 	"vortex/node/agent/store"
 	"vortex/node/internal/clock"
 )
+
+// DefaultDrainTimeout 是维护排空的默认超时（NOD-003）。
+const DefaultDrainTimeout = 300 * time.Second
 
 type Options struct {
 	Node         types.UUID
@@ -35,6 +39,8 @@ type Options struct {
 	UsageLog     store.Log
 	ConfigLog    store.Log
 	Disk         *report.DiskGuard // nil = 不检查
+	// OnApplied 在配置生效（Commit 成功，含启动恢复）后调用，例如更新探测对象。在 Agent 的锁内调用，不得回调 Agent。
+	OnApplied func(*types.RuntimeConfig)
 }
 
 type Agent struct {
@@ -143,6 +149,9 @@ func (a *Agent) HandleHub(ctx context.Context, m In) {
 	case ApplyCommand:
 		r := a.rec.Command(ctx, m.Version, m.Action)
 		a.sendLocked(ApplyReport{Version: r.Version, Action: r.Action, Result: r.Apply, Err: r.Err})
+		if r.Apply != nil {
+			a.appliedLocked()
+		}
 	case GrantResponse:
 		changed, err := a.gr.Apply(a.hub, m.Response)
 		if err != nil {
@@ -154,6 +163,16 @@ func (a *Agent) HandleHub(ctx context.Context, m In) {
 		a.maybeCommitRecoveryLocked(ctx)
 	case UsageAck:
 		_ = a.rep.Ack(m.Boot, m.Through)
+	case DrainCommand:
+		d := m.Timeout
+		if d == 0 {
+			d = DefaultDrainTimeout
+		}
+		go func() { // 排空可能持续数分钟，不阻塞控制流
+			dctx, cancel := context.WithTimeout(context.Background(), d)
+			defer cancel()
+			_ = a.Drain(dctx, m.Rules)
+		}()
 	}
 }
 
@@ -162,7 +181,29 @@ func (a *Agent) maybeCommitRecoveryLocked(ctx context.Context) {
 	r := a.rec.GrantsUpdated(ctx, func(rule types.UUID) bool { return run[rule] > 0 }, a.gr.Answered())
 	if r != nil {
 		a.sendLocked(ApplyReport{Version: r.Version, Action: r.Action, Result: r.Apply, Err: r.Err})
+		if r.Apply != nil {
+			a.appliedLocked()
+		}
 	}
+}
+
+func (a *Agent) appliedLocked() {
+	if a.opt.OnApplied != nil {
+		a.opt.OnApplied(a.rec.Applied())
+	}
+}
+
+// ReportProbes 上报一轮探测结果（AGT-007）。
+func (a *Agent) ReportProbes(rs []probe.Result) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.sendLocked(ProbeReport{rs})
+}
+
+// Drain 维护排空（NOD-003）：停止范围内规则的新会话并等待已有会话结束，ctx 结束时关闭剩余会话。
+// 不持有 Agent 的锁，排空期间计量与授权照常处理。
+func (a *Agent) Drain(ctx context.Context, rules []types.UUID) error {
+	return a.eng.Drain(ctx, engine.DrainScope{RuleIDs: rules})
 }
 
 // Tick 是每秒的工作。

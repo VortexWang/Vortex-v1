@@ -12,6 +12,7 @@ import (
 	"vortex/engine"
 	"vortex/engine/types"
 	"vortex/node/agent/grants"
+	"vortex/node/agent/probe"
 	"vortex/node/agent/reconcile"
 	"vortex/node/agent/store"
 )
@@ -43,6 +44,7 @@ type fakeHub struct {
 	reqs    []grants.Request
 	boot    types.UUID
 	id      types.UUID
+	probes  int
 }
 
 func newHub(t *testing.T, ctx context.Context, cfg *types.RuntimeConfig) *fakeHub {
@@ -83,6 +85,8 @@ func (h *fakeHub) handle(m Out) {
 		reply = append(reply, HubHello{Hub: h.id, Mode: ModeOnline})
 	case HeldGrants:
 		h.held = append(h.held, m)
+	case ProbeReport:
+		h.probes++
 	case PrepareReport:
 		if m.Err == "" && len(m.Result.Errors) == 0 {
 			reply = append(reply, ApplyCommand{Version: m.Version, Action: reconcile.ActionCommit})
@@ -411,4 +415,35 @@ func TestRateWindowCountsOnlyBilledTraffic(t *testing.T) {
 	if r := w.rate(ruleA); r != 0 {
 		t.Fatalf("rate after the window %d", r)
 	}
+}
+
+// 配置生效后通知（更新探测对象）；探测结果上报；DrainCommand 触发排空。
+func TestAppliedHookProbesAndDrain(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := testConfig(t)
+	n := start(t, newLogs())
+	defer n.stop()
+	applied := make(chan uint64, 4)
+	n.a.opt.OnApplied = func(c *types.RuntimeConfig) { applied <- c.Version }
+	h := newHub(t, ctx, cfg)
+	h.run(n.a)
+	n.a.Connected(h)
+	n.a.HandleHub(ctx, DesiredConfig{cfg})
+	select {
+	case v := <-applied:
+		if v != 1 {
+			t.Fatalf("applied %d", v)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("OnApplied not called")
+	}
+	n.a.ReportProbes([]probe.Result{{Subject: probe.Subject{Target: "1.2.3.4:80"}, Reachable: true}})
+	eventually(t, "probe report", func() bool { h.mu.Lock(); defer h.mu.Unlock(); return h.probes == 1 })
+	eventually(t, "run grant", func() bool { return n.a.Status().RunRemaining[ruleA] > 0 })
+	if !roundTrip(cfg.Listeners[0].Bind, 1024) {
+		t.Fatal("forwarding before drain")
+	}
+	n.a.HandleHub(ctx, DrainCommand{Timeout: time.Second})
+	eventually(t, "drained: new sessions refused", func() bool { return !roundTrip(cfg.Listeners[0].Bind, 1024) })
 }

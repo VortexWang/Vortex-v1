@@ -1,8 +1,11 @@
 package agent
 
 import (
+	"time"
+
 	"vortex/engine/types"
 	"vortex/node/agent/grants"
+	"vortex/node/agent/probe"
 	"vortex/node/agent/reconcile"
 	"vortex/node/agent/report"
 )
@@ -51,6 +54,8 @@ type EngineEvent struct{ types.Event }
 
 type StateReport struct{ State types.RuntimeState }
 
+type ProbeReport struct{ Results []probe.Result }
+
 func (Hello) out()         {}
 func (HeldGrants) out()    {}
 func (PrepareReport) out() {}
@@ -59,6 +64,7 @@ func (GrantRequest) out()  {}
 func (UsageBatch) out()    {}
 func (EngineEvent) out()   {}
 func (StateReport) out()   {}
+func (ProbeReport) out()   {}
 
 // In 是 Edge Hub → Agent 的消息。
 type In interface{ in() }
@@ -85,6 +91,13 @@ type UsageAck struct {
 	Through uint64
 }
 
+// DrainCommand：维护排空（NOD-003）。Timeout 为 0 时取 300 秒；Rules 为空表示整个节点。
+type DrainCommand struct {
+	Timeout time.Duration
+	Rules   []types.UUID
+}
+
+func (DrainCommand) in()  {}
 func (HubHello) in()      {}
 func (ModeChange) in()    {}
 func (DesiredConfig) in() {}

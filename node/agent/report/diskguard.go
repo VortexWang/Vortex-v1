@@ -15,8 +15,16 @@ type DiskGuard struct {
 	OnOK      func(free uint64)
 	Free      func(path string) (uint64, error) // 默认 statfs；测试注入
 
-	mu  sync.Mutex
-	low bool
+	mu   sync.Mutex
+	low  bool
+	last uint64
+}
+
+// Last 返回最近一次检查得到的可用字节数。
+func (g *DiskGuard) Last() uint64 {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.last
 }
 
 func statfsFree(path string) (uint64, error) {
@@ -39,6 +47,7 @@ func (g *DiskGuard) Check() (bool, error) {
 	if err != nil {
 		return g.low, err
 	}
+	g.last = n
 	switch {
 	case !g.low && n < g.Low:
 		g.low = true

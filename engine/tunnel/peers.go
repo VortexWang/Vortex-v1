@@ -65,6 +65,8 @@ type Peers struct {
 	// StableAfter：链路存活超过它才算建链成功（清零失败次数），更早断开计为一次失败，默认 5 秒。
 	// 否则对端在握手后立即关闭链路（例如尚未把本节点加入配置）时，反向建链方会每个维护周期重连一次。
 	StableAfter time.Duration
+	// Probe 是 Agent 的探测结果（AGT-007）：返回 false 的对端不再被选（反向建链的对端不探测，只看链路）。
+	Probe func(peer types.UUID) bool
 
 	root     *lifecycle.Scope
 	kick     chan struct{}
@@ -402,6 +404,9 @@ func (p *Peers) Healthy(id types.UUID) bool {
 	}
 	if ps.addr == "" { // 由对端建链（反向）：有可用链路才算可用，否则立即换下一个成员
 		return p.bestMuxLocked(ps) != nil
+	}
+	if p.Probe != nil && !p.Probe(id) {
+		return false
 	}
 	return time.Now().After(ps.downUntil)
 }

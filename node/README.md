@@ -11,4 +11,8 @@
 | `agent/reconcile` | 配置协调：Prepare / Commit / Abort 驱动、最后生效配置持久化、启动恢复与“授权待确认”（AGT-004、AGT-010） |
 | `agent/control` | 控制连接：实例列表、退避与轮换、自治时探测并切换到在线实例（AGT-002、HUB-014） |
 | `agent`（根包） | 组装：事件循环、控制流消息、Edge Hub 消息处理、status（AGT-T19） |
+| `agent/probe` | 探测：成员 VLink 端口与 TCP 目标的握手，3 次失败 / 2 次成功，结果供引擎选路并上报（AGT-007） |
+| `agent/localapi` | 本地 Unix socket 运维接口（status / drain，AGT-T16） |
+| `internal/supervisor` | 模块 goroutine 的异常重启与退避 |
+| `cmd/vortex-node` | 可执行文件：run / status / drain / version（enroll 待 gRPC） |
 | `internal/clock` | 可注入时钟 |
