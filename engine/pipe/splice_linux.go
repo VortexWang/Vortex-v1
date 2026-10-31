@@ -41,16 +41,16 @@ func (s *session) spliceDir(ctx context.Context, src, dst *net.TCPConn, d types.
 		return 0, err
 	}
 
-	// 回调只创建一次：放在循环内会每次分配闭包（基准中每 MiB 8 次分配）
+	// 回调只创建一次：放在循环内会每次分配闭包
 	var (
-		granted, n, want int
-		serr, werr       error
-		m                int
+		n, want    int
+		serr, werr error
+		m          int
 	)
 	drain := func(fd uintptr) bool {
 		for {
 			var n64 int64
-			n64, serr = syscall.Splice(int(fd), nil, pw, nil, granted, spliceFlags)
+			n64, serr = syscall.Splice(int(fd), nil, pw, nil, pipeSize, spliceFlags)
 			n = int(n64)
 			if serr == syscall.EINTR {
 				continue
@@ -70,28 +70,16 @@ func (s *session) spliceDir(ctx context.Context, src, dst *net.TCPConn, d types.
 		}
 	}
 
+	// 先读后申请（见 copyDir 注释）：drain 把当前可读的数据搬进内核管道，之后才按实际字节数申请并 pump。
 	var total int64
 	s.armRead(src)
 	for {
-		granted, err = s.hook.Acquire(ctx, d, pipeSize)
-		if err != nil {
-			return total, err
-		}
-		if granted <= 0 {
-			return total, ErrStopped
-		}
-		if granted > pipeSize {
-			granted = pipeSize
-		}
-
-		// drain：从 socket 搬入管道，等待可读，只取当前可用的数据
 		serr = nil
 		rerr := rc.Read(drain)
 		if rerr == nil {
 			rerr = serr
 		}
 		if rerr != nil {
-			s.hook.Release(d, granted, 0)
 			if again, ferr := s.readErr(src, rerr); again {
 				continue
 			} else {
@@ -99,37 +87,48 @@ func (s *session) spliceDir(ctx context.Context, src, dst *net.TCPConn, d types.
 			}
 		}
 		if n == 0 { // EOF
-			s.hook.Release(d, granted, 0)
 			closeWrite(dst)
 			return total, nil
 		}
 		s.touch()
 		s.armRead(src)
 
-		// pump：把管道中的 n 字节全部写入目标
-		written := 0
-		s.armWrite(dst)
-		for written < n {
-			want, m, werr = n-written, 0, nil
-			err := wc.Write(pump)
-			if err == nil {
-				err = werr
-			}
-			if m > 0 {
-				written += m
-			}
+		for left := n; left > 0; {
+			granted, err := s.hook.Acquire(ctx, d, left)
 			if err != nil {
-				s.hook.Release(d, granted, written)
-				splicedBytes.Add(int64(written))
-				return total + int64(written), s.writeErr(err)
+				return total, err
 			}
-			if m == 0 {
-				s.hook.Release(d, granted, written)
-				return total + int64(written), io.ErrUnexpectedEOF
+			if granted <= 0 {
+				return total, ErrStopped
 			}
+			if granted > left {
+				granted = left
+			}
+			written := 0
+			s.armWrite(dst)
+			for written < granted {
+				want, m, werr = granted-written, 0, nil
+				err := wc.Write(pump)
+				if err == nil {
+					err = werr
+				}
+				if m > 0 {
+					written += m
+				}
+				if err != nil || m == 0 {
+					s.hook.Release(d, granted, written)
+					total += int64(written)
+					splicedBytes.Add(int64(written))
+					if err == nil {
+						err = io.ErrUnexpectedEOF
+					}
+					return total, s.writeErr(err)
+				}
+			}
+			s.hook.Release(d, granted, written)
+			total += int64(written)
+			splicedBytes.Add(int64(written))
+			left -= written
 		}
-		total += int64(written)
-		splicedBytes.Add(int64(written))
-		s.hook.Release(d, granted, written)
 	}
 }

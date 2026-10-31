@@ -217,7 +217,7 @@ type hookAdmission struct {
 	released atomic.Int64
 }
 
-func (a *hookAdmission) Admit(context.Context, *types.Rule, netip.AddrPort) (pipe.Hook, func(), error) {
+func (a *hookAdmission) Admit(context.Context, *types.Rule, netip.AddrPort, func()) (pipe.Hook, func(), error) {
 	if a.deny.Load() {
 		return nil, nil, ErrNoRoute
 	}

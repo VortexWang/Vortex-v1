@@ -378,3 +378,47 @@ func benchThroughput(b *testing.B, splice bool) {
 
 func BenchmarkSplice(b *testing.B)   { benchThroughput(b, true) }
 func BenchmarkBuffered(b *testing.B) { benchThroughput(b, false) }
+
+// TestIdleDirectionHoldsNoGrant：一个方向持续有数据、另一个方向空闲时，空闲方向不得持有未决授权。
+// 先申请后读取的实现会让空闲方向在等待数据期间占住预扣块与令牌（端到端测试中曾导致计费额度
+// 提前耗尽、限速失真）。
+func TestIdleDirectionHoldsNoGrant(t *testing.T) {
+	for _, splice := range []bool{true, false} {
+		tp := newTopo(t, true)
+		h := newRecHook(64 << 10)
+		go Run(context.Background(), tp.proxyA, tp.proxyB, Options{Hook: h, DisableSplice: !splice})
+		go func() { _, _ = io.Copy(io.Discard, tp.target) }() // 目标从不回写：下行空闲
+		stop := make(chan struct{})
+		go func() {
+			buf := randBytes(32 << 10)
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				if _, err := tp.client.Write(buf); err != nil {
+					return
+				}
+			}
+		}()
+		maxIdle := 0
+		for i := 0; i < 50; i++ {
+			time.Sleep(5 * time.Millisecond)
+			h.mu.Lock()
+			if p := h.pending[types.DirDown]; p > maxIdle {
+				maxIdle = p
+			}
+			up := h.written[types.DirUp]
+			h.mu.Unlock()
+			if i == 49 && up == 0 {
+				t.Fatalf("splice=%v: no upstream traffic", splice)
+			}
+		}
+		close(stop)
+		tp.closeAll()
+		if maxIdle != 0 {
+			t.Fatalf("splice=%v: idle direction held %d outstanding grant(s) while waiting for data", splice, maxIdle)
+		}
+	}
+}

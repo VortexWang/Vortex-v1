@@ -201,6 +201,10 @@ func closeWrite(c net.Conn) {
 }
 
 // copyDir 是缓冲路径：分级缓冲池，稳态无每包分配（ENG-007）。
+//
+// 先读后申请：数据到手之后才按实际字节数调用 Acquire。若先申请再读，空闲方向会在等待数据期间
+// 一直占着预扣块与令牌——端到端测试中，从不发数据的下行方向占住了 256 KiB 计费额度，
+// 上行因此提前停止；大量空闲会话还会占满租户的令牌，使限速失真。
 func (s *session) copyDir(ctx context.Context, src, dst net.Conn, d types.Direction) (int64, error) {
 	var total int64
 	tier := 0
@@ -209,31 +213,30 @@ func (s *session) copyDir(ctx context.Context, src, dst net.Conn, d types.Direct
 	full := 0
 	s.armRead(src)
 	for {
-		granted, err := s.hook.Acquire(ctx, d, len(*buf))
-		if err != nil {
-			return total, err
-		}
-		if granted <= 0 {
-			return total, ErrStopped
-		}
-		if granted > len(*buf) {
-			granted = len(*buf)
-		}
-		n, rerr := src.Read((*buf)[:granted])
-		written := 0
+		n, rerr := src.Read(*buf)
 		if n > 0 {
 			s.touch()
 			s.armRead(src)
-			s.armWrite(dst)
-			for written < n {
-				m, werr := dst.Write((*buf)[written:n])
-				written += m
+			for off := 0; off < n; {
+				granted, err := s.hook.Acquire(ctx, d, n-off)
+				if err != nil {
+					return total, err
+				}
+				if granted <= 0 {
+					return total, ErrStopped
+				}
+				if granted > n-off {
+					granted = n - off
+				}
+				s.armWrite(dst)
+				m, werr := dst.Write((*buf)[off : off+granted])
+				s.hook.Release(d, granted, m)
+				total += int64(m)
+				off += m
 				if werr != nil {
-					s.hook.Release(d, granted, written)
-					return total + int64(written), s.writeErr(werr)
+					return total, s.writeErr(werr)
 				}
 			}
-			total += int64(n)
 			// 自适应升级缓冲档位：连续读满则换更大的缓冲（16 KiB → 64 KiB → 256 KiB）
 			if n == len(*buf) && tier < len(tiers)-1 {
 				if full++; full >= 4 {
@@ -246,7 +249,6 @@ func (s *session) copyDir(ctx context.Context, src, dst net.Conn, d types.Direct
 				full = 0
 			}
 		}
-		s.hook.Release(d, granted, written)
 		if rerr != nil {
 			if rerr == io.EOF {
 				closeWrite(dst)

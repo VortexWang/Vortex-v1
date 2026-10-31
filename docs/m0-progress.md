@@ -1,6 +1,6 @@
 # M0 进度（引擎数据面）
 
-> 更新：2026-10-31（第三批）· 对应开发方案 01（转发引擎）与 06（测试与交付）
+> 更新：2026-10-31（第四批）· 对应开发方案 01（转发引擎）与 06（测试与交付）
 
 ## 已完成
 
@@ -22,6 +22,12 @@
 | ENG-T10 | UDP 直接转发：64 分片会话表、每会话独立已连接 socket、空闲回收、4 MiB 收发缓冲 | 见“UDP 与 PROXY protocol”表；批量收发（recvmmsg，ENG-043“应支持”）留待性能调优时视需要加入 |
 | ENG-T14 | UDP 整包计量：额度不足一个完整数据报时整包丢弃并退回，不截断 | 同上 |
 | ENG-T11 | PROXY protocol：TCP v1 / v2 每连接一次，UDP v2 每数据报一次；头部不计量 | 同上 |
+| ENG-T13 | 计量：账本（规则 × 角色 × 方向 × 计费授权）、计费授权账户（预扣 / 提交 / 退回各一次、先到期先用）、自适应预扣块 256 KiB → 4 MiB | 见“计量与门控”表 |
+| ENG-T15 | 授权截止点：首次收到时刻 + 有效期 − 安全余量（默认 max(10%, 10 s)，不超过有效期一半），单调时钟；重复收到不延长 | 同上 |
+| ENG-T16 | 租户令牌桶与规则令牌桶叠加，容量 1 秒份额；统计令牌耗尽时间占比 | 同上 |
+| ENG-T17 | 连接数：执行点按租户计；超限新会话立即拒绝；份额下调时从最近建立者开始，排空期满后关闭 | 同上 |
+| ENG-T18 | 限制执行：运行授权或份额到期时由引擎定时器关闭受影响会话（包括阻塞在读取上的空闲会话），产生开始与完成事件 | 同上 |
+| ENG-T19 | 没有计费授权时发出 grant_needed 并最多等待 200 ms；剩余 30% 时每份授权发一次 grant_low | 同上；“闲置 10 分钟缩为 1 MiB 常驻额度”属于 Edge Hub 的签发策略（HUB-T11），引擎侧无需额外逻辑 |
 
 ## 路由（engine/route）测试
 
@@ -75,6 +81,24 @@
 | TestProxyHeaderFormats | v1 / v2 字节格式（用独立按规范编写的解析器验证）、IPv6、IPv4 映射地址、混合地址族、v1 不支持 UDP |
 | TestProxyProtocol*EndToEnd / PerDatagram | 目标收到的头部携带真实客户端地址与入口地址，其后是原始数据；头部不计入计量（ENG-035） |
 
+## 计量与门控（engine/meter、engine/gate）测试
+
+| 测试 | 覆盖 |
+| --- | --- |
+| TestLedgerDrainIsLossless | 8 个 goroutine 并发写、另一个并发 Drain，总和一字节不差 |
+| TestReserveCommitRefundOnce / TestConcurrentReserveNeverOverdraws | 每块只能提交一次、余量退回；16 个并发会话用完 1,000,000 字节授权恰好 1,000,000 |
+| TestEarliestDeadlineFirstAndExpiry / TestRemovedGrantStops… | 先到期先用；到期与作废后不再使用；有未提交预扣时不报 final |
+| TestLowWaterEventOncePerGrant / TestReserveOrWaitWakesOnUpdate | 首次低于 30% 时发一次；授权到达立即唤醒，否则 200 ms 后放弃 |
+| TestBucketRateAndStarvation | 1 MB/s 份额实测误差 < 7%，突发恰好 1 秒份额；速率为 0 时一直等待 |
+| TestDeadlineFromFirstReceiptNotExtendedByResend | ENG-025：重复收到同一授权不延长，新授权 ID 才续期；默认安全余量 |
+| TestAdmissionChecks | 无运行授权、无份额、无计费授权（等待后拒绝）、等待期间授权到达、连接数上限与释放 |
+| TestRunGrantExpiryKillsSessionsWithEvents / TestConnDownsizeDrainsNewestAfterWindow | 到期关闭全部会话，开始事件一次、最后一个会话结束后完成事件；降额只关闭最新的超额会话，且在排空期之后 |
+| TestE2ERateLimitAccuracy | 16 Mbps 份额下 8 MiB 实测 3.34 s，理论 3.19 s（+4.7%） |
+| TestE2EMeteringMatchesDeliveredBytes | 6 个会话（1 字节～7.8 MB）：计量字节 = 目标收到字节 = 授权消费量，一字节不差 |
+| TestE2EBillingExhaustionStopsSession | 2 MiB 授权：目标恰好收到 2 MiB，会话随即结束 |
+| TestE2ERunGrantExpiryClosesIdleSession | 阻塞在读取上的空闲会话在运行授权到期时被关闭 |
+| TestIdleDirectionHoldsNoGrant（pipe） | 一个方向持续有数据时，空闲方向不持有任何未决授权 |
+
 ## 实现中发现并修正的问题
 
 | 问题 | 发现方式 | 修正 |
@@ -87,6 +111,9 @@
 | “已有会话不受规则切换影响”的测试挡不住错误实现：故意改成会话周期性重查规则后关闭，测试仍通过 | 变异检查 | 切换后等待 100 ms 再使用已有会话，变异随即被发现 |
 | 端口登记表把端口 0（由内核分配）当作真实端口登记，两个同时存在的端口 0 预留互相冲突 | UDP 测试中同时建立两个入口 | 端口 0 在 bind 之后按内核分配的实际端口登记 |
 | UDP “每个数据报都新建会话”的错误实现未被发现：插入时发现已有会话会丢弃新建的，流量看起来正常，但每个数据报都做一次准入并新建一个目标 socket | 变异检查 | 测试增加“准入每会话恰好一次” |
+| **管道“先申请后读取”会让空闲方向占住额度**：等待数据期间持有预扣块与令牌。端到端测试中，2 MiB 授权只用了 1.75 MiB 会话就停止（空闲的下行方向占着 256 KiB）；大量空闲会话还会占满租户令牌，使限速失真 | 端到端测试 | 两条拷贝路径都改为先读后申请，按实际到手的字节数申请；新增回归测试并用变异检查确认它能发现旧行为 |
+| **门控的数据竞争**：每次准入都会改写规则共享的限速桶指针，而其他会话在拷贝热路径上无锁读取；另一处读取会被替换的规则快照 | 竞态检测（30 次重复中偶发） | 会话在准入时取得自己的限速桶快照，共享桶只在规则快照变化时调整；热路径改用会话自身保存的租户 ID |
+| 计量账户最初按授权累计而不区分方向，与 ENG-039 的“规则 × 角色 × 方向 × 计费授权”不符 | 代码审查 | 每份授权按方向各一个计数器 |
 | 子 Scope 先行关闭后从父 Scope 摘除，父 Scope 的 Wait 不再等待其仍在退出的 goroutine，`Close` 提前返回 | 泄漏断言失败 | goroutine 同时计入本 Scope 与全部祖先，Wait 任一 Scope 即覆盖整棵子树 |
 | `abortErr` 被两个方向并发读写 | 代码审查 | 改为原子访问 |
 | 对端停止读取时写入可能永久阻塞（另一方向已结束时无人检测空闲） | 代码审查 | 写入同样受空闲时长约束 |
@@ -95,4 +122,4 @@
 
 ## 下一步（M0 剩余）
 
-ENG-T13～T18 计量与门控（替换准入与计量桩）→ ENG-T02 模拟 Agent → ENG-T36 网络命名空间基准框架。M0 退出标准：NFR-001、NFR-005。
+ENG-T02 模拟 Agent（同时实现 `Engine` 接口，把 route、gate、meter 组装起来）→ ENG-T36 网络命名空间基准框架 → 在启用正式计量与门控的条件下测量 NFR-001、NFR-005。M0 退出标准：NFR-001、NFR-005。

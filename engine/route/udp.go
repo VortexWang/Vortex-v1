@@ -170,7 +170,13 @@ func (e *UDPEntry) session(ctx context.Context, client, local netip.AddrPort) *u
 	if rule == nil {
 		return nil
 	}
-	hook, release, err := e.Admission.Admit(ctx, rule, client)
+	var self atomic.Pointer[udpSession] // 会话建立后才有；门控在此之前不会调用 kill
+	kill := func() {
+		if p := self.Load(); p != nil {
+			e.remove(p)
+		}
+	}
+	hook, release, err := e.Admission.Admit(ctx, rule, client, kill)
 	if err != nil {
 		return nil
 	}
@@ -198,6 +204,7 @@ func (e *UDPEntry) session(ctx context.Context, client, local netip.AddrPort) *u
 	}
 	sh.sessions[client] = s
 	sh.mu.Unlock()
+	self.Store(s)
 	e.total.Add(1)
 	e.Stats.SessionsCreated.Add(1)
 	e.Stats.SessionsActive.Add(1)

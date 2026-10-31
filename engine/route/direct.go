@@ -17,14 +17,16 @@ import (
 
 // Admission 是新会话的准入门控（ENG-024），由 gate 实现：检查运行授权、份额、连接数与计费授权，
 // 通过时返回本会话拷贝点使用的 Hook（计量与限速）以及会话结束时必须调用一次的 release。
+// kill 由门控在限制生效（授权到期、份额失效、连接数降额）时调用，立即关闭该会话（ENG-028）；
+// 阻塞在读取上的会话不会调用 Hook，因此必须能被主动关闭。
 type Admission interface {
-	Admit(ctx context.Context, rule *types.Rule, client netip.AddrPort) (hook pipe.Hook, release func(), err error)
+	Admit(ctx context.Context, rule *types.Rule, client netip.AddrPort, kill func()) (hook pipe.Hook, release func(), err error)
 }
 
 // AllowAll 不做门控（测试与 M0 早期使用）。
 type AllowAll struct{}
 
-func (AllowAll) Admit(context.Context, *types.Rule, netip.AddrPort) (pipe.Hook, func(), error) {
+func (AllowAll) Admit(context.Context, *types.Rule, netip.AddrPort, func()) (pipe.Hook, func(), error) {
 	return pipe.NopHook{}, func() {}, nil
 }
 
@@ -133,7 +135,7 @@ func (e *DirectEntry) handle(ctx context.Context, sess *lifecycle.Scope, client 
 		return
 	}
 	clientAP, _ := netip.ParseAddrPort(client.RemoteAddr().String())
-	hook, release, err := e.Admission.Admit(ctx, rule, clientAP)
+	hook, release, err := e.Admission.Admit(ctx, rule, clientAP, sess.Shutdown)
 	if err != nil {
 		return // 门控拒绝：直接关闭连接，不连接目标（ENG-024）
 	}
