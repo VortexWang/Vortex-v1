@@ -58,6 +58,8 @@ jobs:
         run: |
           sudo sysctl -w net.core.rmem_max=4194304 net.core.wmem_max=4194304
           sudo env "PATH=$PATH" WARMUP=3 DURATION=15 RUNS=1 UDP_DURATION=15 OUT=bench-out scripts/bench/netns-bench.sh
+      - name: 三中继多跳基准冒烟（NFR-003）
+        run: sudo env "PATH=$PATH" WARMUP=3 DURATION=15 RUNS=1 OUT=bench-out/multihop scripts/bench/multihop-bench.sh
       - name: 隧道基准冒烟（NFR-002 / NFR-004 / NFR-007）
         run: sudo env "PATH=$PATH" WARMUP=3 DURATION=15 RUNS=1 TTFB_N=100 OUT=bench-out/tunnel scripts/bench/tunnel-bench.sh
       - if: always()
@@ -66,12 +68,29 @@ jobs:
       - name: 失败时把汇总与引擎错误输出写成注解（便于通过 API 查看）
         if: failure()
         run: |
-          for f in bench-out/error.txt bench-out/summary.md bench-out/engine.err bench-out/env.txt bench-out/tunnel/error.txt bench-out/tunnel/summary.md; do
+          for f in bench-out/error.txt bench-out/summary.md bench-out/engine.err bench-out/env.txt bench-out/tunnel/error.txt bench-out/tunnel/summary.md bench-out/multihop/error.txt bench-out/multihop/summary.md; do
             [ -s "$f" ] || continue
             body=$(sed 's/%/%25/g' "$f" | head -c 20000 | awk '{printf "%s%%0A", $0}')
             echo "::error title=$f::$body"
           done
           ls -la bench-out || true
+
+  soak:
+    # ENG-T39：长稳与泄漏回归的缩短版（负载 150 秒（含 60 秒预热）、清空后 200 秒；需求 13.3 节为预热 1 小时 + 24 小时、清空后 10 分钟）
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.24.7" }
+      - name: vxsoak
+        run: |
+          set -o pipefail
+          go run ./engine/cmd/vxsoak -load 150s -drain 200s -out soak-out 2>&1 | grep -v " load: " | tee /tmp/soak.log
+      - name: 失败注解
+        if: failure()
+        run: |
+          body=$( (cat soak-out/soak.json 2>/dev/null || tail -50 /tmp/soak.log) | head -c 20000 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+          echo "::error title=soak::$body"
 
   proto:
     runs-on: ubuntu-24.04

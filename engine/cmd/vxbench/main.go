@@ -5,6 +5,9 @@
 //	vxbench exit      -dir D -target A [-link-listen A] [-peer A] [-reverse]
 //	vxbench tls-entry -dir D -listen A -peer A       最小基准：每个会话一条 TLS 1.3（AES-GCM）连接
 //	vxbench tls-exit  -dir D -listen A -target A
+//	vxbench relay     -dir D -name r1 -hop 1 -upstream entry -next r2 -link-listen A -peer A   多跳中继
+//	vxbench tls-relay -dir D -name r1 -listen A -peer A                                       最小基准的中继
+//	（entry 用 -next 指定下一跳名称，exit 用 -hop 与 -upstream；名称：entry、r1～r3、exit）
 //	vxbench delay     -listen A -to A -delay 10ms    用户态单向延迟代理（容器内没有 netem）
 //	vxbench tag       -listen A                      目标：接入后立即写 1 字节，然后丢弃输入
 //	vxbench ttfb      -connect A -n 200              测量从发起连接到收到首字节的时间，输出 JSON
@@ -45,6 +48,23 @@ import (
 	"vortex/engine/vlink"
 )
 
+// idOf 返回节点名称对应的 node_id：entry、exit、r1～r9。
+func idOf(name string) types.UUID {
+	switch name {
+	case "entry":
+		return entryID
+	case "exit":
+		return exitID
+	}
+	if len(name) == 2 && name[0] == 'r' && name[1] >= '1' && name[1] <= '9' {
+		return types.UUID{0xe0, 10 + name[1] - '0'}
+	}
+	check(fmt.Errorf("unknown node name %q", name))
+	return types.UUID{}
+}
+
+var nodeNames = []string{"entry", "r1", "r2", "r3", "exit"}
+
 var (
 	entryID = types.UUID{0xe0, 1}
 	exitID  = types.UUID{0xe0, 2}
@@ -71,15 +91,27 @@ func main() {
 	connect := fs.String("connect", "", "ttfb 连接地址")
 	n := fs.Int("n", 200, "ttfb 次数")
 	gap := fs.Duration("gap", 20*time.Millisecond, "ttfb 两次之间的间隔")
+	name := fs.String("name", "", "节点名称（relay / tls-relay）")
+	hop := fs.Int("hop", -1, "本节点跳位（relay、exit；exit 默认 1）")
+	upstream := fs.String("upstream", "entry", "上游节点名称")
+	next := fs.String("next", "exit", "下一跳节点名称")
 	_ = fs.Parse(args)
 
 	switch cmd {
 	case "pki":
 		check(genPKI(*dir))
 	case "entry":
-		runEntry(*dir, *listen, *peer, *linkListen, *reverse, *linkMode)
+		runEntry(*dir, *listen, *peer, *linkListen, *reverse, *linkMode, *next)
 	case "exit":
-		runExit(*dir, *target, *linkListen, *peer, *reverse)
+		h := *hop
+		if h < 0 {
+			h = 1
+		}
+		runExit(*dir, *target, *linkListen, *peer, *reverse, uint32(h), *upstream)
+	case "relay":
+		runRelay(*dir, *name, uint32(*hop), *upstream, *next, *linkListen, *peer)
+	case "tls-relay":
+		runTLSRelay(*dir, *name, *listen, *peer)
 	case "tls-entry":
 		runTLSEntry(*dir, *listen, *peer)
 	case "tls-exit":
@@ -131,10 +163,11 @@ func genPKI(dir string) error {
 	if err := writePEM(filepath.Join(dir, "ca.pem"), "CERTIFICATE", cder); err != nil {
 		return err
 	}
-	for i, n := range []struct {
-		name string
-		id   types.UUID
-	}{{"entry", entryID}, {"exit", exitID}} {
+	for i, nm := range nodeNames {
+		n := struct {
+			name string
+			id   types.UUID
+		}{nm, idOf(nm)}
 		k, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		u, _ := url.Parse(vlink.NodeURI(n.id))
 		t := &x509.Certificate{SerialNumber: big.NewInt(int64(10 + i)), Subject: pkix.Name{CommonName: n.name}, URIs: []*url.URL{u},
@@ -224,34 +257,48 @@ func peerOf(id types.UUID, addr string, outbound bool, mode types.LinkMode, serv
 	return p
 }
 
-func runEntry(dir, listen, peer, linkListen string, reverse bool, mode string) {
+func runEntry(dir, listen, peer, linkListen string, reverse bool, mode, next string) {
 	rt := newRuntime(dir, "entry", entryID, linkListen)
+	nid := idOf(next)
 	r := baseRule(types.RoleEntry, 0, true)
 	r.NextHop = &types.NextHop{MemberSchedule: types.ScheduleWeightedRoundRobin, Dial: types.DialForward,
-		Members: []types.Member{{NodeID: exitID, Weight: 1}}}
-	p := peerOf(exitID, peer, true, linkModeOf(mode), nil)
+		Members: []types.Member{{NodeID: nid, Weight: 1}}}
+	p := peerOf(nid, peer, true, linkModeOf(mode), nil)
 	if reverse {
 		r.NextHop.Dial = types.DialReverse
-		p = peerOf(exitID, "", false, types.LinkModeMux, nil)
+		p = peerOf(nid, "", false, types.LinkModeMux, nil)
 	}
 	cfg := &types.RuntimeConfig{Version: 1, Generation: 1, NodeID: entryID, Rules: []types.Rule{r}, Peers: []types.Peer{p},
 		Listeners: []types.Listener{{Bind: ap(listen), Network: types.NetworkTCP, RuleID: ruleID}}}
-	serve(rt, cfg, func() (int, int) { st := rt.PeerStats(exitID); return st.Mux, st.PoolIdle })
+	serve(rt, cfg, func() (int, int) { st := rt.PeerStats(nid); return st.Mux, st.PoolIdle })
 }
 
-func runExit(dir, target, linkListen, peer string, reverse bool) {
+func runRelay(dir, name string, hop uint32, upstream, next, linkListen, peer string) {
+	id, up, nx := idOf(name), idOf(upstream), idOf(next)
+	rt := newRuntime(dir, name, id, linkListen)
+	r := baseRule(types.RoleRelay, hop, false)
+	r.AllowedUpstreams = []types.UUID{up}
+	r.NextHop = &types.NextHop{MemberSchedule: types.ScheduleWeightedRoundRobin, Dial: types.DialForward,
+		Members: []types.Member{{NodeID: nx, Weight: 1}}}
+	cfg := &types.RuntimeConfig{Version: 1, Generation: 1, NodeID: id, Rules: []types.Rule{r},
+		Peers: []types.Peer{peerOf(up, "", false, types.LinkModeAuto, nil), peerOf(nx, peer, true, types.LinkModeMux, nil)}}
+	serve(rt, cfg, func() (int, int) { st := rt.PeerStats(nx); return st.Mux, st.PoolIdle })
+}
+
+func runExit(dir, target, linkListen, peer string, reverse bool, hop uint32, upstream string) {
 	rt := newRuntime(dir, "exit", exitID, linkListen)
-	r := baseRule(types.RoleExit, 1, false)
-	r.AllowedUpstreams = []types.UUID{entryID}
+	up := idOf(upstream)
+	r := baseRule(types.RoleExit, hop, false)
+	r.AllowedUpstreams = []types.UUID{up}
 	t := ap(target)
 	r.Targets = []types.Target{{Host: t.Addr().String(), Port: t.Port(), Weight: 1}}
-	p := peerOf(entryID, "", false, types.LinkModeAuto, nil)
+	p := peerOf(up, "", false, types.LinkModeAuto, nil)
 	if reverse {
-		p = peerOf(entryID, peer, true, types.LinkModeMux, []types.UUID{ruleID})
+		p = peerOf(up, peer, true, types.LinkModeMux, []types.UUID{ruleID})
 	}
 	cfg := &types.RuntimeConfig{Version: 1, Generation: 1, NodeID: exitID, Rules: []types.Rule{r}, Peers: []types.Peer{p},
 		TargetPolicy: types.TargetPolicy{AllowPrivatePrefix: []netip.Prefix{netip.PrefixFrom(t.Addr(), t.Addr().BitLen()).Masked()}}}
-	serve(rt, cfg, func() (int, int) { st := rt.PeerStats(entryID); return st.Mux, st.PoolIdle })
+	serve(rt, cfg, func() (int, int) { st := rt.PeerStats(up); return st.Mux, st.PoolIdle })
 }
 
 func serve(rt *engine.Runtime, cfg *types.RuntimeConfig, peerStats func() (int, int)) {
@@ -332,6 +379,31 @@ func relay(a, b net.Conn) {
 func runTLSEntry(dir, listen, peer string) {
 	cfg := tlsConfig(dir, "entry", entryID)
 	ln := listenOrNil(listen)
+	start := time.Now()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				u, err := tls.Dial("tcp", peer, cfg)
+				if err != nil {
+					_ = c.Close()
+					return
+				}
+				relay(c, u)
+			}()
+		}
+	}()
+	waitSignal(start)
+}
+
+// runTLSRelay 是最小基准的中继：接受 TLS，再为每个会话建立一条到下一跳的 TLS 连接。
+func runTLSRelay(dir, name, listen, peer string) {
+	cfg := tlsConfig(dir, name, idOf(name))
+	ln, err := tls.Listen("tcp", listen, cfg)
+	check(err)
 	start := time.Now()
 	go func() {
 		for {

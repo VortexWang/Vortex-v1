@@ -236,6 +236,9 @@ func (rt *Runtime) PeerStats(id types.UUID) tunnel.PeerStats {
 	return rt.peers.Stats(id)
 }
 
+// Sessions 返回当前已准入、尚未结束的会话数（TCP 连接与 UDP 会话，含隧道入站会话）。
+func (rt *Runtime) Sessions() int { return rt.adm.countScope(nil) }
+
 // DroppedEvents 返回因通道已满而丢弃的事件数。
 func (rt *Runtime) DroppedEvents() uint64 { return rt.dropped.Load() }
 
