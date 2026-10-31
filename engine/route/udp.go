@@ -64,6 +64,9 @@ type UDPEntry struct {
 	Healthy     func(key string) bool
 	Events      func(types.Event)
 	MaxSessions int // 0 = 默认 100,000；超出时新会话的数据报被丢弃
+	GuardRef    *atomic.Pointer[Guard]
+
+	ruleRef atomic.Pointer[types.UUID]
 
 	Stats UDPStats
 
@@ -95,6 +98,25 @@ func (e *UDPEntry) Start() error {
 		return err
 	}
 	return e.Scope.Go(e.readLoop)
+}
+
+// SetRule 把监听改绑到另一条规则；已有会话保持建立时的规则快照。
+func (e *UDPEntry) SetRule(id types.UUID) { e.ruleRef.Store(&id) }
+
+func (e *UDPEntry) ruleID() types.UUID {
+	if p := e.ruleRef.Load(); p != nil {
+		return *p
+	}
+	return e.RuleID
+}
+
+func (e *UDPEntry) guard() *Guard {
+	if e.GuardRef != nil {
+		if g := e.GuardRef.Load(); g != nil {
+			return g
+		}
+	}
+	return e.Guard
 }
 
 func (e *UDPEntry) mono() int64 { return int64(time.Since(e.start)) }
@@ -166,12 +188,15 @@ func (e *UDPEntry) session(ctx context.Context, client, local netip.AddrPort) *u
 	if e.total.Load() >= int64(e.MaxSessions) {
 		return nil
 	}
-	rule := e.Tables.Load().Rule(e.RuleID)
+	rule := e.Tables.Load().Rule(e.ruleID())
 	if rule == nil {
 		return nil
 	}
-	var self atomic.Pointer[udpSession] // 会话建立后才有；门控在此之前不会调用 kill
+	// 会话插入表后才有 self；在此之前被 kill（例如配置提交时收紧规则）则记下，插入后立即移除
+	var self atomic.Pointer[udpSession]
+	var dead atomic.Bool
 	kill := func() {
+		dead.Store(true)
 		if p := self.Load(); p != nil {
 			e.remove(p)
 		}
@@ -208,6 +233,10 @@ func (e *UDPEntry) session(ctx context.Context, client, local netip.AddrPort) *u
 	e.total.Add(1)
 	e.Stats.SessionsCreated.Add(1)
 	e.Stats.SessionsActive.Add(1)
+	if dead.Load() {
+		e.remove(s)
+		return nil
+	}
 
 	idle := rule.UDPIdle
 	if idle <= 0 {
@@ -298,7 +327,7 @@ func (e *UDPEntry) dial(ctx context.Context, r *types.Rule) (*net.UDPConn, error
 		cand := sel.At(i)
 		tried[cand.Key] = true
 		t := r.Targets[i]
-		aps, rejected, err := AllowedAddrs(ctx, e.Resolver, e.Guard, t.Host, t.Port)
+		aps, rejected, err := AllowedAddrs(ctx, e.Resolver, e.guard(), t.Host, t.Port)
 		if errors.Is(err, ErrTargetForbidden) {
 			if e.Events != nil {
 				e.Events(types.Event{Kind: types.EventTargetRejected, RuleID: r.RuleID, TenantID: r.TenantID,

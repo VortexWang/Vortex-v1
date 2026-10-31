@@ -44,9 +44,12 @@ type DirectEntry struct {
 	Admission   Admission
 	Resolver    *Resolver
 	Guard       *Guard
-	Healthy     func(key string) bool // 目标探测结果（AGT-007）；nil 表示全部健康
-	Events      func(types.Event)     // nil 表示丢弃
-	DialTimeout time.Duration         // 默认 5 秒
+	Healthy     func(key string) bool  // 目标探测结果（AGT-007）；nil 表示全部健康
+	Events      func(types.Event)      // nil 表示丢弃
+	DialTimeout time.Duration          // 默认 5 秒
+	GuardRef    *atomic.Pointer[Guard] // 非 nil 时优先于 Guard：目标策略可随配置热更新
+
+	ruleRef atomic.Pointer[types.UUID] // SetRule 设置后优先于 RuleID：监听改绑规则时不重建 socket
 
 	// 只保留当前规则快照的选择器（目标只在会话开始时选择）；按快照缓存会随每次配置切换无限增长
 	selMu   sync.Mutex
@@ -69,6 +72,25 @@ func (e *DirectEntry) Start() error {
 		return err
 	}
 	return e.Scope.Go(e.acceptLoop)
+}
+
+// SetRule 把监听改绑到另一条规则；只影响之后接入的会话。
+func (e *DirectEntry) SetRule(id types.UUID) { e.ruleRef.Store(&id) }
+
+func (e *DirectEntry) ruleID() types.UUID {
+	if p := e.ruleRef.Load(); p != nil {
+		return *p
+	}
+	return e.RuleID
+}
+
+func (e *DirectEntry) guard() *Guard {
+	if e.GuardRef != nil {
+		if g := e.GuardRef.Load(); g != nil {
+			return g
+		}
+	}
+	return e.Guard
 }
 
 func (e *DirectEntry) emit(ev types.Event) {
@@ -130,7 +152,7 @@ func (e *DirectEntry) selector(r *types.Rule) *Selector {
 
 func (e *DirectEntry) handle(ctx context.Context, sess *lifecycle.Scope, client net.Conn) {
 	// 会话使用接入时刻的规则快照；之后的切换不影响本会话（ENG-032）
-	rule := e.Tables.Load().Rule(e.RuleID)
+	rule := e.Tables.Load().Rule(e.ruleID())
 	if rule == nil {
 		return
 	}
@@ -184,7 +206,7 @@ func (e *DirectEntry) dialTarget(ctx context.Context, r *types.Rule) (net.Conn, 
 		cand := sel.At(i)
 		tried[cand.Key] = true
 		t := r.Targets[i]
-		aps, rejected, err := AllowedAddrs(ctx, e.Resolver, e.Guard, t.Host, t.Port)
+		aps, rejected, err := AllowedAddrs(ctx, e.Resolver, e.guard(), t.Host, t.Port)
 		if errors.Is(err, ErrTargetForbidden) {
 			e.emit(types.Event{Kind: types.EventTargetRejected, RuleID: r.RuleID, TenantID: r.TenantID,
 				Detail: fmt.Sprintf("%s -> %s", cand.Key, rejected)})

@@ -1,6 +1,6 @@
 # M0 进度（引擎数据面）
 
-> 更新：2026-10-31（第四批）· 对应开发方案 01（转发引擎）与 06（测试与交付）
+> 更新：2026-10-31（第五批）· 对应开发方案 01（转发引擎）与 06（测试与交付）
 
 ## 已完成
 
@@ -28,6 +28,8 @@
 | ENG-T17 | 连接数：执行点按租户计；超限新会话立即拒绝；份额下调时从最近建立者开始，排空期满后关闭 | 同上 |
 | ENG-T18 | 限制执行：运行授权或份额到期时由引擎定时器关闭受影响会话（包括阻塞在读取上的空闲会话），产生开始与完成事件 | 同上 |
 | ENG-T19 | 没有计费授权时发出 grant_needed 并最多等待 200 ms；剩余 30% 时每份授权发一次 grant_low | 同上；“闲置 10 分钟缩为 1 MiB 常驻额度”属于 Edge Hub 的签发策略（HUB-T11），引擎侧无需额外逻辑 |
+| ENG-T02 | 模拟 Agent `engine/enginetest`：两阶段应用（有资源错误即中止）、下发授权全集、按周期拉取并累加用量、收集事件 | 见“配置应用”表 |
+| ENG-T33～T35 | `engine.Runtime` 实现完整 `Engine` 接口：入口 → 门控 → 管道组装；Prepare 校验与逐对象分类、Commit 原子切换、Abort、Drain、State（对象级实际版本） | 同上；下一跳（隧道）规则在 M0 报告 `NOT_IMPLEMENTED`，M1 实现 |
 
 ## 路由（engine/route）测试
 
@@ -99,6 +101,27 @@
 | TestE2ERunGrantExpiryClosesIdleSession | 阻塞在读取上的空闲会话在运行授权到期时被关闭 |
 | TestIdleDirectionHoldsNoGrant（pipe） | 一个方向持续有数据时，空闲方向不持有任何未决授权 |
 
+### 配置应用（engine.Runtime 与模拟 Agent）
+
+变更分类规则：规则新增为 hot、删除为 stop；规则修改中，租户、执行点身份、角色、允许上游变化，或移除了目标、关闭了某种网络，属于权限收紧，为 stop（已有会话在提交时关闭），其余（限速、连接数、调度、空闲超时、PROXY protocol、新增目标）为 hot。监听新增为 hot、删除为 stop、改绑到另一条规则为 rebuild（保留 socket，新会话走新规则，已有会话保持旧快照）。
+
+| 测试 | 覆盖 |
+| --- | --- |
+| TestApplyForwardsAndMeters | 首次应用全部 hot；经 Agent 拉取的计量与实际传输一字节不差；State 的对象版本 |
+| TestPrepareBindsWithoutListeningAndAbortReleases | 准备后端口被占住但拒绝连接；中止释放端口、不改变生效状态；同一版本可重新准备 |
+| TestPortInUseReportedAndVersionRules | 端口被占报告 PORT_IN_USE 并被模拟 Agent 中止；同时只允许一个未决版本；旧版本与相同版本被拒绝；提交非未决版本被拒绝 |
+| TestInvalidConfigRejected | 引用不存在的规则、规则未启用该网络、没有目标、重复规则 |
+| TestNextHopRuleReportedNotImplemented | 下一跳规则报告 NOT_IMPLEMENTED，部分应用后状态为 failed |
+| TestHotChangeKeepsSessionsTighteningClosesThem | hot 变更后已有会话照常；移除目标时提交前报告受影响会话数 1，提交后该会话被关闭，新会话走新目标 |
+| TestListenerRemovalAndRebind | 删除监听：会话关闭、端口释放、不再接入；改绑监听：已有会话保留，新会话到新规则的目标 |
+| TestRuleRemovalClosesSessions | 删除规则只关闭该规则的会话 |
+| TestDrain / TestDrainCompletesWhenSessionsEnd | 排空期间拒绝新会话、保留已有会话，期限到后关闭剩余会话；会话自然结束时排空立即完成 |
+| TestUDPApply | UDP 经运行时转发与计量；删除规则后不再转发 |
+| TestGrantNeededEventReachesAgent | 无计费授权时 grant_needed 事件经 Events 通道到达 Agent |
+| TestCloseStopsEverything | Close 关闭全部会话，无 goroutine 泄漏 |
+
+变异检查（9 项全部被发现）：不吊销收紧规则、收紧判定恒为否、删除监听不关闭、改绑不生效、排空不拒绝新会话、排空期满不关闭、中止不释放、不检查版本单调、不报告受影响会话数。
+
 ## 实现中发现并修正的问题
 
 | 问题 | 发现方式 | 修正 |
@@ -118,8 +141,10 @@
 | `abortErr` 被两个方向并发读写 | 代码审查 | 改为原子访问 |
 | 对端停止读取时写入可能永久阻塞（另一方向已结束时无人检测空闲） | 代码审查 | 写入同样受空闲时长约束 |
 | splice 回调在循环内重复创建，每 MiB 8 次分配 | 基准 | 回调每方向只创建一次，降为 0 |
+| 提交时关闭收紧规则的会话存在空窗：切换前读到旧快照、切换后才准入的会话不会被关闭 | 代码审查 | 准入包装与吊销共用一把锁；吊销覆盖旧规则表中的快照（即使它还没有会话），持有被吊销快照的准入一律拒绝 |
+| UDP 会话在插入会话表之前被关闭（kill）时什么也不做，会话存活 | 代码审查 | 记下提前关闭，插入后立即移除 |
 | 需求 8.2 节 `DrainUsage` 签名与契约 C2a 不一致 | 编写接口时 | 按契约实现，提交需求变更 CR-01 |
 
 ## 下一步（M0 剩余）
 
-ENG-T02 模拟 Agent（同时实现 `Engine` 接口，把 route、gate、meter 组装起来）→ ENG-T36 网络命名空间基准框架 → 在启用正式计量与门控的条件下测量 NFR-001、NFR-005。M0 退出标准：NFR-001、NFR-005。
+ENG-T36 网络命名空间基准框架 → 在启用正式计量与门控的条件下测量 NFR-001、NFR-005。M0 退出标准：NFR-001、NFR-005。
