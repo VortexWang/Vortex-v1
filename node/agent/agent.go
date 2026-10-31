@@ -81,13 +81,32 @@ func (a *Agent) sendLocked(m Out) {
 	}
 }
 
-// Connected 在新的控制连接建立后调用：发送 AgentHello（每条流的第一条消息）。
+// Hello 返回本次启动的 AgentHello（每条流的第一条消息）。
+func (a *Agent) Hello() Hello {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.helloLocked()
+}
+
+func (a *Agent) helloLocked() Hello {
+	return Hello{Node: a.opt.Node, Boot: a.boot.Current, PreviousBoot: a.boot.Previous,
+		AgentVersion: a.opt.AgentVersion, AppliedConfigVersion: a.rec.AppliedVersion(), UnackedUsageFromSeq: a.rep.FirstUnacked()}
+}
+
+// Connected 在新的控制连接建立后调用：发送 AgentHello。
 func (a *Agent) Connected(s Session) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.sess = s
-	a.sendLocked(Hello{Node: a.opt.Node, Boot: a.boot.Current, PreviousBoot: a.boot.Previous,
-		AgentVersion: a.opt.AgentVersion, AppliedConfigVersion: a.rec.AppliedVersion(), UnackedUsageFromSeq: a.rep.FirstUnacked()})
+	a.sendLocked(a.helloLocked())
+}
+
+// Adopt 接管一条已发送过 Hello 的流（实例切换时由探测连接转正，HUB-014）。随后应把该流已收到的
+// HubHello 交给 HandleHub。
+func (a *Agent) Adopt(s Session) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.sess = s
 }
 
 // Disconnected：控制连接断开。授权保留，Engine 照常转发直至授权到期（AGT-011）。

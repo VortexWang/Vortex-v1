@@ -530,3 +530,42 @@ func (m *Manager) Total(k Key) uint64 {
 	}
 	return s
 }
+
+// Current 返回节点当前启动的每个（租户, 种类）最新的有效租约（启动申请时一并下发，AGT-010）。
+func (m *Manager) Current(node model.UUID) []Lease {
+	now := m.clk.Now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []Lease
+	for nk, h := range m.held {
+		if nk.node != node {
+			continue
+		}
+		if l, ok := h.latest(now); ok && l.Boot == m.boot[node] {
+			out = append(out, l)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return lessKey(out[i].key(), out[j].key()) })
+	return out
+}
+
+// Renew 按原值续租节点在某（租户, 种类）上的最新租约（LIM-004：节点每 60 秒续期）。返回新租约；
+// 没有有效租约或启动不符时返回 false。原值续租不改变持有量，自治冻结期间同样允许。
+func (m *Manager) Renew(node, boot model.UUID, k Key) (Lease, bool, error) {
+	now := m.clk.Now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	h := m.held[nodeKey{node, k}]
+	if h == nil || m.boot[node] != boot {
+		return Lease{}, false, nil
+	}
+	l, ok := h.latest(now)
+	if !ok {
+		return Lease{}, false, nil
+	}
+	n := Lease{ID: model.NewUUID(), Node: node, Boot: boot, Tenant: k.Tenant, Kind: k.Kind, Amount: l.Amount, IssuedAt: now, TTL: TTL}
+	if err := m.issueLocked([]Lease{n}); err != nil {
+		return Lease{}, false, err
+	}
+	return n, true, nil
+}

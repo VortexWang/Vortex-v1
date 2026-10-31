@@ -292,3 +292,23 @@ func TestTransfer(t *testing.T) {
 		t.Fatal("lease outlived its TTL")
 	}
 }
+
+func TestRenewAndCurrent(t *testing.T) {
+	m, _, _ := setup(t)
+	if ls := m.Current(nA); len(ls) != 2 || ls[0].Amount == 0 {
+		t.Fatalf("current %+v", ls)
+	}
+	l, ok, err := m.Renew(nA, bootA, rateK)
+	if err != nil || !ok || l.Amount != 60_000_000 || l.Boot != bootA {
+		t.Fatalf("renew %+v %v %v", l, ok, err)
+	}
+	if _, ok, _ := m.Renew(nA, bootB, rateK); ok {
+		t.Fatal("renewed for a boot that is not the node's current one")
+	}
+	if _, ok, _ := m.Renew(nA, bootA, Key{model.UUID{0x99}, model.GrantShareRate}); ok {
+		t.Fatal("renewed a share the node does not hold")
+	}
+	if m.Total(rateK) != 100_000_000 {
+		t.Fatal("renewal changed the total")
+	}
+}
