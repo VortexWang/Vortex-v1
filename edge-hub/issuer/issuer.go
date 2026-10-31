@@ -41,6 +41,7 @@ var (
 	ErrNotEnforcement   = errors.New("NOT_ENFORCEMENT_POINT")
 	ErrNoBillingVersion = errors.New("NO_BILLING_VERSION")
 	ErrUnknownGrant     = errors.New("UNKNOWN_GRANT")
+	ErrStaleBoot        = errors.New("STALE_BOOT") // 该启动已被同一节点的新启动取代（LIM-010）
 )
 
 type AccountStatus uint8
@@ -96,6 +97,7 @@ type Grant struct {
 	IssuedAt       time.Time       `json:"issued_at"`
 	TTL            time.Duration   `json:"ttl"`
 	Used           uint64          `json:"-"` // 最近一次上报的已用量（非 final）
+	Settling       bool            `json:"-"` // 所属启动已被新启动取代：只接受补报与结算（AGT-009、LIM-010）
 }
 
 // Issuer 签发运行授权与计费授权。
@@ -111,12 +113,16 @@ type Issuer struct {
 	restrict map[model.UUID]TenantRestriction
 	rver     uint64
 	versions []BillingVersion
-	grants   map[model.UUID]*Grant // 未结算的计费授权与有效期内的运行授权
+	grants   map[model.UUID]*Grant              // 未结算的计费授权与有效期内的运行授权
+	boots    map[model.UUID]model.UUID          // 节点当前的启动
+	dead     map[model.UUID]map[model.UUID]bool // 节点已被取代的启动
+	held     map[model.UUID]HeldGrant           // 节点报告持有的、其他实例签发的授权（HUB-014）
 }
 
 // New 创建签发器；canRenewRun 通常为 mode.Machine.CanRenewRun。
 func New(clk clock.Clock, q *quota.Accounts, canRenewRun func() bool) *Issuer {
-	return &Issuer{clk: clk, q: q, canRun: canRenewRun, restrict: map[model.UUID]TenantRestriction{}, grants: map[model.UUID]*Grant{}}
+	return &Issuer{clk: clk, q: q, canRun: canRenewRun, restrict: map[model.UUID]TenantRestriction{}, grants: map[model.UUID]*Grant{},
+		boots: map[model.UUID]model.UUID{}, dead: map[model.UUID]map[model.UUID]bool{}, held: map[model.UUID]HeldGrant{}}
 }
 
 // Bind 在账本重放完成后绑定账本。
@@ -133,6 +139,19 @@ func (is *Issuer) Replay(e ledger.Entry) (bool, error) {
 			return true, err
 		}
 		is.grants[g.ID] = &g
+		is.noteBootLocked(g.Node, g.Boot)
+	case KindTransfer:
+		var d transferData
+		if err := json.Unmarshal(e.Data, &d); err != nil {
+			return true, err
+		}
+		is.applyTransferLocked(d)
+	case KindHeld:
+		var d heldData
+		if err := json.Unmarshal(e.Data, &d); err != nil {
+			return true, err
+		}
+		is.applyHeldLocked(d)
 	case quota.KindIssue:
 		_, _, _, _, _, meta, err := quota.IssueMeta(e)
 		if err != nil {
@@ -144,6 +163,7 @@ func (is *Issuer) Replay(e ledger.Entry) (bool, error) {
 				return false, err
 			}
 			is.grants[g.ID] = &g
+			is.noteBootLocked(g.Node, g.Boot)
 		}
 		return false, nil // quota 也要处理这条
 	case quota.KindSettle:
@@ -243,6 +263,9 @@ func (is *Issuer) IssueRun(node, boot model.UUID, rules []RuleState) (*Grant, ma
 	}
 	is.mu.Lock()
 	defer is.mu.Unlock()
+	if is.dead[node][boot] {
+		return nil, nil, ErrStaleBoot
+	}
 	is.pruneRunLocked(now)
 	g := &Grant{ID: model.NewUUID(), Kind: model.GrantRun, Node: node, Boot: boot, Generation: is.Generation, IssuedAt: now, TTL: RunTTL}
 	for _, r := range rules {
@@ -263,6 +286,7 @@ func (is *Issuer) IssueRun(node, boot model.UUID, rules []RuleState) (*Grant, ma
 		return nil, nil, err
 	}
 	is.grants[g.ID] = g
+	is.noteBootLocked(node, boot)
 	return g, refused, nil
 }
 
@@ -307,6 +331,9 @@ func (is *Issuer) IssueBilling(req BillingRequest) (*Grant, error) {
 	}
 	is.mu.Lock()
 	defer is.mu.Unlock()
+	if is.dead[req.Node][req.Boot] {
+		return nil, ErrStaleBoot
+	}
 	if err := is.checkLocked(r.TenantID, r.RuleID, now); err != nil {
 		return nil, err
 	}
@@ -333,6 +360,7 @@ func (is *Issuer) IssueBilling(req BillingRequest) (*Grant, error) {
 		return nil, err
 	}
 	is.grants[g.ID] = g
+	is.noteBootLocked(req.Node, req.Boot)
 	return g, nil
 }
 
