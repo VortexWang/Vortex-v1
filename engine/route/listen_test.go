@@ -209,3 +209,28 @@ func TestRegistryV4V6Independent(t *testing.T) {
 	}
 	_ = r6.Abort()
 }
+
+func TestPortZeroReservationsIndependent(t *testing.T) {
+	// 端口 0 由内核分配，多个同时存在的预留互不冲突，且登记的是实际端口
+	var rs []*Reserved
+	for i := 0; i < 5; i++ {
+		r, err := ReserveUDP(netip.MustParseAddrPort("127.0.0.1:0"))
+		if err != nil {
+			t.Fatalf("udp #%d: %v", i, err)
+		}
+		r2, err := ReserveTCP(netip.MustParseAddrPort("127.0.0.1:0"))
+		if err != nil {
+			t.Fatalf("tcp #%d: %v", i, err)
+		}
+		if r.Bind.Port() == 0 || r2.Bind.Port() == 0 {
+			t.Fatal("actual port not recorded")
+		}
+		if _, err := ReserveTCP(r2.Bind); !errors.Is(err, ErrPortInUse) {
+			t.Fatal("actual port must be registered after bind")
+		}
+		rs = append(rs, r, r2)
+	}
+	for _, r := range rs {
+		_ = r.Abort()
+	}
+}

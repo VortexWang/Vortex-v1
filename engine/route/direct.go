@@ -146,6 +146,18 @@ func (e *DirectEntry) handle(ctx context.Context, sess *lifecycle.Scope, client 
 	if sess.Own(target) != nil {
 		return
 	}
+	if rule.ProxyProtocol == types.ProxyV1 || rule.ProxyProtocol == types.ProxyV2 {
+		local, _ := netip.ParseAddrPort(client.LocalAddr().String())
+		h, err := ProxyHeader(rule.ProxyProtocol, false, clientAP, local)
+		if err != nil {
+			return
+		}
+		_ = target.SetWriteDeadline(time.Now().Add(e.DialTimeout))
+		if _, err := target.Write(h); err != nil { // 平台生成的头部，不经过计量钩子（ENG-035）
+			return
+		}
+		_ = target.SetWriteDeadline(time.Time{})
+	}
 	pipe.Run(ctx, client, target, pipe.Options{
 		Hook:        hook,
 		IdleTimeout: rule.TCPIdle,

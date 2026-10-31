@@ -32,8 +32,12 @@ func (r *Reserved) releasePort() { r.released.Do(func() { ports.release(r.Networ
 // ReserveTCP 创建并 bind 一个不 listen 的 TCP socket。
 // 本进程内的冲突由登记表判定（见 registry.go）；不设置 SO_REUSEPORT。
 func ReserveTCP(bind netip.AddrPort) (*Reserved, error) {
-	if err := ports.acquire("tcp", bind); err != nil {
-		return nil, err
+	// 端口 0 表示由内核分配：内核保证唯一，bind 之后按实际端口登记
+	explicit := bind.Port() != 0
+	if explicit {
+		if err := ports.acquire("tcp", bind); err != nil {
+			return nil, err
+		}
 	}
 	addr := bind.Addr().Unmap()
 	family := syscall.AF_INET
@@ -42,7 +46,7 @@ func ReserveTCP(bind netip.AddrPort) (*Reserved, error) {
 	}
 	ok := false
 	defer func() {
-		if !ok {
+		if !ok && explicit {
 			ports.release("tcp", bind)
 		}
 	}()
@@ -75,26 +79,53 @@ func ReserveTCP(bind netip.AddrPort) (*Reserved, error) {
 		}
 		return nil, err
 	}
+	if !explicit {
+		sa, err := syscall.Getsockname(fd)
+		if err != nil {
+			return nil, err
+		}
+		switch a := sa.(type) {
+		case *syscall.SockaddrInet4:
+			bind = netip.AddrPortFrom(bind.Addr(), uint16(a.Port))
+		case *syscall.SockaddrInet6:
+			bind = netip.AddrPortFrom(bind.Addr(), uint16(a.Port))
+		}
+		if err := ports.acquire("tcp", bind); err != nil {
+			return nil, err
+		}
+	}
 	ok = true
 	return &Reserved{Bind: bind, Network: "tcp", fd: fd}, nil
 }
 
 // ReserveUDP bind 一个 UDP socket，但在 Commit 之前不读取。
 func ReserveUDP(bind netip.AddrPort) (*Reserved, error) {
-	if err := ports.acquire("udp", bind); err != nil {
-		return nil, err
+	explicit := bind.Port() != 0
+	if explicit {
+		if err := ports.acquire("udp", bind); err != nil {
+			return nil, err
+		}
 	}
 	network := "udp4"
 	if bind.Addr().Unmap().Is6() {
 		network = "udp6"
 	}
 	c, err := net.ListenUDP(network, net.UDPAddrFromAddrPort(bind))
-	if err != nil {
+	if err != nil && explicit {
 		ports.release("udp", bind)
+	}
+	if err != nil {
 		if errors.Is(err, syscall.EADDRINUSE) {
 			return nil, fmt.Errorf("%w: udp %s", ErrPortInUse, bind)
 		}
 		return nil, err
+	}
+	if !explicit {
+		bind = netip.AddrPortFrom(bind.Addr(), uint16(c.LocalAddr().(*net.UDPAddr).Port))
+		if err := ports.acquire("udp", bind); err != nil {
+			c.Close()
+			return nil, err
+		}
 	}
 	return &Reserved{Bind: bind, Network: "udp", fd: -1, udp: c}, nil
 }
