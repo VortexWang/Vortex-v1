@@ -1,3 +1,6 @@
 go 1.24.7
 
-use ./engine
+use (
+	./engine
+	./edge-hub
+)
