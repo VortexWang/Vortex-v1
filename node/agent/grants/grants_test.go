@@ -127,6 +127,9 @@ func TestRenewal(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("run renewals %d", n)
 	}
+	if m.Answered() {
+		t.Fatal("a renewal answer is not the bootstrap answer")
+	}
 	m.Connected(types.UUID{})
 	clk.Advance(RenewEvery)
 	if d := m.Due(); d != nil {
@@ -270,5 +273,36 @@ func TestRevokePush(t *testing.T) {
 	}
 	if set := m.EngineSet(); len(set.Run) != 1 || set.Run[0].Meta.GrantID != (types.UUID{2}) {
 		t.Fatalf("after revoke %+v", set)
+	}
+}
+
+// AGT-010：没有有效运行授权时发启动申请（不带当前授权 ID），在途不重复；作答后 Answered；有授权后不再发。
+func TestBootstrap(t *testing.T) {
+	m, clk := setup()
+	r := m.Bootstrap()
+	if r == nil || r.Kind != KindRun || r.CurrentGrant != (types.UUID{}) {
+		t.Fatalf("bootstrap %+v", r)
+	}
+	if m.Bootstrap() != nil {
+		t.Fatal("duplicate bootstrap in flight")
+	}
+	if m.Answered() {
+		t.Fatal("answered before a response")
+	}
+	_, _ = m.Apply(hubA, Response{RequestID: r.ID, Error: "RULE_STOPPED"})
+	if !m.Answered() {
+		t.Fatal("a refusal is an answer")
+	}
+	_, _ = m.Apply(hubA, Response{Set: runSet(1, hubA, boot, ruleX)})
+	clk.Advance(AsyncTimeout)
+	if m.Bootstrap() != nil {
+		t.Fatal("bootstrap with a valid run grant")
+	}
+	clk.Advance(5 * time.Minute) // 运行授权全部到期：重新申请
+	if m.Bootstrap() == nil {
+		t.Fatal("no bootstrap after all run grants expired")
+	}
+	if New(clk, boot).Bootstrap() != nil {
+		t.Fatal("bootstrap without a hub")
 	}
 }

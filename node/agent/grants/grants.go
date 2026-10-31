@@ -96,6 +96,7 @@ type Manager struct {
 	nextID    uint64
 	pending   map[uint64]*Request
 	lastError map[types.UUID]string // 按规则（计费）或租户（份额）记录最近的拒绝原因
+	answered  bool                  // 签发方已对启动申请（Bootstrap）作答
 }
 
 func New(clk clock.Clock, boot types.UUID) *Manager {
@@ -135,6 +136,9 @@ func (m *Manager) Apply(from types.UUID, r Response) (bool, error) {
 	}
 	req := m.pending[r.RequestID]
 	delete(m.pending, r.RequestID)
+	if req != nil && req.Kind == KindRun && req.CurrentGrant == (types.UUID{}) {
+		m.answered = true
+	}
 	if r.Error != "" && req != nil {
 		key := req.Rule
 		if req.Kind != KindBilling {
@@ -395,4 +399,33 @@ func (m *Manager) RunRemaining() map[types.UUID]time.Duration {
 		}
 	}
 	return out
+}
+
+// Bootstrap 返回启动（或运行授权全部失效）时的首次申请：kind = RUN、不带当前授权 ID，签发方为本节点全部
+// 规则签发运行授权并一并下发份额（AGT-010）。已有有效运行授权或申请在途时返回 nil。
+func (m *Manager) Bootstrap() *Request {
+	now := m.clk.Now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.hub == (types.UUID{}) {
+		return nil
+	}
+	m.expireLocked(now)
+	for _, g := range m.grants {
+		if g.kind == KindRun {
+			return nil
+		}
+	}
+	if m.inFlightLocked(func(p *Request) bool { return p.Kind == KindRun && p.CurrentGrant == (types.UUID{}) }, now, false) {
+		return nil
+	}
+	r := m.sendLocked(Request{Kind: KindRun}, now)
+	return &r
+}
+
+// Answered 报告签发方是否已对启动申请作答（无论是否签发了全部规则）。
+func (m *Manager) Answered() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.answered
 }
