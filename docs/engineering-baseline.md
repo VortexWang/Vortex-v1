@@ -19,14 +19,14 @@
 | --- | --- | --- |
 | protoc | 35.1（grpcio-tools 1.85.0 内置） | 已验证：编译全部 proto |
 | buf | 1.47.2 | 已验证：CI 与本地（经 npm 包 `@bufbuild/buf`）lint、build 通过；排除的 4 条规则见 `proto/buf.yaml` |
-| protoc-gen-go / protoc-gen-go-grpc | v1.36.6 / v1.5.1 | 选定，CI `codegen` 作业验证 |
-| Goose | v3.24.1 | 选定，CI `db` 作业验证 |
-| oapi-codegen | v2.4.1 | 选定，CI `codegen` 作业验证 |
+| protoc-gen-go / protoc-gen-go-grpc | v1.36.6 / v1.5.1 | 已验证：CI 生成全部 proto 的 Go 代码并编译通过 |
+| Goose | v3.24.1 | 已验证：CI 执行 up / status / reset / up，约束测试通过 |
+| oapi-codegen | v2.4.1 | 已验证：CI 生成 Gin 服务端接口并编译通过（要求 OpenAPI 3.0，见 `api/README.md`） |
 | @redocly/cli | 1.34.0 | 已验证：0 错误 0 警告 |
 | openapi-typescript | 7.4.4（必须加 `--default-non-nullable false`） | 已验证 |
 | TypeScript | 5.6.3 | 已验证：`--strict` 编译类型契约测试 |
 
-“选定”项在 CI 首次通过后改为“已验证”。
+全部工具已在 CI 中验证（2026-10-31，运行 41170780929）。
 
 ## 3. 容器镜像
 
