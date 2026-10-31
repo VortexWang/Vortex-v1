@@ -17,7 +17,7 @@
 #   OUT=bench-results/<时间>                    结果目录：每次运行的 iperf3 JSON、引擎统计、summary.md
 #   PHASES="tcp udp"                          只跑其中一部分时，判定也只针对已跑的部分
 #   CHECK=1                                    按 NFR-001 / NFR-005 判定，不通过时退出码为 1
-set -euo pipefail
+set -Eeuo pipefail
 # 任何一步失败时打印位置，CI 日志不可见时也能从注解中看到
 trap 'echo "netns-bench: failed at line $LINENO: $BASH_COMMAND" | tee -a "${OUT:-/tmp}/error.txt" >&2' ERR
 
@@ -27,6 +27,7 @@ export UDP_RATE UDP_LEN
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 OUT=${OUT:-$ROOT/bench-results/$(date -u +%Y%m%dT%H%M%SZ)}
 mkdir -p "$OUT"
+OUT=$(cd "$OUT" && pwd) # 绝对路径：iperf3 -D 守护化后工作目录变为 /，相对的 pidfile 路径会失效
 C=vxb-c N=vxb-n T=vxb-t
 ENGINE_PORT=15201 TARGET=10.201.2.2:5201
 
