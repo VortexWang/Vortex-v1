@@ -162,12 +162,30 @@ func (c *pathConn) Close() error {
 			c.r.durations.record(c.rule.RuleID, time.Since(c.start))
 		}
 		var se *vlink.StreamError
-		if c.entry && errors.As(c.Stream.Err(), &se) && se.Remote {
+		if c.entry && errors.As(c.Stream.Err(), &se) && se.Remote && pathFailure(se) {
 			c.r.emit(types.Event{Kind: types.EventOpenRejected, RuleID: c.rule.RuleID, TenantID: c.rule.TenantID,
 				PeerID: c.peer, Detail: fmt.Sprintf("path: %v %s", se.Code, se.Text)})
 		}
 	})
 	return c.Stream.Close()
+}
+
+// upstreamReason 是向上游转发下游原因时用的原因码与说明。上游流已被接受，只能以 RST 转发；
+// 下游是开流拒绝（OPEN_ERR）且没有说明时补上说明，入口据此仍能区分拒绝与正常结束。
+func upstreamReason(se *vlink.StreamError) (vlink.ErrorCode, string) {
+	if se.Open && se.Text == "" {
+		return se.Code, "rejected at next hop"
+	}
+	return se.Code, se.Text
+}
+
+// pathFailure 区分路径上的拒绝与限制（记事件，供前端按段指出原因）和正常结束：
+// 下游关流时不带说明的 RST(no_route)（目标关闭或重置连接、对端关闭会话）与 UDP 空闲回收属于正常结束。
+func pathFailure(se *vlink.StreamError) bool {
+	if se.Open || se.Code != vlink.CodeNoRoute {
+		return true
+	}
+	return se.Text != "" && se.Text != "idle"
 }
 
 // remoteError 返回下游流被对端终止的原因。
@@ -342,7 +360,7 @@ func propagate(s *vlink.Stream, down any, hook any) {
 		}
 	}
 	if se := remoteError(down); se != nil {
-		s.Reset(se.Code, se.Text)
+		s.Reset(upstreamReason(se))
 	}
 	if se := remoteReason(s); se != nil {
 		if pc, ok := asPath(down); ok {

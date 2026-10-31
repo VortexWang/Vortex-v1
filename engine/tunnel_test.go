@@ -918,3 +918,44 @@ func TestShareExpiryRSTReachesEndOfPath(t *testing.T) {
 		t.Fatalf("far end got RST %v, want rate_limited", code)
 	}
 }
+
+// 目标在会话结束时重置连接（例如 iperf3 结束时）属于正常结束：入口不得记录路径拒绝事件。
+func TestTargetResetIsNotAPathFailure(t *testing.T) {
+	tp := threeHop(t)
+	rst, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rst.Close()
+	go func() {
+		for {
+			c, err := rst.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = c.Write([]byte{'R'})
+			time.Sleep(50 * time.Millisecond)
+			_ = c.(*net.TCPConn).SetLinger(0) // 关闭时发送 RST
+			_ = c.Close()
+		}
+	}()
+	cfg := *tp.c.cfg
+	r := cfg.Rules[0]
+	ap := netip.MustParseAddrPort(rst.Addr().String())
+	r.Targets = []types.Target{{Host: ap.Addr().String(), Port: ap.Port(), Weight: 1}}
+	cfg.Rules, cfg.Version = []types.Rule{r}, 2
+	tp.c.apply(t, &cfg)
+	for i := 0; i < 5; i++ {
+		c, tag := dial(t, tp.entry)
+		if tag != 'R' {
+			t.Fatalf("tag %q", tag)
+		}
+		_, _ = c.Write(make([]byte, 64<<10)) // 目标不读：关闭时内核发 RST
+		closedSoon(c)
+		c.Close()
+	}
+	time.Sleep(300 * time.Millisecond)
+	if evs := tp.a.ag.Events(types.EventOpenRejected); len(evs) != 0 {
+		t.Fatalf("normal session ends reported as path failures: %+v", evs)
+	}
+}

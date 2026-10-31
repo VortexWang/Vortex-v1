@@ -53,13 +53,15 @@ jobs:
         run: |
           sudo sysctl -w net.core.rmem_max=4194304 net.core.wmem_max=4194304
           sudo env "PATH=$PATH" WARMUP=3 DURATION=15 RUNS=1 UDP_DURATION=15 OUT=bench-out scripts/bench/netns-bench.sh
+      - name: 隧道基准冒烟（NFR-002 / NFR-004 / NFR-007）
+        run: sudo env "PATH=$PATH" WARMUP=3 DURATION=15 RUNS=1 TTFB_N=100 OUT=bench-out/tunnel scripts/bench/tunnel-bench.sh
       - if: always()
         uses: actions/upload-artifact@v4
         with: { name: netns-bench, path: bench-out, if-no-files-found: ignore }
       - name: 失败时把汇总与引擎错误输出写成注解（便于通过 API 查看）
         if: failure()
         run: |
-          for f in bench-out/error.txt bench-out/summary.md bench-out/engine.err bench-out/env.txt; do
+          for f in bench-out/error.txt bench-out/summary.md bench-out/engine.err bench-out/env.txt bench-out/tunnel/error.txt bench-out/tunnel/summary.md; do
             [ -s "$f" ] || continue
             body=$(sed 's/%/%25/g' "$f" | head -c 20000 | awk '{printf "%s%%0A", $0}')
             echo "::error title=$f::$body"
