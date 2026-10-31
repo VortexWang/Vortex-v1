@@ -38,6 +38,7 @@ cleanup() {
 	[[ -f $OUT/iperf3.pid ]] && kill "$(cat "$OUT/iperf3.pid")" 2>/dev/null || true
 	rm -f "$OUT/iperf3.pid"
 	for ns in $C $E $X $T; do ip netns del $ns 2>/dev/null || true; done
+	rm -rf "$PKI" # 测试证书含私钥，不留在结果目录中
 }
 trap cleanup EXIT
 
