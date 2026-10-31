@@ -35,7 +35,8 @@ jobs:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
       - uses: bufbuild/buf-setup-action@v1
-        with: { version: "1.47.2" }
+        # 必须带令牌：匿名下载会因共享出口 IP 触发 GitHub API 限流而随机失败
+        with: { version: "1.47.2", github_token: "${{ github.token }}" }
       - name: buf lint
         run: buf lint proto
       - name: buf breaking（相对 main，ENGR-004）
@@ -50,7 +51,8 @@ jobs:
       - uses: actions/setup-go@v5
         with: { go-version: "1.24.7" }
       - uses: bufbuild/buf-setup-action@v1
-        with: { version: "1.47.2" }
+        # 必须带令牌：匿名下载会因共享出口 IP 触发 GitHub API 限流而随机失败
+        with: { version: "1.47.2", github_token: "${{ github.token }}" }
       - name: 安装生成器（版本见 docs/engineering-baseline.md）
         run: |
           go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.6
