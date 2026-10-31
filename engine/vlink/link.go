@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -149,7 +150,7 @@ var framePool = sync.Pool{New: func() any { b := make([]byte, 0, HeaderLen+MaxPa
 
 // Link 是一条已完成握手的 VLink 链路上的流复用。
 type Link struct {
-	tc   *tls.Conn
+	tc   transport
 	r    *Reader
 	peer PeerInfo
 	opt  LinkOptions
@@ -203,10 +204,25 @@ type Link struct {
 	wg        sync.WaitGroup
 }
 
+// transport 是链路使用的连接能力；生产环境为 *tls.Conn，测试可用内存管道代替。
+type transport interface {
+	Write(b []byte) (int, error)
+	Close() error
+	SetWriteDeadline(t time.Time) error
+	LocalAddr() net.Addr
+	RemoteAddr() net.Addr
+	ConnectionState() tls.ConnectionState
+}
+
 // NewLink 在握手完成的连接上启动流复用（读、写各一个 goroutine）。
 func NewLink(est *Established, opt LinkOptions) *Link {
 	opt.fill()
-	l := &Link{tc: est.TLS, r: est.Reader, peer: est.Peer, opt: opt, streams: map[uint32]*Stream{},
+	return newLink(est.TLS, est.Reader, est.Peer, opt)
+}
+
+func newLink(tc transport, r *Reader, peer PeerInfo, opt LinkOptions) *Link {
+	opt.fill()
+	l := &Link{tc: tc, r: r, peer: peer, opt: opt, streams: map[uint32]*Stream{},
 		sendWin: int64(opt.LinkWindow), recvAvail: int64(opt.LinkWindow),
 		acceptCh: make(chan *Stream, opt.AcceptBacklog), wsig: make(chan struct{}, 1),
 		pings: map[[8]byte]chan struct{}{}, done: make(chan struct{}), start: time.Now()}

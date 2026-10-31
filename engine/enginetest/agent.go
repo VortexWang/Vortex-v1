@@ -106,6 +106,17 @@ func (a *Agent) Consumption(grant types.UUID) (types.GrantConsumption, bool) {
 	return c, ok
 }
 
+// Consumptions 返回各计费授权最近一次报告的消耗。
+func (a *Agent) Consumptions() []types.GrantConsumption {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := make([]types.GrantConsumption, 0, len(a.consumed))
+	for _, c := range a.consumed {
+		out = append(out, c)
+	}
+	return out
+}
+
 // Events 返回已收集的某类事件（kind 为 0 时返回全部）。
 func (a *Agent) Events(kind types.EventKind) []types.Event {
 	a.mu.Lock()
