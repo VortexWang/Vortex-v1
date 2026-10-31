@@ -18,6 +18,8 @@
 #   PHASES="tcp udp"                          只跑其中一部分时，判定也只针对已跑的部分
 #   CHECK=1                                    按 NFR-001 / NFR-005 判定，不通过时退出码为 1
 set -euo pipefail
+# 任何一步失败时打印位置，CI 日志不可见时也能从注解中看到
+trap 'echo "netns-bench: failed at line $LINENO: $BASH_COMMAND" | tee -a "${OUT:-/tmp}/error.txt" >&2' ERR
 
 WARMUP=${WARMUP:-60} DURATION=${DURATION:-300} RUNS=${RUNS:-3} PARALLEL=${PARALLEL:-16}
 RATE=${RATE:-1gbit} UDP_RATE=${UDP_RATE:-100M} UDP_LEN=${UDP_LEN:-1200} UDP_DURATION=${UDP_DURATION:-60} UDP_WINDOW=${UDP_WINDOW:-4M} CHECK=${CHECK:-1} PHASES=${PHASES:-tcp udp}

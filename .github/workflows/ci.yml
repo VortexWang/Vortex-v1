@@ -47,6 +47,15 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@v4
         with: { name: netns-bench, path: bench-out, if-no-files-found: ignore }
+      - name: 失败时把汇总与引擎错误输出写成注解（便于通过 API 查看）
+        if: failure()
+        run: |
+          for f in bench-out/error.txt bench-out/summary.md bench-out/engine.err bench-out/env.txt; do
+            [ -s "$f" ] || continue
+            body=$(sed 's/%/%25/g' "$f" | head -c 20000 | awk '{printf "%s%%0A", $0}')
+            echo "::error title=$f::$body"
+          done
+          ls -la bench-out || true
 
   proto:
     runs-on: ubuntu-24.04
