@@ -6,3 +6,4 @@ __pycache__/
 # 本地环境
 .env
 *.local
+bench-results/

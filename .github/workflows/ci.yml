@@ -29,6 +29,25 @@ jobs:
           go install github.com/google/go-licenses@v1.6.0
           go-licenses check ./engine/... --disallowed_types=forbidden,restricted
 
+  netns-bench:
+    # ENGR-005：网络命名空间拓扑的吞吐冒烟（短时长，按 NFR-001 / NFR-005 阈值判定）。
+    # 正式测量（预热 60 秒、测试 300 秒、三次取中位数）在 13.2 节环境中用同一脚本执行。
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.24.7" }
+      - name: 安装 iperf3
+        run: sudo apt-get update -q && sudo DEBIAN_FRONTEND=noninteractive apt-get install -yq iperf3
+      - name: 基准冒烟
+        # UDP 两端 4 MiB 缓冲需要 rmem_max 至少 4 MiB（见 docs/benchmark.md）
+        run: |
+          sudo sysctl -w net.core.rmem_max=4194304 net.core.wmem_max=4194304
+          sudo env "PATH=$PATH" WARMUP=3 DURATION=15 RUNS=1 UDP_DURATION=15 OUT=bench-out scripts/bench/netns-bench.sh
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with: { name: netns-bench, path: bench-out, if-no-files-found: ignore }
+
   proto:
     runs-on: ubuntu-24.04
     steps:
