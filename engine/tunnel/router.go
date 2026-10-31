@@ -29,6 +29,8 @@ type Router struct {
 
 	mu   sync.Mutex
 	sels map[types.UUID]memberSelector
+
+	durations durations
 }
 
 type memberSelector struct {
@@ -66,6 +68,7 @@ func (r *Router) selector(rule *types.Rule) memberSelector {
 
 // Forget 删除不再存在的规则的选择器。
 func (r *Router) Forget(keep func(types.UUID) bool) {
+	r.durations.forget(keep)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for id := range r.sels {
@@ -121,15 +124,10 @@ func (r *Router) open(ctx context.Context, rule *types.Rule, client netip.AddrPo
 		}
 		id := ms.ids[i]
 		tried[string(id[:])] = true
-		for attempt := 0; attempt < 2; attempt++ { // 链路刚收到 GOAWAY 时换一条新链路重试一次
-			l, err := r.Peers.Link(ctx, id)
-			if err != nil {
-				break
-			}
-			s, err := l.Open(o)
-			if err == nil {
-				return &pathConn{Stream: s, r: r, rule: rule, peer: id, entry: len(visited) == 0}, nil
-			}
+		short := network == types.NetworkTCP && r.durations.short(rule.RuleID)
+		s, err := r.Peers.OpenStream(ctx, id, o, short)
+		if err == nil {
+			return &pathConn{Stream: s, r: r, rule: rule, peer: id, entry: len(visited) == 0, tcp: network == types.NetworkTCP, start: time.Now()}, nil
 		}
 	}
 }
@@ -152,11 +150,16 @@ type pathConn struct {
 	rule  *types.Rule
 	peer  types.UUID
 	entry bool
+	tcp   bool
+	start time.Time
 	once  sync.Once
 }
 
 func (c *pathConn) Close() error {
 	c.once.Do(func() {
+		if c.tcp {
+			c.r.durations.record(c.rule.RuleID, time.Since(c.start))
+		}
 		var se *vlink.StreamError
 		if c.entry && errors.As(c.Stream.Err(), &se) && se.Remote {
 			c.r.emit(types.Event{Kind: types.EventOpenRejected, RuleID: c.rule.RuleID, TenantID: c.rule.TenantID,

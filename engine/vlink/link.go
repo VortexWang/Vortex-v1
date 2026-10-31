@@ -68,6 +68,7 @@ type LinkOptions struct {
 	RTT             time.Duration // 初始 RTT 估计（用于接收窗口自适应），默认 50 ms，建链后由 PING 实测替换
 	DgramQueue      int           // DGRAM 发送队列字节上限，默认 1 MiB（ENG-048）
 	DgramRecvQueue  int           // 每会话待处理的入站数据报上限，默认 512
+	Mode            LinkMode      // 本端发起时在 HELLO 中声明的模式（仅记录，供 Mode 返回）
 }
 
 func (o *LinkOptions) fill() {
@@ -509,6 +510,21 @@ func (l *Link) Shutdown(code GoawayCode) error {
 	l.fail(ErrLinkClosed, false)
 	l.wg.Wait()
 	return nil
+}
+
+// InFlight 返回已发出、尚未被对端以 WINDOW 归还的字节（链路级），用于在多条 mux 链路间均衡。
+func (l *Link) InFlight() int64 {
+	l.cmu.Lock()
+	defer l.cmu.Unlock()
+	return int64(l.opt.LinkWindow) - l.sendWin
+}
+
+// Mode 返回发起方在 HELLO 中声明的链路模式（本端发起时为本端的模式）。
+func (l *Link) Mode() LinkMode {
+	if l.opt.Initiator {
+		return l.opt.Mode
+	}
+	return l.peer.Hello.LinkMode
 }
 
 // Usable 表示还能在这条链路上开新流（未关闭、未收到 GOAWAY、流 ID 未耗尽）。

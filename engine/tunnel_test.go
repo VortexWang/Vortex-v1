@@ -363,8 +363,8 @@ func TestRemovedMemberClosesSessionsAndRevocationClosesLinks(t *testing.T) {
 	if _, tag := dial(t, tp.entry); tag != 'T' {
 		t.Fatal("path not restored")
 	}
-	if tp.a.rt.NumPeerLinks(nodeB) != 1 {
-		t.Fatalf("entry has %d links to B", tp.a.rt.NumPeerLinks(nodeB))
+	if n := tp.a.rt.NumPeerLinks(nodeB); n < 2 || n > 4 { // mux：每对节点 2～4 条（ENG-017）
+		t.Fatalf("entry has %d links to B", n)
 	}
 
 	// 入口吊销中继 B 的节点身份：到 B 的链路被关闭
@@ -520,5 +520,37 @@ func TestUDPOpenChecks(t *testing.T) {
 	buf := make([]byte, 100)
 	if n, err := s.ReadDgram(buf); err != nil || string(buf[:n]) != "hi" {
 		t.Fatalf("valid udp open: %q %v", buf[:n], err)
+	}
+}
+
+// auto 模式（ENG-017）：规则的会话都很短（中位数 < 10 秒）时，入口开始为该对端预热 pool 链路，之后的会话走 pool。
+func TestAutoModeSwitchesShortSessionsToPool(t *testing.T) {
+	tp := threeHop(t) // 对端 LinkMode 未设置，按 auto
+	deadline := time.Now().Add(2 * time.Second)
+	for tp.a.rt.PeerStats(nodeB).Mux < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if st := tp.a.rt.PeerStats(nodeB); st.PoolIdle != 0 {
+		t.Fatalf("no history must mean mux only: %+v", st)
+	}
+	for i := 0; i < 5; i++ { // 短会话
+		c, _ := dial(t, tp.entry)
+		c.Close()
+	}
+	time.Sleep(100 * time.Millisecond)
+	c, _ := dial(t, tp.entry) // 这一会话判定为短会话：池为空时改用 mux 并触发预热
+	defer c.Close()
+	deadline = time.Now().Add(3 * time.Second)
+	for tp.a.rt.PeerStats(nodeB).PoolIdle < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if st := tp.a.rt.PeerStats(nodeB); st.PoolIdle < 2 {
+		t.Fatalf("pool not warmed for short sessions: %+v", st)
+	}
+	before := tp.a.rt.PeerStats(nodeB).PoolBusy
+	c2, tag := dial(t, tp.entry)
+	defer c2.Close()
+	if st := tp.a.rt.PeerStats(nodeB); tag != 'T' || st.PoolBusy != before+1 {
+		t.Fatalf("short session not on a pool link: before %d, now %+v", before, st)
 	}
 }

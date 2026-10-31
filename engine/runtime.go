@@ -217,6 +217,14 @@ func (rt *Runtime) NumPeerLinks(id types.UUID) int {
 	return rt.peers.NumLinks(id)
 }
 
+// PeerStats 返回到对端的链路情况（mux 链路数、pool 空闲与占用）。
+func (rt *Runtime) PeerStats(id types.UUID) tunnel.PeerStats {
+	if rt.peers == nil {
+		return tunnel.PeerStats{}
+	}
+	return rt.peers.Stats(id)
+}
+
 // DroppedEvents 返回因通道已满而丢弃的事件数。
 func (rt *Runtime) DroppedEvents() uint64 { return rt.dropped.Load() }
 

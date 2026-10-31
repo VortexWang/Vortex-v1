@@ -128,11 +128,11 @@ func (s *Stream) terminate(err error, local bool) {
 	cbs := s.onClose
 	s.onClose = nil
 	s.mu.Unlock()
+	s.l.consumed(unread)
+	s.l.remove(s) // 先摘除再回调：回调中看到的流数已不含本流（pool 链路据此归还）
 	for _, f := range cbs {
 		f()
 	}
-	s.l.consumed(unread)
-	s.l.remove(s)
 }
 
 func (s *Stream) dropBuf() {
@@ -583,3 +583,6 @@ func (s *Stream) OnClose(f func()) {
 	s.onClose = append(s.onClose, f)
 	s.mu.Unlock()
 }
+
+// Link 返回流所在的链路。
+func (s *Stream) Link() *Link { return s.l }

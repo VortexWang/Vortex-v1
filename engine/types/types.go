@@ -139,9 +139,20 @@ type Peer struct {
 	NodeID        UUID
 	Address       string
 	LinkPort      uint16
-	Outbound      bool
+	Outbound      bool // PeerDial：true = OUTBOUND（本节点主动连接）
+	LinkMode      LinkMode
 	ServedRuleIDs []UUID
 }
+
+// LinkMode ↔ runtime.v1.LinkMode（ENG-017）；零值按 AUTO 处理。
+type LinkMode uint8
+
+const (
+	LinkModeUnspecified LinkMode = iota
+	LinkModeAuto
+	LinkModeMux
+	LinkModePool
+)
 
 type RevocationList struct {
 	Serial      uint64
