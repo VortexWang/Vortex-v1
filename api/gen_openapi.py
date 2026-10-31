@@ -443,4 +443,43 @@ doc = {
         "schemas": dict(sorted(S.items())),
     },
 }
+
+
+def to_oas30(node):
+    """把 3.1 写法机械转换为 OpenAPI 3.0.3，语义不变（C4 补充记录 L2）。
+
+    oapi-codegen 依赖的 kin-openapi 只支持 3.0：
+      type: [X, "null"]          → type: X, nullable: true
+      enum 中的 null              → 去掉（由 nullable 表达）
+      exclusiveMinimum: n（数值） → minimum: n, exclusiveMinimum: true
+      required: []                → 删除（3.0 要求 required 至少一项）
+    """
+    if isinstance(node, dict):
+        if node.get("required") == []:
+            del node["required"]
+        t = node.get("type")
+        if isinstance(t, list):
+            rest = [x for x in t if x != "null"]
+            assert len(rest) == 1, t
+            node["type"] = rest[0]
+            if "null" in t:
+                node["nullable"] = True
+        if isinstance(node.get("enum"), list) and None in node["enum"]:
+            node["enum"] = [x for x in node["enum"] if x is not None]
+            node["nullable"] = True
+        em = node.get("exclusiveMinimum")
+        if isinstance(em, (int, float)) and not isinstance(em, bool):
+            node["minimum"] = em
+            node["exclusiveMinimum"] = True
+        for v in node.values():
+            to_oas30(v)
+    elif isinstance(node, list):
+        for v in node:
+            to_oas30(v)
+    return node
+
+
+doc["openapi"] = "3.0.3"
+doc["info"]["license"].pop("identifier", None)   # identifier 是 3.1 字段
+to_oas30(doc)
 yaml.safe_dump(doc, sys.stdout, allow_unicode=True, sort_keys=False, width=120)

@@ -1,0 +1,6 @@
+# Redocly lint 配置（CI api 作业与本地使用）
+extends:
+  - recommended
+rules:
+  # 闭源商业发布（ENGR-002），没有可公开的许可证 URL
+  info-license-strict: off
