@@ -429,18 +429,31 @@ func (l *Link) Ping(ctx context.Context) (time.Duration, error) {
 }
 
 // Close 发送 GOAWAY(normal) 后关闭链路，所有流以 ErrLinkClosed 结束。
-func (l *Link) Close() error {
+func (l *Link) Close() error { return l.Shutdown(GoawayNormal) }
+
+// Shutdown 发送 GOAWAY(code) 后立即关闭链路（例如对端证书被吊销时用 GoawayRevoked）。
+func (l *Link) Shutdown(code GoawayCode) error {
 	if !l.isClosed() {
 		_ = l.tc.SetWriteDeadline(time.Now().Add(time.Second))
 		l.mu.Lock()
 		last := l.lastPeer
 		l.mu.Unlock()
-		_, _ = l.tc.Write(AppendFrame(nil, TypeGoaway, 0, AppendGoawayPayload(nil, last, GoawayNormal)))
+		_, _ = l.tc.Write(AppendFrame(nil, TypeGoaway, 0, AppendGoawayPayload(nil, last, code)))
 	}
 	l.fail(ErrLinkClosed, false)
 	l.wg.Wait()
 	return nil
 }
+
+// Usable 表示还能在这条链路上开新流（未关闭、未收到 GOAWAY、流 ID 未耗尽）。
+func (l *Link) Usable() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return !l.isClosed() && !l.goawayIn && !l.exhausted
+}
+
+// ConnectionState 返回 TLS 连接状态（对端证书用于吊销检查）。
+func (l *Link) ConnectionState() tls.ConnectionState { return l.tc.ConnectionState() }
 
 func (l *Link) isClosed() bool {
 	select {

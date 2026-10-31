@@ -426,3 +426,10 @@ func (s *Stream) armLocked(tm *time.Timer, t time.Time, fire func()) *time.Timer
 	tm.Reset(d)
 	return tm
 }
+
+// Err 返回流的终止原因（RST、OPEN_ERR、链路关闭、本端关闭）；流仍在进行时为 nil。
+func (s *Stream) Err() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.err
+}

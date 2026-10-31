@@ -3,10 +3,8 @@ package route
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net"
 	"net/netip"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -51,10 +49,10 @@ type DirectEntry struct {
 
 	ruleRef atomic.Pointer[types.UUID] // SetRule 设置后优先于 RuleID：监听改绑规则时不重建 socket
 
-	// 只保留当前规则快照的选择器（目标只在会话开始时选择）；按快照缓存会随每次配置切换无限增长
-	selMu   sync.Mutex
-	selRule *types.Rule
-	sel     *Selector
+	// NextHop 为下一跳规则（隧道）打开到下一组的流；nil 表示本入口只支持直接转发
+	NextHop func(ctx context.Context, rule *types.Rule, client netip.AddrPort) (net.Conn, error)
+
+	targets TargetDialer
 
 	Active   atomic.Int64 // 当前会话数
 	Accepted atomic.Int64
@@ -68,6 +66,7 @@ func (e *DirectEntry) Start() error {
 	if e.DialTimeout == 0 {
 		e.DialTimeout = 5 * time.Second
 	}
+	e.targets = TargetDialer{Resolver: e.Resolver, Guard: e.guard, Healthy: e.Healthy, Events: e.Events, Timeout: e.DialTimeout}
 	if err := e.Scope.Own(e.Listener); err != nil {
 		return err
 	}
@@ -135,21 +134,6 @@ func (e *DirectEntry) acceptLoop(ctx context.Context) {
 	}
 }
 
-func (e *DirectEntry) selector(r *types.Rule) *Selector {
-	e.selMu.Lock()
-	defer e.selMu.Unlock()
-	if e.selRule == r {
-		return e.sel
-	}
-	cands := make([]Candidate, len(r.Targets))
-	for i, t := range r.Targets {
-		cands[i] = Candidate{Key: net.JoinHostPort(t.Host, fmt.Sprint(t.Port)), Weight: t.Weight, Priority: t.Priority}
-	}
-	s := NewSelector(r.TargetSchedule, cands)
-	e.selRule, e.sel = r, s
-	return s
-}
-
 func (e *DirectEntry) handle(ctx context.Context, sess *lifecycle.Scope, client net.Conn) {
 	// 会话使用接入时刻的规则快照；之后的切换不影响本会话（ENG-032）
 	rule := e.Tables.Load().Rule(e.ruleID())
@@ -163,14 +147,22 @@ func (e *DirectEntry) handle(ctx context.Context, sess *lifecycle.Scope, client 
 	}
 	defer release()
 
-	target, err := e.dialTarget(ctx, rule)
+	var target net.Conn
+	if rule.NextHop != nil {
+		if e.NextHop == nil {
+			return
+		}
+		target, err = e.NextHop(ctx, rule, clientAP)
+	} else {
+		target, err = e.dialTarget(ctx, rule)
+	}
 	if err != nil {
 		return
 	}
 	if sess.Own(target) != nil {
 		return
 	}
-	if rule.ProxyProtocol == types.ProxyV1 || rule.ProxyProtocol == types.ProxyV2 {
+	if rule.NextHop == nil && (rule.ProxyProtocol == types.ProxyV1 || rule.ProxyProtocol == types.ProxyV2) { // 隧道由出口添加
 		local, _ := netip.ParseAddrPort(client.LocalAddr().String())
 		h, err := ProxyHeader(rule.ProxyProtocol, false, clientAP, local)
 		if err != nil {
@@ -193,34 +185,6 @@ func (e *DirectEntry) handle(ctx context.Context, sess *lifecycle.Scope, client 
 	})
 }
 
-// dialTarget 按调度方式依次尝试目标：解析 → 逐地址检查（SEC-011）→ 连接检查过的 IP（不按域名连接，防止 DNS 重绑定）。
 func (e *DirectEntry) dialTarget(ctx context.Context, r *types.Rule) (net.Conn, error) {
-	sel := e.selector(r)
-	tried := map[string]bool{}
-	d := net.Dialer{Timeout: e.DialTimeout}
-	for len(tried) < sel.Len() {
-		i := sel.Pick(e.Healthy, func(k string) bool { return tried[k] })
-		if i < 0 {
-			break
-		}
-		cand := sel.At(i)
-		tried[cand.Key] = true
-		t := r.Targets[i]
-		aps, rejected, err := AllowedAddrs(ctx, e.Resolver, e.guard(), t.Host, t.Port)
-		if errors.Is(err, ErrTargetForbidden) {
-			e.emit(types.Event{Kind: types.EventTargetRejected, RuleID: r.RuleID, TenantID: r.TenantID,
-				Detail: fmt.Sprintf("%s -> %s", cand.Key, rejected)})
-			continue
-		}
-		if err != nil {
-			continue
-		}
-		for _, ap := range aps {
-			c, err := d.DialContext(ctx, "tcp", ap.String())
-			if err == nil {
-				return c, nil
-			}
-		}
-	}
-	return nil, ErrNoRoute
+	return e.targets.Dial(ctx, r)
 }

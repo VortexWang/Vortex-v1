@@ -2,10 +2,12 @@ package engine
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
 	"net/netip"
+	"reflect"
 	"slices"
 	"sort"
 	"sync"
@@ -16,7 +18,9 @@ import (
 	"vortex/engine/internal/lifecycle"
 	"vortex/engine/pipe"
 	"vortex/engine/route"
+	"vortex/engine/tunnel"
 	"vortex/engine/types"
+	"vortex/engine/vlink"
 )
 
 // 配置应用错误（ENG-030～ENG-033）。校验错误使 Prepare 整体失败、不留下未决版本；
@@ -45,6 +49,17 @@ type Options struct {
 	Backlog     int               // TCP listen backlog，默认 4096
 	DialTimeout time.Duration     // 默认 5 秒
 	Healthy     func(string) bool // 目标探测结果；nil 表示全部健康
+	Tunnel      *TunnelOptions    // nil 表示只支持直接转发
+}
+
+// TunnelOptions 启用隧道转发（入口、中继、出口）。
+type TunnelOptions struct {
+	Identity     *vlink.Identity
+	Roots        *x509.CertPool // 平台 CA
+	BootID       types.UUID
+	LinkListener net.Listener // 接受入站链路；nil 表示本节点不接受（例如只做入口）
+	Link         vlink.LinkOptions
+	DialTimeout  time.Duration
 }
 
 type listenerKey struct {
@@ -119,6 +134,13 @@ type Runtime struct {
 	pend      *pending
 
 	adm admission
+
+	// 隧道（Options.Tunnel 非 nil 时）
+	revs       vlink.Revocations
+	generation atomic.Uint64
+	peers      *tunnel.Peers
+	router     *tunnel.Router
+	exits      *route.TargetDialer
 }
 
 var _ Engine = (*Runtime)(nil)
@@ -141,6 +163,23 @@ func New(opt Options) *Runtime {
 	rt.adm = admission{next: rt.gate, live: map[*types.Rule]map[*admitted]struct{}{},
 		revoked: map[*types.Rule]time.Time{}, draining: map[types.UUID]bool{}}
 	rt.guard.Store(route.NewGuard(types.TargetPolicy{}, opt.SelfAddrs, nil))
+	if t := opt.Tunnel; t != nil {
+		trust := &vlink.Trust{Roots: t.Roots, Revocations: &rt.revs}
+		rt.exits = &route.TargetDialer{Resolver: rt.resolver, Guard: rt.guard.Load, Healthy: opt.Healthy, Events: rt.emit, Timeout: opt.DialTimeout}
+		rt.peers = &tunnel.Peers{
+			Local: func() *vlink.Local {
+				return &vlink.Local{Identity: t.Identity, Trust: trust, BootID: t.BootID, Generation: rt.generation.Load(),
+					Capabilities: vlink.CapDgram, Mode: vlink.ModeMux}
+			},
+			Emit: rt.emit, LinkOptions: t.Link, DialTimeout: t.DialTimeout,
+		}
+		rt.router = &tunnel.Router{Self: t.Identity.NodeID, Peers: rt.peers, Tables: &rt.tables, Admission: &rt.adm,
+			Targets: rt.exits, Emit: rt.emit}
+		rt.peers.Handle = rt.router.HandleInbound
+		if err := rt.peers.Start(rt.root, t.LinkListener); err != nil {
+			rt.emit(types.Event{Kind: types.EventPeerDown, Detail: "link listener: " + err.Error()})
+		}
+	}
 	return rt
 }
 
@@ -168,6 +207,14 @@ func (rt *Runtime) emit(ev types.Event) {
 	default:
 		rt.dropped.Add(1) // 事件只是提示（低水位、需要授权等），Agent 还会定期拉取用量与状态
 	}
+}
+
+// NumPeerLinks 返回到对端节点的链路数（未启用隧道时为 0）。
+func (rt *Runtime) NumPeerLinks(id types.UUID) int {
+	if rt.peers == nil {
+		return 0
+	}
+	return rt.peers.NumLinks(id)
 }
 
 // DroppedEvents 返回因通道已满而丢弃的事件数。
@@ -233,8 +280,22 @@ func targetKeys(r *types.Rule) map[string]bool {
 // tightened 判断规则变更是否属于权限收紧（ENG-032）：租户、执行点身份、允许上游变化，或移除了目标。
 // 其余字段（限速、连接数、调度、空闲超时、PROXY protocol、新增目标等）为 hot：已有会话保持旧快照。
 func tightened(old, cur *types.Rule) bool {
-	if old.TenantID != cur.TenantID || old.EnforcementPoint != cur.EnforcementPoint || old.Role != cur.Role {
+	if old.TenantID != cur.TenantID || old.EnforcementPoint != cur.EnforcementPoint || old.Role != cur.Role ||
+		old.HopIndex != cur.HopIndex || old.PathGeneration != cur.PathGeneration {
 		return true
+	}
+	if (old.NextHop == nil) != (cur.NextHop == nil) {
+		return true
+	}
+	if old.NextHop != nil {
+		if old.NextHop.GroupID != cur.NextHop.GroupID || old.NextHop.Dial != cur.NextHop.Dial {
+			return true
+		}
+		for _, m := range old.NextHop.Members { // 移除了下一组成员
+			if !slices.ContainsFunc(cur.NextHop.Members, func(x types.Member) bool { return x.NodeID == m.NodeID }) {
+				return true
+			}
+		}
 	}
 	if !slices.Equal(old.AllowedUpstreams, cur.AllowedUpstreams) {
 		return true
@@ -253,8 +314,21 @@ func tightened(old, cur *types.Rule) bool {
 	return false
 }
 
-func ruleEqual(a, b *types.Rule) bool {
-	return fmt.Sprintf("%#v", *a) == fmt.Sprintf("%#v", *b)
+// ruleEqual 比较规则内容（%#v 会打印指针地址，NextHop 等指针字段必须按值比较）。
+func ruleEqual(a, b *types.Rule) bool { return reflect.DeepEqual(*a, *b) }
+
+// unsupported 返回当前实现还不支持的规则形态（M1 进行中：UDP 隧道 ENG-T26、反向建链 ENG-T28）。
+func (rt *Runtime) unsupported(r *types.Rule) string {
+	tunnelled := r.NextHop != nil || r.Role != types.RoleEntry
+	switch {
+	case tunnelled && rt.router == nil:
+		return "tunnel forwarding is not enabled on this engine (no node identity)"
+	case r.NextHop != nil && r.NextHop.Dial == types.DialReverse:
+		return "reverse dialing is not implemented yet"
+	case tunnelled && slices.Contains(r.Networks, types.NetworkUDP):
+		return "udp over tunnel is not implemented yet"
+	}
+	return ""
 }
 
 // Prepare 校验 → 差异分类 → 为新增监听执行 bind（不 listen / 不读取）（ENG-030、ENG-031）。
@@ -294,10 +368,10 @@ func (rt *Runtime) Prepare(ctx context.Context, cfg *types.RuntimeConfig) (*type
 	for i := range cfg.Rules {
 		r := &cfg.Rules[i]
 		id := uuidString(r.RuleID)
-		if r.NextHop != nil {
+		if why := rt.unsupported(r); why != "" {
 			p.unsupp[r.RuleID] = true
 			res.Errors = append(res.Errors, types.ResourceError{Object: types.ObjectRef{Kind: types.ObjectRule, ID: id},
-				Code: CodeNotImplemented, Detail: "next_hop forwarding is not available in this engine build"})
+				Code: CodeNotImplemented, Detail: why})
 		}
 		o := old[r.RuleID]
 		switch {
@@ -449,6 +523,15 @@ func (rt *Runtime) Commit(ctx context.Context, version uint64) (*types.ApplyResu
 	}
 	rt.unsupp = p.unsupp
 	rt.cfg = cfg
+	if rt.peers != nil {
+		rt.generation.Store(cfg.Generation)
+		rt.revs.Set(cfg.Revocations)
+		rt.peers.SetPeers(cfg.Peers)
+		rt.peers.CloseRevoked(&rt.revs)
+		keep := func(id types.UUID) bool { return rt.ruleVer[id] != 0 }
+		rt.router.Forget(keep)
+		rt.exits.Forget(keep)
+	}
 	return &types.ApplyResult{Version: cfg.Version, Objects: rt.objectsLocked()}, nil
 }
 
@@ -468,6 +551,11 @@ func (rt *Runtime) start(k listenerKey, r *route.Reserved, cfg *types.RuntimeCon
 		}
 		a.tcp = &route.DirectEntry{RuleID: rule, Tables: &rt.tables, Listener: ln, Scope: a.scope, Admission: &rt.adm,
 			Resolver: rt.resolver, GuardRef: &rt.guard, Healthy: rt.opt.Healthy, Events: rt.emit, DialTimeout: rt.opt.DialTimeout}
+		if rt.router != nil {
+			a.tcp.NextHop = func(ctx context.Context, r *types.Rule, client netip.AddrPort) (net.Conn, error) {
+				return rt.router.Open(ctx, r, client, nil)
+			}
+		}
 		if err := a.tcp.Start(); err != nil {
 			_ = ln.Close()
 			a.scope.Shutdown()
