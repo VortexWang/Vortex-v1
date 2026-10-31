@@ -125,7 +125,7 @@ func startNode(t *testing.T, l logs, d Dialer, hubs []control.Endpoint) *nodePro
 func (p *nodeProc) stop() {
 	p.cancel()
 	<-p.done
-	_ = p.rt.Close()
+	_ = p.a.Shutdown(p.rt.Close)
 }
 
 func roundTrip(addr netip.AddrPort, size int) bool {

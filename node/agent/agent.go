@@ -260,6 +260,23 @@ func (a *Agent) HandleEvent(ev types.Event) {
 	}
 }
 
+// Shutdown 在进程退出时调用（事件循环已停止之后）：先关闭 Engine（结束全部会话，最后的字节计入计量），
+// 再做最后一次拉取并封批落盘，下次启动时作为上次启动的批次最先上报（AGT-009）。否则关闭过程中
+// 结束的会话的计量会丢失。
+func (a *Agent) Shutdown(closeEngine func() error) error {
+	err := closeEngine()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	snap := a.eng.DrainUsage()
+	if e := a.rep.Add(snap); e != nil && err == nil {
+		err = e
+	}
+	if _, e := a.rep.Seal(); e != nil && err == nil {
+		err = e
+	}
+	return err
+}
+
 // ReportState 上报 Engine 的实际状态（定期，或配置变化后）。
 func (a *Agent) ReportState() {
 	a.mu.Lock()

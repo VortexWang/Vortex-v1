@@ -225,7 +225,7 @@ func start(t *testing.T, l logs) *node {
 func (n *node) stop() {
 	n.cancel()
 	<-n.done
-	_ = n.rt.Close()
+	_ = n.a.Shutdown(n.rt.Close)
 }
 
 // roundTrip 经入口发送 size 字节并收回；返回是否成功。
@@ -319,7 +319,7 @@ func TestAgentLifecycle(t *testing.T) {
 	if firstBoot != oldBoot {
 		t.Fatal("previous boot's batches not reported first")
 	}
-	if up, seqs := h2.bytes(oldBoot, types.DirUp); seqs != 1 || up < 64<<10 {
+	if up, seqs := h2.bytes(oldBoot, types.DirUp); seqs != 1 || up != 64<<10 { // Shutdown 收齐关闭过程中计入的字节
 		t.Fatalf("previous boot final batch: %d bytes in %d batches", up, seqs)
 	}
 	// 恢复时的 ApplyReport 由授权触发，不是后端的 Commit
@@ -446,4 +446,38 @@ func TestAppliedHookProbesAndDrain(t *testing.T) {
 	}
 	n.a.HandleHub(ctx, DrainCommand{Timeout: time.Second})
 	eventually(t, "drained: new sessions refused", func() bool { return !roundTrip(cfg.Listeners[0].Bind, 1024) })
+}
+
+// closingEngine：关闭时才产出最后的计量（关闭过程中结束的会话）。
+type closingEngine struct {
+	engine.Engine
+	closed bool
+}
+
+func (e *closingEngine) DrainUsage() types.UsageSnapshot {
+	if !e.closed {
+		return types.UsageSnapshot{}
+	}
+	e.closed = false
+	return types.UsageSnapshot{Deltas: []types.UsageDelta{{RuleID: ruleA, Direction: types.DirUp, RawBytes: 4096}}}
+}
+
+func TestShutdownDrainsAfterClosingEngine(t *testing.T) {
+	l := newLogs()
+	e := &closingEngine{}
+	a, err := New(context.Background(), Options{Node: nodeID, Engine: e, BootLog: l.boot, UsageLog: l.usage, ConfigLog: l.config})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Shutdown(func() error { e.closed = true; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	a2, err := New(context.Background(), Options{Node: nodeID, Engine: &closingEngine{}, BootLog: l.boot, UsageLog: l.usage, ConfigLog: l.config})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := a2.rep.Pending()
+	if len(p) != 1 || p[0].Boot != a.boot.Current || p[0].Snapshot.Deltas[0].RawBytes != 4096 {
+		t.Fatalf("usage of sessions ended by shutdown lost: %+v", p)
+	}
 }

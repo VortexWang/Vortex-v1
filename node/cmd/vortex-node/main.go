@@ -218,7 +218,6 @@ func runNode(ctx context.Context, cfg *Config, dialer control.Dialer, log *slog.
 
 	prober := probe.New()
 	eng := engine.New(engine.Options{Healthy: prober.TargetHealthy})
-	defer eng.Close()
 	disk := &report.DiskGuard{Path: cfg.DataDir, Low: cfg.DiskLowBytes, High: cfg.DiskHighBytes,
 		OnLow: func(free uint64) { log.Warn("disk low: new sessions should stop (AGT-006)", "free", free) },
 		OnOK:  func(free uint64) { log.Info("disk recovered", "free", free) }}
@@ -226,6 +225,7 @@ func runNode(ctx context.Context, cfg *Config, dialer control.Dialer, log *slog.
 		BootLog: bootLog, UsageLog: usageLog, ConfigLog: configLog, Disk: disk,
 		OnApplied: func(c *types.RuntimeConfig) { prober.SetSubjects(probe.Subjects(c)) }})
 	if err != nil {
+		eng.Close()
 		return err
 	}
 	if c := a.Status(); c.AppliedVersion != 0 {
@@ -248,6 +248,7 @@ func runNode(ctx context.Context, cfg *Config, dialer control.Dialer, log *slog.
 		},
 	}
 	if err := api.Listen(cfg.Socket); err != nil {
+		eng.Close()
 		return err
 	}
 	defer api.Close()
@@ -274,7 +275,7 @@ func runNode(ctx context.Context, cfg *Config, dialer control.Dialer, log *slog.
 	log.Info("vortex-node started", "node", cfg.NodeID, "boot", fmtUUID(a.Status().Boot), "version", version)
 	<-ctx.Done()
 	sup.Wait()
-	return nil
+	return a.Shutdown(eng.Close)
 }
 
 func statusView(s agent.Status, disk *report.DiskGuard) localapi.Status {
