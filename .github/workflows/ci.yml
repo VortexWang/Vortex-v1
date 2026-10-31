@@ -17,12 +17,12 @@ jobs:
       - uses: actions/setup-go@v5
         with: { go-version: "1.24.7" }
       - name: gofmt
-        run: test -z "$(gofmt -l engine edge-hub)"
+        run: test -z "$(gofmt -l engine edge-hub node)"
       - name: vet
-        run: go vet ./engine/... ./edge-hub/...
+        run: go vet ./engine/... ./edge-hub/... ./node/...
       # 失败时把失败测试的输出写成注解：日志下载在部分环境中不可用，注解可经 API 读取
       - name: test (race)
-        run: set -o pipefail; go test -race -count=1 ./engine/... ./edge-hub/... 2>&1 | tee /tmp/race.log
+        run: set -o pipefail; go test -race -count=1 ./engine/... ./edge-hub/... ./node/... 2>&1 | tee /tmp/race.log
       - name: leak and splice tests as root (需要 /proc 与真实 TCP)
         run: set -o pipefail; sudo env "PATH=$PATH" go test -count=1 -run 'Leak|Splice' ./engine/... 2>&1 | tee /tmp/root.log
       - name: 模糊测试（帧解析与链路帧处理，ENG-T37）
@@ -41,7 +41,7 @@ jobs:
       - name: license check (ENGR-002)
         run: |
           go install github.com/google/go-licenses@v1.6.0
-          go-licenses check ./engine/... ./edge-hub/... --disallowed_types=forbidden,restricted
+          go-licenses check ./engine/... ./edge-hub/... ./node/... --disallowed_types=forbidden,restricted
 
   netns-bench:
     # ENGR-005：网络命名空间拓扑的吞吐冒烟（短时长，按 NFR-001 / NFR-005 阈值判定）。
