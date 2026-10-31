@@ -57,7 +57,13 @@ jobs:
         run: sudo env "PATH=$PATH" WARMUP=3 DURATION=15 RUNS=1 TTFB_N=100 OUT=bench-out/tunnel scripts/bench/tunnel-bench.sh
       - if: always()
         uses: actions/upload-artifact@v4
-        with: { name: netns-bench, path: bench-out, if-no-files-found: ignore }
+        # 测试证书目录（含私钥，root 所有）不上传
+        with:
+          name: netns-bench
+          if-no-files-found: ignore
+          path: |
+            bench-out
+            !bench-out/**/pki
       - name: 失败时把汇总与引擎错误输出写成注解（便于通过 API 查看）
         if: failure()
         run: |
