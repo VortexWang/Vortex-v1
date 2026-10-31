@@ -42,6 +42,32 @@ jobs:
         if: github.event_name == 'pull_request'
         run: buf breaking proto --against ".git#branch=origin/main,subdir=proto"
 
+  codegen:
+    # 契约能否被 Go 工具链实际使用：proto → Go（含 gRPC），OpenAPI → Gin 服务端接口，生成后必须能编译
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.24.7" }
+      - uses: bufbuild/buf-setup-action@v1
+        with: { version: "1.47.2" }
+      - name: 安装生成器（版本见 docs/engineering-baseline.md）
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.6
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+          go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.4.1
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: proto → Go 并编译
+        run: |
+          mkdir -p /tmp/gen
+          cd proto && buf generate --template '{"version":"v2","plugins":[{"local":"protoc-gen-go","out":"/tmp/gen","opt":"paths=source_relative"},{"local":"protoc-gen-go-grpc","out":"/tmp/gen","opt":"paths=source_relative"}]}'
+          cd /tmp/gen && go mod init vortex/proto/gen/go && go mod tidy && go vet ./... && go build ./...
+      - name: OpenAPI → Gin 服务端接口并编译
+        run: |
+          mkdir -p /tmp/oapi && cd /tmp/oapi && go mod init vortex/api/gen
+          oapi-codegen -generate types,gin-server,spec -package apiv1 "$GITHUB_WORKSPACE/api/openapi.yaml" > api.gen.go
+          go mod tidy && go vet ./... && go build ./...
+
   api:
     runs-on: ubuntu-24.04
     steps:
@@ -75,8 +101,20 @@ jobs:
       PGDATABASE: vortex
     steps:
       - uses: actions/checkout@v4
-      - name: 迁移 Up / 约束测试 / Down / Up
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.24.7" }
+      - name: 迁移 Up / 约束测试 / Down / Up（按 Goose 文件格式拆分执行）
         run: scripts/db-check.sh
+      - name: 用 Goose 本身执行迁移（ENGR-004）
+        run: |
+          go install github.com/pressly/goose/v3/cmd/goose@v3.24.1
+          export GOOSE_DRIVER=postgres GOOSE_DBSTRING="postgres://vortex:ci@localhost:5432/vortex?sslmode=disable"
+          psql -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
+          "$(go env GOPATH)/bin/goose" -dir backend/migrations up
+          "$(go env GOPATH)/bin/goose" -dir backend/migrations status
+          for t in backend/migrations/tests/*_test.sql; do psql -v ON_ERROR_STOP=1 -q -f "$t" >/dev/null; echo "pass $t"; done
+          "$(go env GOPATH)/bin/goose" -dir backend/migrations reset
+          "$(go env GOPATH)/bin/goose" -dir backend/migrations up
 
   budget-sim:
     runs-on: ubuntu-24.04

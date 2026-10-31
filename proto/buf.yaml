@@ -4,6 +4,15 @@ modules:
 lint:
   use:
     - STANDARD
+  # 以下 4 条规则与已冻结的需求或有意的设计冲突，经评审排除（契约 C2b 补充记录 L1）：
+  except:
+    # 需求 2.3 节明确服务名为 vortex.edgehub.v1.NodeControl；服务名是 gRPC 线上路径的一部分，不能改
+    - SERVICE_SUFFIX
+    # 双向流消息按发送方命名（AgentMessage / HubMessage、HubUpMessage / BackendMessage），比 ConnectRequest 更清楚
+    - RPC_REQUEST_STANDARD_NAME
+    - RPC_RESPONSE_STANDARD_NAME
+    # Edge Hub 原样代理节点注册与续签：EnrollResponse、RenewCertResponse 有意在两个服务间共用
+    - RPC_REQUEST_RESPONSE_UNIQUE
 breaking:
   use:
     - FILE

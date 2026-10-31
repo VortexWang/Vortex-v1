@@ -18,15 +18,15 @@
 | 工具 | 版本 | 状态 |
 | --- | --- | --- |
 | protoc | 35.1（grpcio-tools 1.85.0 内置） | 已验证：编译全部 proto |
-| buf | 1.47.2 | 选定，开发环境无法下载，CI 中首次运行 |
-| protoc-gen-go / protoc-gen-go-grpc | 与 buf 配套的最新稳定版，首次 CI 运行时写入本表 | 待定 |
-| Goose | v3 最新稳定版，首次 CI 运行时写入本表 | 待定 |
-| oapi-codegen | v2 最新稳定版，首次 CI 运行时写入本表 | 待定 |
+| buf | 1.47.2 | 已验证：CI 与本地（经 npm 包 `@bufbuild/buf`）lint、build 通过；排除的 4 条规则见 `proto/buf.yaml` |
+| protoc-gen-go / protoc-gen-go-grpc | v1.36.6 / v1.5.1 | 选定，CI `codegen` 作业验证 |
+| Goose | v3.24.1 | 选定，CI `db` 作业验证 |
+| oapi-codegen | v2.4.1 | 选定，CI `codegen` 作业验证 |
 | @redocly/cli | 1.34.0 | 已验证：0 错误 0 警告 |
 | openapi-typescript | 7.4.4（必须加 `--default-non-nullable false`） | 已验证 |
 | TypeScript | 5.6.3 | 已验证：`--strict` 编译类型契约测试 |
 
-“待定”三项在仓库首次 CI 运行时确定确切版本并回填本表，之后锁定。
+“选定”项在 CI 首次通过后改为“已验证”。
 
 ## 3. 容器镜像
 
