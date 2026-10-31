@@ -139,6 +139,7 @@ type Runtime struct {
 	revs       vlink.Revocations
 	generation atomic.Uint64
 	peers      *tunnel.Peers
+	served     atomic.Pointer[servedDecl]
 	router     *tunnel.Router
 	exits      *route.TargetDialer
 }
@@ -172,6 +173,12 @@ func New(opt Options) *Runtime {
 					Capabilities: vlink.CapDgram, Mode: vlink.ModeMux}
 			},
 			Emit: rt.emit, LinkOptions: t.Link, DialTimeout: t.DialTimeout,
+		}
+		rt.peers.Served = func(peer types.UUID) (send, expect []vlink.ServedRule) {
+			if d := rt.served.Load(); d != nil {
+				return d.send[peer], d.expect[peer]
+			}
+			return nil, nil
 		}
 		rt.router = &tunnel.Router{Self: t.Identity.NodeID, Peers: rt.peers, Tables: &rt.tables, Admission: &rt.adm,
 			Targets: rt.exits, Emit: rt.emit}
@@ -325,14 +332,12 @@ func tightened(old, cur *types.Rule) bool {
 // ruleEqual 比较规则内容（%#v 会打印指针地址，NextHop 等指针字段必须按值比较）。
 func ruleEqual(a, b *types.Rule) bool { return reflect.DeepEqual(*a, *b) }
 
-// unsupported 返回当前实现还不支持的规则形态（M1 进行中：反向建链 ENG-T28）。
+// unsupported 返回当前实现还不支持的规则形态。
 func (rt *Runtime) unsupported(r *types.Rule) string {
 	tunnelled := r.NextHop != nil || r.Role != types.RoleEntry
 	switch {
 	case tunnelled && rt.router == nil:
 		return "tunnel forwarding is not enabled on this engine (no node identity)"
-	case r.NextHop != nil && r.NextHop.Dial == types.DialReverse:
-		return "reverse dialing is not implemented yet"
 	}
 	return ""
 }
@@ -532,6 +537,7 @@ func (rt *Runtime) Commit(ctx context.Context, version uint64) (*types.ApplyResu
 	if rt.peers != nil {
 		rt.generation.Store(cfg.Generation)
 		rt.revs.Set(cfg.Revocations)
+		rt.served.Store(servedFor(cfg))
 		rt.peers.SetPeers(cfg.Peers)
 		rt.peers.CloseRevoked(&rt.revs)
 		keep := func(id types.UUID) bool { return rt.ruleVer[id] != 0 }
@@ -812,4 +818,34 @@ func (a *admission) revokeRules(ids map[types.UUID]bool, prev *route.Table) {
 	for _, k := range kills {
 		k()
 	}
+}
+
+// servedDecl 是按对端整理的规则声明（ENG-018、C1 served_digest）。
+type servedDecl struct {
+	send   map[types.UUID][]vlink.ServedRule // 本节点作为反向建链发起方：声明所服务的规则
+	expect map[types.UUID][]vlink.ServedRule // 对端作为反向建链发起方：它应服务的规则
+}
+
+func servedFor(cfg *types.RuntimeConfig) *servedDecl {
+	d := &servedDecl{send: map[types.UUID][]vlink.ServedRule{}, expect: map[types.UUID][]vlink.ServedRule{}}
+	ver := map[types.UUID]uint64{}
+	for _, r := range cfg.Rules {
+		ver[r.RuleID] = r.RuleVersion
+		if r.NextHop != nil && r.NextHop.Dial == types.DialReverse {
+			for _, m := range r.NextHop.Members {
+				d.expect[m.NodeID] = append(d.expect[m.NodeID], vlink.ServedRule{RuleID: r.RuleID, Version: r.RuleVersion})
+			}
+		}
+	}
+	for _, p := range cfg.Peers {
+		if !p.Outbound {
+			continue
+		}
+		for _, id := range p.ServedRuleIDs {
+			if v, ok := ver[id]; ok {
+				d.send[p.NodeID] = append(d.send[p.NodeID], vlink.ServedRule{RuleID: id, Version: v})
+			}
+		}
+	}
+	return d
 }

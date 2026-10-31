@@ -38,14 +38,24 @@ type node struct {
 }
 
 func newNode(t *testing.T, pki *enginetest.PKI, id types.UUID) *node {
+	return newNodeOpt(t, pki, id, true)
+}
+
+// newNodeOpt：listen 为 false 时节点不开链路监听（例如没有公网地址、只能反向建链的出口）。
+func newNodeOpt(t *testing.T, pki *enginetest.PKI, id types.UUID, listen bool) *node {
 	t.Helper()
-	ln, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	var ln net.Listener
+	var addr netip.AddrPort
+	if listen {
+		var err error
+		if ln, err = net.Listen("tcp4", "127.0.0.1:0"); err != nil {
+			t.Fatal(err)
+		}
+		addr = netip.MustParseAddrPort(ln.Addr().String())
 	}
 	rt := engine.New(engine.Options{Tunnel: &engine.TunnelOptions{Identity: pki.Node(id), Roots: pki.Roots,
 		BootID: types.UUID{0xb0, id[0]}, LinkListener: ln, DialTimeout: time.Second}})
-	n := &node{id: id, rt: rt, ag: enginetest.Start(rt, 20*time.Millisecond), link: netip.MustParseAddrPort(ln.Addr().String())}
+	n := &node{id: id, rt: rt, ag: enginetest.Start(rt, 20*time.Millisecond), link: addr}
 	t.Cleanup(func() { n.ag.Stop(); _ = rt.Close() })
 	return n
 }
@@ -101,7 +111,8 @@ func threeHop(t *testing.T) *topo {
 	rc.Targets = []types.Target{{Host: target.Addr().String(), Port: target.Port(), Weight: 1}}
 	l := tcpL(ruleT)
 	pol := types.TargetPolicy{SelfHostedNode: true}
-	c.apply(t, &types.RuntimeConfig{Version: 1, Generation: 1, Rules: []types.Rule{rc}, Peers: []types.Peer{b.peer(false)}, TargetPolicy: pol})
+	// C 的对端列表中也有 A（例如 A 是 C 另一条规则的上游）：A 能建链，但不是本规则允许的上游
+	c.apply(t, &types.RuntimeConfig{Version: 1, Generation: 1, Rules: []types.Rule{rc}, Peers: []types.Peer{b.peer(false), a.peer(false)}, TargetPolicy: pol})
 	b.apply(t, &types.RuntimeConfig{Version: 1, Generation: 1, Rules: []types.Rule{rb}, Peers: []types.Peer{a.peer(false), c.peer(true)}, TargetPolicy: pol})
 	a.apply(t, &types.RuntimeConfig{Version: 1, Generation: 1, Listeners: []types.Listener{l}, Rules: []types.Rule{ra}, Peers: []types.Peer{b.peer(true)}, TargetPolicy: pol})
 	return &topo{pki: pki, a: a, b: b, c: c, entry: a.rt.ListenerAddr(l), target: target}
@@ -168,6 +179,26 @@ func attacker(t *testing.T, tp *topo, id types.UUID, to *node) *vlink.Link {
 	return link
 }
 
+// refused 断言未出现在运行配置中的节点建链后立即被关闭，并有事件。
+func refused(t *testing.T, l *vlink.Link, by *node, id types.UUID) {
+	t.Helper()
+	select {
+	case <-l.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatalf("link from unknown node %x was not closed", id[0])
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, ev := range by.ag.Events(types.EventPeerDown) {
+			if ev.PeerID == id && strings.Contains(ev.Detail, "not in runtime config") {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("no event for refused inbound link")
+}
+
 // openErr 开流并返回对端的拒绝原因（0 表示被接受）。
 func openErr(t *testing.T, l *vlink.Link, o *vlink.Open) vlink.ErrorCode {
 	t.Helper()
@@ -207,11 +238,8 @@ func TestOpenChecksPreventBypass(t *testing.T) {
 	if code := openErr(t, bypass, good()); code != vlink.CodeUnauthorized {
 		t.Fatalf("entry bypassing relay: code %v", code)
 	}
-	// 任意合法节点 D
-	d := attacker(t, tp, nodeD, tp.c)
-	if code := openErr(t, d, good()); code != vlink.CodeUnauthorized {
-		t.Fatalf("foreign node: code %v", code)
-	}
+	// 同一 CA 签发、但不在出口运行配置中的节点 D：链路层即被拒绝
+	refused(t, attacker(t, tp, nodeD, tp.c), tp.c, nodeD)
 	// 冒充中继 B（同一 node_id，合法证书）时逐项检查 ①～④
 	b := attacker(t, tp, nodeB, tp.c)
 	cases := []struct {
@@ -239,8 +267,8 @@ func TestOpenChecksPreventBypass(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	evs := tp.rejections(tp.c, nodeB)
-	if len(evs) != len(cases) || len(tp.rejections(tp.c, nodeA)) != 1 || len(tp.rejections(tp.c, nodeD)) != 1 {
-		t.Fatalf("audit events: B %d A %d D %d", len(evs), len(tp.rejections(tp.c, nodeA)), len(tp.rejections(tp.c, nodeD)))
+	if len(evs) != len(cases) || len(tp.rejections(tp.c, nodeA)) != 1 {
+		t.Fatalf("audit events: B %d A %d", len(evs), len(tp.rejections(tp.c, nodeA)))
 	}
 	for _, ev := range evs {
 		if ev.Detail == "" {
@@ -259,11 +287,13 @@ func TestOpenChecksPreventBypass(t *testing.T) {
 
 func TestRelayChecksUpstreamToo(t *testing.T) {
 	tp := threeHop(t)
-	d := attacker(t, tp, nodeD, tp.b) // D 冒充入口直接连中继
+	refused(t, attacker(t, tp, nodeD, tp.b), tp.b, nodeD) // 不在中继配置中的节点
+	// 出口 C 是中继的已知对端（下一组成员），但不是本规则的上游：反方向开流被拒
+	c := attacker(t, tp, nodeC, tp.b)
 	o := &vlink.Open{RuleID: ruleT, RuleVersion: 3, PathGeneration: 2, HopIndex: 1, Network: types.NetworkTCP,
-		Visited: []types.UUID{nodeD}, Client: netip.MustParseAddrPort("198.51.100.1:5000")}
-	if code := openErr(t, d, o); code != vlink.CodeUnauthorized {
-		t.Fatalf("relay accepted unknown upstream: %v", code)
+		Visited: []types.UUID{nodeC}, Client: netip.MustParseAddrPort("198.51.100.1:5000")}
+	if code := openErr(t, c, o); code != vlink.CodeUnauthorized {
+		t.Fatalf("relay accepted a peer that is not an allowed upstream: %v", code)
 	}
 }
 
@@ -377,7 +407,7 @@ func TestRemovedMemberClosesSessionsAndRevocationClosesLinks(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if n := tp.a.rt.NumPeerLinks(nodeB); n != 0 {
-		t.Fatalf("link to revoked relay still open (%d)", n)
+		t.Fatalf("link to revoked relay still open (%d) %+v", n, tp.a.rt.PeerStats(nodeB))
 	}
 	if _, tag := dial(t, tp.entry); tag != 0 {
 		t.Fatal("entry still reaches a revoked relay")
@@ -416,7 +446,7 @@ func threeHopUDP(t *testing.T, exitIdle time.Duration, exitPolicy types.TargetPo
 	rc.Targets = []types.Target{{Host: echo.Addr().String(), Port: echo.Port(), Weight: 1}}
 	l := types.Listener{Bind: anyLocal, Network: types.NetworkUDP, RuleID: ruleT}
 	pol := types.TargetPolicy{SelfHostedNode: true}
-	c.apply(t, &types.RuntimeConfig{Version: 1, Rules: []types.Rule{rc}, Peers: []types.Peer{b.peer(false)}, TargetPolicy: exitPolicy})
+	c.apply(t, &types.RuntimeConfig{Version: 1, Rules: []types.Rule{rc}, Peers: []types.Peer{b.peer(false), a.peer(false)}, TargetPolicy: exitPolicy})
 	b.apply(t, &types.RuntimeConfig{Version: 1, Rules: []types.Rule{rb}, Peers: []types.Peer{a.peer(false), c.peer(true)}, TargetPolicy: pol})
 	a.apply(t, &types.RuntimeConfig{Version: 1, Listeners: []types.Listener{l}, Rules: []types.Rule{ra}, Peers: []types.Peer{b.peer(true)}, TargetPolicy: pol})
 	return &topo{pki: pki, a: a, b: b, c: c}, a.rt.ListenerAddr(l)
@@ -502,11 +532,11 @@ func TestUDPTunnelTargetForbiddenReason(t *testing.T) {
 
 func TestUDPOpenChecks(t *testing.T) {
 	tp, _ := threeHopUDP(t, 0, types.TargetPolicy{SelfHostedNode: true})
-	d := attacker(t, tp, nodeD, tp.c)
+	a := attacker(t, tp, nodeA, tp.c) // 已知对端但不是允许的上游
 	o := &vlink.Open{RuleID: ruleT, RuleVersion: 3, PathGeneration: 2, HopIndex: 2, Network: types.NetworkUDP,
 		Visited: []types.UUID{nodeA, nodeB}, Client: netip.MustParseAddrPort("198.51.100.1:5000")}
-	if code := openErr(t, d, o); code != vlink.CodeUnauthorized {
-		t.Fatalf("udp open from unknown node: %v", code)
+	if code := openErr(t, a, o); code != vlink.CodeUnauthorized {
+		t.Fatalf("udp open from a non-upstream peer: %v", code)
 	}
 	b := attacker(t, tp, nodeB, tp.c)
 	tcp := *o
@@ -553,4 +583,110 @@ func TestAutoModeSwitchesShortSessionsToPool(t *testing.T) {
 	if st := tp.a.rt.PeerStats(nodeB); tag != 'T' || st.PoolBusy != before+1 {
 		t.Fatalf("short session not on a pool link: before %d, now %+v", before, st)
 	}
+}
+
+// reverseTopo：入口 A → 中继 B 正向；B → 出口 C 反向：C 没有链路监听，主动连接 B 并声明所服务的规则（ENG-018）。
+func reverseTopo(t *testing.T, served []types.UUID, extraC ...types.Rule) (*topo, *types.RuntimeConfig) {
+	pki := enginetest.NewPKI()
+	a, b := newNode(t, pki, nodeA), newNode(t, pki, nodeB)
+	c := newNodeOpt(t, pki, nodeC, false)
+	target := tagServer(t, 'T')
+	ra := hop(types.RoleEntry, 0, true)
+	ra.NextHop = members(b)
+	rb := hop(types.RoleRelay, 1, false, a)
+	rb.NextHop = members(c)
+	rb.NextHop.Dial = types.DialReverse
+	rc := hop(types.RoleExit, 2, false, b)
+	rc.Targets = []types.Target{{Host: target.Addr().String(), Port: target.Port(), Weight: 1}}
+	l := tcpL(ruleT)
+	pol := types.TargetPolicy{SelfHostedNode: true}
+	b.apply(t, &types.RuntimeConfig{Version: 1, Rules: []types.Rule{rb}, Peers: []types.Peer{a.peer(false), {NodeID: nodeC}}, TargetPolicy: pol})
+	cfgC := &types.RuntimeConfig{Version: 1, Rules: append([]types.Rule{rc}, extraC...), TargetPolicy: pol,
+		// 即使配置为 pool，反向建链方也只维持 mux 链路（上游无法按需取用下游的 pool 链路）
+		Peers: []types.Peer{{NodeID: nodeB, Address: b.link.Addr().String(), LinkPort: b.link.Port(), Outbound: true,
+			ServedRuleIDs: served, LinkMode: types.LinkModePool}}}
+	c.apply(t, cfgC)
+	a.apply(t, &types.RuntimeConfig{Version: 1, Listeners: []types.Listener{l}, Rules: []types.Rule{ra}, Peers: []types.Peer{b.peer(true)}, TargetPolicy: pol})
+	return &topo{pki: pki, a: a, b: b, c: c, entry: a.rt.ListenerAddr(l)}, cfgC
+}
+
+func TestReverseDialedExit(t *testing.T) {
+	tp, _ := reverseTopo(t, []types.UUID{ruleT})
+	deadline := time.Now().Add(3 * time.Second)
+	for tp.b.rt.NumPeerLinks(nodeC) < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(300 * time.Millisecond) // 留出维护周期：不应再出现 pool 链路
+	if n := tp.b.rt.NumPeerLinks(nodeC); n != 2 {
+		t.Fatalf("relay has %d links from the reverse-dialing exit, want 2 mux links", n)
+	}
+	c, tag := dial(t, tp.entry)
+	if tag != 'T' {
+		t.Fatal("session over reverse-dialed segment failed")
+	}
+	if !alive(c) {
+		t.Fatal("echo over reverse segment")
+	}
+	for _, ev := range tp.b.ag.Events(types.EventPeerDown) {
+		if strings.Contains(ev.Detail, "served_digest") {
+			t.Fatalf("matching declaration flagged: %+v", ev)
+		}
+	}
+}
+
+func TestReverseServedDigestMismatchFlaggedButConnects(t *testing.T) {
+	// 出口还服务另一条规则并在 HELLO 中声明，中继只期望 ruleT：摘要不一致
+	other := hop(types.RoleExit, 2, false)
+	other.RuleID = types.UUID{0x55}
+	other.Targets = []types.Target{{Host: "127.0.0.1", Port: 9, Weight: 1}}
+	tp, _ := reverseTopo(t, []types.UUID{ruleT, other.RuleID}, other)
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		found := false
+		for _, ev := range tp.b.ag.Events(types.EventPeerDown) {
+			found = found || (ev.PeerID == nodeC && strings.Contains(ev.Detail, "served_digest mismatch"))
+		}
+		if found {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("mismatching served declaration not flagged")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, tag := dial(t, tp.entry); tag != 'T' {
+		t.Fatal("mismatch must not block the link; each OPEN is still checked")
+	}
+}
+
+func TestReverseReconnectsAfterLinkLoss(t *testing.T) {
+	tp, cfgC := reverseTopo(t, []types.UUID{ruleT})
+	if _, tag := dial(t, tp.entry); tag != 'T' {
+		t.Fatal("initial session")
+	}
+	// 中继暂时把 C 从配置中去掉：已有链路被关闭，C 的重连被拒（退避）；恢复后 C 重新建链
+	cfgB := *tp.b.cfg
+	cfgB.Version, cfgB.Peers = 2, []types.Peer{tp.a.peer(false)}
+	tp.b.apply(t, &cfgB)
+	deadline := time.Now().Add(2 * time.Second)
+	for tp.b.rt.NumPeerLinks(nodeC) != 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if tp.b.rt.NumPeerLinks(nodeC) != 0 {
+		t.Fatal("links from removed peer not closed")
+	}
+	if _, tag := dial(t, tp.entry); tag != 0 {
+		t.Fatal("session succeeded without the reverse links")
+	}
+	restored := *tp.b.cfg
+	restored.Version, restored.Peers = 3, []types.Peer{tp.a.peer(false), {NodeID: nodeC}}
+	tp.b.apply(t, &restored)
+	deadline = time.Now().Add(10 * time.Second) // 退避上限之内
+	for tp.b.rt.NumPeerLinks(nodeC) == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, tag := dial(t, tp.entry); tag != 'T' {
+		t.Fatal("reverse segment not re-established")
+	}
+	_ = cfgC
 }

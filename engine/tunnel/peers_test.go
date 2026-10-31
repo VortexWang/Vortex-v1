@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/netip"
 	"net/url"
+	"sync"
 	"testing"
 	"time"
 
@@ -64,7 +65,7 @@ type pair struct {
 	held     chan *vlink.Stream // 下游收到的流（不读取，直到测试结束）
 }
 
-func newPair(t *testing.T, mode types.LinkMode, opt vlink.LinkOptions, tune func(*Peers)) *pair {
+func newPair(t *testing.T, mode types.LinkMode, opt vlink.LinkOptions, tune func(up, down *Peers)) *pair {
 	t.Helper()
 	pki := newTestPKI(t)
 	tr := &vlink.Trust{Roots: pki.roots}
@@ -84,7 +85,7 @@ func newPair(t *testing.T, mode types.LinkMode, opt vlink.LinkOptions, tune func
 	pr.up = &Peers{Local: local(upI), LinkOptions: opt, Tick: 50 * time.Millisecond,
 		Handle: func(context.Context, *lifecycle.Scope, *vlink.Link, *vlink.Stream) {}}
 	if tune != nil {
-		tune(pr.up)
+		tune(pr.up, pr.down)
 	}
 	ln, _ := net.Listen("tcp", "127.0.0.1:0")
 	pr.addr = netip.MustParseAddrPort(ln.Addr().String())
@@ -136,7 +137,7 @@ func TestMuxWarmupBeforeAnySession(t *testing.T) {
 func TestMuxBalanceGrowAndShrink(t *testing.T) {
 	// 链路窗口设为 1 MiB（两端一致），不读取的流很快把链路的在途字节推过一半
 	opt := vlink.LinkOptions{LinkWindow: 1 << 20}
-	pr := newPair(t, types.LinkModeMux, opt, func(p *Peers) { p.IdleClose = 300 * time.Millisecond })
+	pr := newPair(t, types.LinkModeMux, opt, func(p, _ *Peers) { p.IdleClose = 300 * time.Millisecond })
 	eventually(t, "warm-up", func() bool { return pr.up.Stats(downID).Mux == 2 })
 	var streams []*vlink.Stream
 	links := map[*vlink.Link]int{}
@@ -233,6 +234,9 @@ func TestPoolExhaustedFallsBackToMuxAndGrows(t *testing.T) {
 		st := pr.up.Stats(downID)
 		return st.PoolBusy == 0 && st.PoolIdle == 3
 	})
+	if !pr.up.Healthy(downID) { // 本端主动关闭多余的池链路不得把对端标记为不可用
+		t.Fatal("closing excess pool links marked the peer down")
+	}
 }
 
 func TestDurationsMedianWindow(t *testing.T) {
@@ -285,5 +289,66 @@ func TestUsePool(t *testing.T) {
 		if got := usePool(c.mode, c.net, c.short); got != c.want {
 			t.Errorf("%+v: %v", c, got)
 		}
+	}
+}
+
+// 反向建链方连不上上游时按指数退避重试（ENG-018）。
+func TestReverseDialBackoffGrows(t *testing.T) {
+	pki := newTestPKI(t)
+	tr := &vlink.Trust{Roots: pki.roots}
+	id := pki.node(upID)
+	var mu sync.Mutex
+	var at []time.Time
+	p := &Peers{Local: func() *vlink.Local { return &vlink.Local{Identity: id, Trust: tr} }, Tick: 20 * time.Millisecond,
+		MinMux: 1, ReverseBackoff: 100 * time.Millisecond, ReverseBackoffMax: 2 * time.Second,
+		Handle: func(context.Context, *lifecycle.Scope, *vlink.Link, *vlink.Stream) {},
+		Emit: func(ev types.Event) {
+			mu.Lock()
+			at = append(at, time.Now())
+			mu.Unlock()
+		}}
+	root := lifecycle.NewRoot(context.Background())
+	defer root.Close()
+	if err := p.Start(root, nil); err != nil {
+		t.Fatal(err)
+	}
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	port := netip.MustParseAddrPort(ln.Addr().String()).Port()
+	ln.Close() // 没有服务的端口
+	p.SetPeers([]types.Peer{{NodeID: downID, Address: "127.0.0.1", LinkPort: port, Outbound: true, ServedRuleIDs: []types.UUID{{7}}}})
+	time.Sleep(2500 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	// 0、0.1、0.3、0.7、1.5 秒附近各一次（±20%）：约 5 次；固定周期重试会有上百次
+	if len(at) < 4 || len(at) > 7 {
+		t.Fatalf("%d attempts in 2.5 s", len(at))
+	}
+	for i := 2; i < len(at); i++ {
+		prev, cur := at[i-1].Sub(at[i-2]), at[i].Sub(at[i-1])
+		if cur < prev*13/10 {
+			t.Fatalf("interval %d did not grow: %v then %v", i, prev, cur)
+		}
+	}
+}
+
+// 握手成功但对端随即关闭链路（对端尚未把本节点加入配置）时同样退避，而不是每个维护周期重连。
+func TestReverseDialBacksOffWhenPeerRefusesLink(t *testing.T) {
+	var mu sync.Mutex
+	refused := 0
+	pr := newPair(t, types.LinkModeMux, vlink.LinkOptions{}, func(p, down *Peers) {
+		p.MinMux, p.ReverseBackoff, p.ReverseBackoffMax = 1, 100*time.Millisecond, 2*time.Second
+		down.Emit = func(ev types.Event) {
+			mu.Lock()
+			refused++
+			mu.Unlock()
+		}
+	})
+	pr.down.SetPeers(nil) // 下游不认识上游：接受的链路立即关闭
+	pr.up.SetPeers([]types.Peer{{NodeID: downID, Address: "127.0.0.1", LinkPort: pr.addr.Port(), Outbound: true, ServedRuleIDs: []types.UUID{{7}}}})
+	time.Sleep(2500 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if refused == 0 || refused > 10 { // 维护周期 50 ms：不退避时约 50 次
+		t.Fatalf("%d refused link attempts in 2.5 s", refused)
 	}
 }

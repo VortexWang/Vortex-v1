@@ -31,6 +31,8 @@ type Expect struct {
 	NodeID types.UUID // 发起方填写要连接的节点；接受方为零值
 	// Served：本端是反向链路的接受方（上游）时，对端应服务的规则集。非 nil 时与对端 HELLO 的摘要比对（R1）。
 	Served []ServedRule
+	// ServedFor：接受方在握手前不知道对端是谁时，按对端 node_id 取应服务的规则集（nil 表示不比对）。
+	ServedFor func(peer types.UUID) []ServedRule
 	// SendServed：本端是反向建链发起方时，自己服务的规则集（写入 HELLO 的 served_digest）。
 	SendServed []ServedRule
 	Reverse    bool // 本端是反向建链发起方
@@ -148,8 +150,12 @@ func Handshake(ctx context.Context, tc *tls.Conn, l *Local, ex Expect) (*Establi
 		return fail(GoawayVersionUnsupported, fmt.Errorf("%w: peer version %d", ErrVersion, ph.Version))
 	}
 	info := PeerInfo{NodeID: peerID, Hello: ph, Version: ver, Capabilities: ph.Capabilities & l.Capabilities}
-	if ex.Served != nil {
-		n, d := ServedDigest(ex.Served)
+	served := ex.Served
+	if served == nil && ex.ServedFor != nil {
+		served = ex.ServedFor(peerID)
+	}
+	if served != nil {
+		n, d := ServedDigest(served)
 		info.ServedMismatch = !ph.HasServed || ph.ServedCount != n || ph.ServedDigest != d
 	}
 	if err := <-wrote; err != nil {

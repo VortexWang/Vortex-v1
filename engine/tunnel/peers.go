@@ -4,6 +4,7 @@ package tunnel
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"vortex/engine/internal/lifecycle"
@@ -55,6 +57,11 @@ type Peers struct {
 	PoolMax     int           // 默认 64
 	IdleClose   time.Duration // 超过下限的空闲 mux 链路的关闭时间，默认 60 秒
 	Tick        time.Duration // 维护周期，默认 1 秒
+	// Served 返回与对端相关的规则声明（ENG-018）：send 为本节点作为反向建链发起方时声明所服务的规则，
+	// expect 为对端作为反向建链发起方时应服务的规则（用于比对 HELLO 摘要）。nil 函数表示都没有。
+	Served func(peer types.UUID) (send, expect []vlink.ServedRule)
+	// 反向建链断线后的指数退避（ENG-018）：初始 1 秒，翻倍，上限 30 秒，±20% 抖动
+	ReverseBackoff, ReverseBackoffMax time.Duration
 
 	root *lifecycle.Scope
 	kick chan struct{}
@@ -68,6 +75,8 @@ type peerState struct {
 	addr           string // 非空：本节点主动连接（Peer.Outbound）
 	mode           types.LinkMode
 	known          bool
+	reverse        bool        // 本节点是到该对端的反向建链发起方（Peer.Outbound 且声明了所服务的规则）
+	failures       int         // 连续建链失败次数（反向建链的指数退避）
 	links          []*linkInfo // 全部链路（含对端发起的）
 	poolIdle       []*linkInfo
 	poolBusy       int
@@ -94,8 +103,14 @@ func (ps *peerState) wake() {
 	}
 }
 
+// stableAfter：链路存活超过它才算建链成功（清零失败次数）；更早断开计为一次失败。
+// 否则对端在握手后立即关闭链路（例如尚未把本节点加入配置）时，反向建链方会每个维护周期重连一次。
+const stableAfter = 5 * time.Second
+
 type linkInfo struct {
 	l         *vlink.Link
+	since     time.Time
+	byUs      atomic.Bool // 本端主动关闭（缩容、吊销、对端移出配置）：不计为建链失败
 	pool      bool
 	idleSince time.Time // NumStreams 为 0 的起始时刻；有流时为零值
 }
@@ -135,6 +150,12 @@ func (p *Peers) Start(root *lifecycle.Scope, ln net.Listener) error {
 	if p.Tick == 0 {
 		p.Tick = time.Second
 	}
+	if p.ReverseBackoff == 0 {
+		p.ReverseBackoff = time.Second
+	}
+	if p.ReverseBackoffMax == 0 {
+		p.ReverseBackoffMax = 30 * time.Second
+	}
 	if p.Emit == nil {
 		p.Emit = func(types.Event) {}
 	}
@@ -148,6 +169,13 @@ func (p *Peers) Start(root *lifecycle.Scope, ln net.Listener) error {
 		return err
 	}
 	return root.Go(func(ctx context.Context) { p.acceptLoop(ctx, ln) })
+}
+
+func (p *Peers) isKnown(id types.UUID) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	ps := p.peers[id]
+	return ps != nil && ps.known
 }
 
 func (p *Peers) state(id types.UUID) *peerState {
@@ -177,9 +205,23 @@ func (p *Peers) acceptLoop(ctx context.Context, ln net.Listener) {
 		if p.root.Go(func(ctx context.Context) {
 			l := p.Local()
 			tc := tls.Server(c, vlink.ServerConfig(l.Identity, l.Trust))
-			if est, err := vlink.Handshake(ctx, tc, l, vlink.Expect{}); err == nil {
-				p.register(est, false, vlink.ModeMux)
+			ex := vlink.Expect{ServedFor: func(peer types.UUID) []vlink.ServedRule {
+				if p.Served == nil {
+					return nil
+				}
+				_, expect := p.Served(peer)
+				return expect
+			}}
+			est, err := vlink.Handshake(ctx, tc, l, ex)
+			if err != nil {
+				return
 			}
+			if !p.isKnown(est.Peer.NodeID) { // 只接受运行配置中出现的对端
+				p.Emit(types.Event{Kind: types.EventPeerDown, PeerID: est.Peer.NodeID, Detail: "inbound link from a node not in runtime config"})
+				_ = est.TLS.Close()
+				return
+			}
+			p.register(est, false, vlink.ModeMux)
 		}) != nil {
 			_ = c.Close()
 		}
@@ -196,9 +238,19 @@ func (p *Peers) register(est *vlink.Established, initiator bool, mode vlink.Link
 	if ls.Own(closer{l}) != nil {
 		return nil
 	}
-	li := &linkInfo{l: l, pool: l.Mode() == vlink.ModePool, idleSince: time.Now()}
+	li := &linkInfo{l: l, pool: l.Mode() == vlink.ModePool, idleSince: time.Now(), since: time.Now()}
 	p.mu.Lock()
 	ps := p.state(peer)
+	// 握手进行期间吊销列表可能已更新（CloseRevoked 看不到尚未登记的链路）：登记时按当前列表再查一次
+	if lc := p.Local(); lc.Trust != nil && lc.Trust.Revocations != nil {
+		cs := l.ConnectionState()
+		if len(cs.PeerCertificates) > 0 && lc.Trust.Revocations.Revoked(cs.PeerCertificates[0], peer) {
+			p.mu.Unlock()
+			_ = l.Shutdown(vlink.GoawayRevoked)
+			ls.Shutdown()
+			return nil
+		}
+	}
 	ps.links = append(ps.links, li)
 	if li.pool && initiator {
 		ps.poolIdle = append(ps.poolIdle, li)
@@ -252,6 +304,10 @@ func (p *Peers) unregister(peer types.UUID, li *linkInfo) {
 	if ps := p.peers[peer]; ps != nil {
 		ps.links = remove(ps.links, li)
 		ps.poolIdle = remove(ps.poolIdle, li)
+		if ps.addr != "" && !li.byUs.Load() && time.Since(li.since) < stableAfter {
+			ps.failures++
+			ps.downUntil = time.Now().Add(p.backoff(ps))
+		}
 	}
 	p.mu.Unlock()
 	p.Emit(types.Event{Kind: types.EventPeerDown, PeerID: peer, Detail: fmt.Sprint(li.l.Err())})
@@ -280,12 +336,18 @@ func (p *Peers) SetPeers(peers []types.Peer) {
 		if pr.Outbound && pr.Address != "" {
 			ps.addr = net.JoinHostPort(pr.Address, strconv.Itoa(int(pr.LinkPort)))
 		}
+		// 反向建链发起方只维持 mux 链路：链路由上游使用，上游无法按需取用本端的 pool 链路
+		ps.reverse = pr.Outbound && len(pr.ServedRuleIDs) > 0
+		if ps.reverse {
+			ps.mode = types.LinkModeMux
+		}
 	}
 	var stale []*vlink.Link
 	for id, ps := range p.peers {
 		if !seen[id] {
 			ps.known, ps.addr = false, ""
 			for _, li := range ps.links {
+				li.byUs.Store(true)
 				stale = append(stale, li.l)
 			}
 		}
@@ -305,6 +367,7 @@ func (p *Peers) CloseRevoked(rev *vlink.Revocations) {
 		for _, li := range ps.links {
 			cs := li.l.ConnectionState()
 			if len(cs.PeerCertificates) > 0 && rev.Revoked(cs.PeerCertificates[0], id) {
+				li.byUs.Store(true)
 				bad = append(bad, li.l)
 			}
 		}
@@ -320,7 +383,13 @@ func (p *Peers) Healthy(id types.UUID) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	ps := p.peers[id]
-	return ps == nil || time.Now().After(ps.downUntil)
+	if ps == nil {
+		return true
+	}
+	if ps.addr == "" { // 由对端建链（反向）：有可用链路才算可用，否则立即换下一个成员
+		return p.bestMuxLocked(ps) != nil
+	}
+	return time.Now().After(ps.downUntil)
 }
 
 // usePool 判定本会话是否使用 pool 链路：UDP 固定 mux；TCP 由对端模式决定，auto 时看规则的会话时长（short）。
@@ -494,7 +563,8 @@ func (p *Peers) dial(id types.UUID, addr string, mode vlink.LinkMode) (*linkInfo
 	ps := p.state(id)
 	ps.dialing[mode]--
 	if err != nil {
-		ps.downUntil = time.Now().Add(p.DownBackoff)
+		ps.failures++
+		ps.downUntil = time.Now().Add(p.backoff(ps))
 		ps.wake()
 	}
 	p.mu.Unlock()
@@ -502,6 +572,23 @@ func (p *Peers) dial(id types.UUID, addr string, mode vlink.LinkMode) (*linkInfo
 		p.Emit(types.Event{Kind: types.EventPeerDown, PeerID: id, Detail: err.Error()})
 	}
 	return li, err
+}
+
+// backoff 返回本次失败后的等待：正向建链固定 DownBackoff（下一组成员故障切换要快）；
+// 反向建链按失败次数指数增长（ENG-018）。
+func (p *Peers) backoff(ps *peerState) time.Duration {
+	if !ps.reverse {
+		return p.DownBackoff
+	}
+	d := p.ReverseBackoff
+	for i := 1; i < ps.failures && d < p.ReverseBackoffMax; i++ {
+		d *= 2
+	}
+	d = min(d, p.ReverseBackoffMax)
+	var b [1]byte
+	_, _ = rand.Read(b[:])
+	jitter := (float64(b[0])/255*0.4 - 0.2) * float64(d) // ±20%
+	return d + time.Duration(jitter)
 }
 
 func (p *Peers) dialOnce(id types.UUID, addr string, mode vlink.LinkMode) (*linkInfo, error) {
@@ -514,7 +601,14 @@ func (p *Peers) dialOnce(id types.UUID, addr string, mode vlink.LinkMode) (*link
 	}
 	l := p.Local()
 	l.Mode = mode
-	est, err := vlink.Handshake(ctx, tls.Client(nc, vlink.ClientConfig(l.Identity, l.Trust, id)), l, vlink.Expect{NodeID: id})
+	ex := vlink.Expect{NodeID: id}
+	p.mu.Lock()
+	ex.Reverse = p.state(id).reverse
+	p.mu.Unlock()
+	if ex.Reverse && p.Served != nil {
+		ex.SendServed, _ = p.Served(id)
+	}
+	est, err := vlink.Handshake(ctx, tls.Client(nc, vlink.ClientConfig(l.Identity, l.Trust, id)), l, ex)
 	if err != nil {
 		return nil, err
 	}
@@ -556,6 +650,9 @@ func (p *Peers) maintain() {
 	p.mu.Lock()
 	for _, ps := range p.peers {
 		for _, li := range ps.links {
+			if now.Sub(li.since) >= stableAfter {
+				ps.failures = 0
+			}
 			if li.l.NumStreams() > 0 {
 				li.idleSince = time.Time{}
 			} else if li.idleSince.IsZero() {
@@ -598,6 +695,7 @@ func (p *Peers) maintain() {
 					break
 				}
 				if !li.idleSince.IsZero() && now.Sub(li.idleSince) >= p.IdleClose {
+					li.byUs.Store(true)
 					closeL = append(closeL, li.l)
 					extra--
 				}
@@ -627,6 +725,7 @@ func (p *Peers) maintain() {
 			}
 		case len(idle) > target:
 			for _, li := range idle[target:] {
+				li.byUs.Store(true)
 				closeL = append(closeL, li.l)
 			}
 			ps.poolIdle = idle[:target]
