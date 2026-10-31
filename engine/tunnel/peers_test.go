@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -65,7 +66,8 @@ type pair struct {
 	held     chan *vlink.Stream // 下游收到的流（不读取，直到测试结束）
 }
 
-func newPair(t *testing.T, mode types.LinkMode, opt vlink.LinkOptions, tune func(up, down *Peers)) *pair {
+// wrap 非 nil 时改写上游连接下游所用的地址（例如插入可断开的代理）。
+func newPair(t *testing.T, mode types.LinkMode, opt vlink.LinkOptions, tune func(up, down *Peers), wrap ...func(netip.AddrPort) netip.AddrPort) *pair {
 	t.Helper()
 	pki := newTestPKI(t)
 	tr := &vlink.Trust{Roots: pki.roots}
@@ -98,7 +100,11 @@ func newPair(t *testing.T, mode types.LinkMode, opt vlink.LinkOptions, tune func
 	}
 	t.Cleanup(func() { _ = rootU.Close(); _ = rootD.Close() })
 	pr.down.SetPeers([]types.Peer{{NodeID: upID}})
-	pr.up.SetPeers([]types.Peer{{NodeID: downID, Address: "127.0.0.1", LinkPort: pr.addr.Port(), Outbound: true, LinkMode: mode}})
+	dst := pr.addr
+	for _, w := range wrap {
+		dst = w(dst)
+	}
+	pr.up.SetPeers([]types.Peer{{NodeID: downID, Address: "127.0.0.1", LinkPort: dst.Port(), Outbound: true, LinkMode: mode}})
 	return pr
 }
 
@@ -350,5 +356,100 @@ func TestReverseDialBacksOffWhenPeerRefusesLink(t *testing.T) {
 	defer mu.Unlock()
 	if refused == 0 || refused > 10 { // 维护周期 50 ms：不退避时约 50 次
 		t.Fatalf("%d refused link attempts in 2.5 s", refused)
+	}
+}
+
+// holeProxy 转发 TCP；hole 置位后停止转发但不关闭连接（模拟对端失联：链路两端都收不到任何帧）。
+type holeProxy struct {
+	addr netip.AddrPort
+	hole atomic.Bool
+}
+
+func newHoleProxy(t *testing.T, to netip.AddrPort) *holeProxy {
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	hp := &holeProxy{addr: netip.MustParseAddrPort(ln.Addr().String())}
+	t.Cleanup(func() { ln.Close() })
+	pump := func(dst, src net.Conn) {
+		buf := make([]byte, 32<<10)
+		for {
+			n, err := src.Read(buf)
+			if err != nil {
+				dst.Close()
+				return
+			}
+			for hp.hole.Load() {
+				time.Sleep(10 * time.Millisecond)
+			}
+			if _, err := dst.Write(buf[:n]); err != nil {
+				src.Close()
+				return
+			}
+		}
+	}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			u, err := net.Dial("tcp", to.String())
+			if err != nil {
+				c.Close()
+				continue
+			}
+			t.Cleanup(func() { c.Close(); u.Close() })
+			go pump(u, c)
+			go pump(c, u)
+		}
+	}()
+	return hp
+}
+
+func TestDeadLinkMarksPeerDownAndRecovers(t *testing.T) {
+	ka := vlink.LinkOptions{KeepaliveIdle: 100 * time.Millisecond, PingWait: 100 * time.Millisecond, DeadAfter: 400 * time.Millisecond}
+	var hp *holeProxy
+	pr := newPair(t, types.LinkModeMux, ka, func(up, _ *Peers) { up.DownBackoff, up.StableAfter = 500*time.Millisecond, 50*time.Millisecond },
+		func(a netip.AddrPort) netip.AddrPort { hp = newHoleProxy(t, a); return hp.addr })
+	eventually(t, "links through the proxy", func() bool { return pr.up.Stats(downID).Mux == 2 })
+	time.Sleep(200 * time.Millisecond) // 保活正常时链路保持
+	if pr.up.Stats(downID).Mux != 2 || !pr.up.Healthy(downID) {
+		t.Fatal("links dropped while the path is healthy")
+	}
+	hp.hole.Store(true)
+	start := time.Now()
+	eventually(t, "peer marked down", func() bool { return !pr.up.Healthy(downID) })
+	if took := time.Since(start); took > 900*time.Millisecond {
+		t.Fatalf("failure detected after %v", took)
+	}
+	// 选路以 Healthy 为准（不再选它）；全部链路随后也被判定失效，此时开流失败
+	eventually(t, "all links declared dead", func() bool { return pr.up.Stats(downID).Mux == 0 })
+	if _, err := pr.up.OpenStream(context.Background(), downID, topen(types.NetworkTCP), false); err == nil {
+		t.Fatal("opened a stream to a peer marked down")
+	}
+	hp.hole.Store(false)
+	eventually(t, "links re-established after backoff", func() bool {
+		return pr.up.Healthy(downID) && pr.up.Stats(downID).Mux >= 1
+	})
+}
+
+func TestDrainingPeerNotSelectedAndNotRedialed(t *testing.T) {
+	pr := newPair(t, types.LinkModeMux, vlink.LinkOptions{}, nil)
+	eventually(t, "warm-up", func() bool { return pr.up.Stats(downID).Mux == 2 })
+	old, _ := pr.up.OpenStream(context.Background(), downID, topen(types.NetworkTCP), false)
+	in := <-pr.held
+	pr.down.DrainAll(vlink.GoawayDraining)
+	eventually(t, "peer seen as draining", func() bool { return !pr.up.Healthy(downID) })
+	if _, err := pr.up.OpenStream(context.Background(), downID, topen(types.NetworkTCP), false); err == nil {
+		t.Fatal("new stream to a draining peer")
+	}
+	time.Sleep(200 * time.Millisecond) // 若误判为缺少链路会重新建链
+	if n := pr.up.NumLinks(downID); n != 2 {
+		t.Fatalf("%d links: redialed a draining peer", n)
+	}
+	// 已有流继续
+	_, _ = old.Write([]byte("x"))
+	_ = in.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := in.Read(make([]byte, 1)); err != nil {
+		t.Fatalf("existing stream on draining peer: %v", err)
 	}
 }

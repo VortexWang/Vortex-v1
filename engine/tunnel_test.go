@@ -716,3 +716,58 @@ func TestReverseReconnectsAfterLinkLoss(t *testing.T) {
 	}
 	_ = cfgC
 }
+
+// 节点维护排空（NOD-003）：出口 C 排空时向上游发送 GOAWAY(draining)，入口改选备用出口 D，C 上已有会话继续。
+func TestNodeDrainShiftsNewSessionsToOtherMember(t *testing.T) {
+	pki := enginetest.NewPKI()
+	a, c, d := newNode(t, pki, nodeA), newNode(t, pki, nodeC), newNode(t, pki, nodeD)
+	pol := types.TargetPolicy{SelfHostedNode: true}
+	for _, ex := range []struct {
+		n   *node
+		tag byte
+	}{{c, 'C'}, {d, 'D'}} {
+		tgt := tagServer(t, ex.tag)
+		r := hop(types.RoleExit, 1, false, a)
+		r.Targets = []types.Target{{Host: tgt.Addr().String(), Port: tgt.Port(), Weight: 1}}
+		ex.n.apply(t, &types.RuntimeConfig{Version: 1, Rules: []types.Rule{r}, Peers: []types.Peer{a.peer(false)}, TargetPolicy: pol})
+	}
+	ra := hop(types.RoleEntry, 0, true)
+	ra.NextHop = &types.NextHop{MemberSchedule: types.SchedulePrimaryBackup, Dial: types.DialForward,
+		Members: []types.Member{{NodeID: nodeC, Weight: 1, Priority: 0}, {NodeID: nodeD, Weight: 1, Priority: 1}}}
+	l := tcpL(ruleT)
+	a.apply(t, &types.RuntimeConfig{Version: 1, Listeners: []types.Listener{l}, Rules: []types.Rule{ra}, Peers: []types.Peer{c.peer(true), d.peer(true)}, TargetPolicy: pol})
+	entry := a.rt.ListenerAddr(l)
+	deadline := time.Now().Add(3 * time.Second)
+	for (a.rt.PeerStats(nodeC).Mux < 2 || a.rt.PeerStats(nodeD).Mux < 2) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	old, tag := dial(t, entry)
+	if tag != 'C' {
+		t.Fatalf("primary member not used: %q", tag)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	drained := make(chan error, 1)
+	go func() { drained <- c.rt.Drain(ctx, engine.DrainScope{}) }()
+	deadline = time.Now().Add(2 * time.Second)
+	for a.rt.PeerStats(nodeC).Mux != 0 && time.Now().Before(deadline) { // 收到 GOAWAY 的链路不再可用
+		time.Sleep(10 * time.Millisecond)
+	}
+	for i := 0; i < 5; i++ {
+		if _, tag := dial(t, entry); tag != 'D' {
+			t.Fatalf("new session during drain went to %q, want D", tag)
+		}
+	}
+	if !alive(old) {
+		t.Fatal("existing session on the draining node was cut")
+	}
+	old.Close()
+	select {
+	case err := <-drained:
+		if err != nil {
+			t.Fatalf("drain: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("drain did not complete after the last session ended")
+	}
+}

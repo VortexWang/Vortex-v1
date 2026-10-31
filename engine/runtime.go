@@ -619,6 +619,9 @@ func (rt *Runtime) Abort(_ context.Context, version uint64) error {
 // 范围为空表示全部规则。排空状态保持到进程结束（维护排空之后是停止或升级）。
 func (rt *Runtime) Drain(ctx context.Context, scope DrainScope) error {
 	rt.adm.drain(scope.RuleIDs)
+	if len(scope.RuleIDs) == 0 && rt.peers != nil {
+		rt.peers.DrainAll(vlink.GoawayDraining) // 节点排空：上游不再经本节点开新流，改选其他成员
+	}
 	t := time.NewTicker(20 * time.Millisecond)
 	defer t.Stop()
 	for {

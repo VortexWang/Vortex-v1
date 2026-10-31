@@ -69,6 +69,9 @@ type LinkOptions struct {
 	DgramQueue      int           // DGRAM 发送队列字节上限，默认 1 MiB（ENG-048）
 	DgramRecvQueue  int           // 每会话待处理的入站数据报上限，默认 512
 	Mode            LinkMode      // 本端发起时在 HELLO 中声明的模式（仅记录，供 Mode 返回）
+	KeepaliveIdle   time.Duration // 空闲多久发 PING，默认 3 秒（ENG-019）
+	PingWait        time.Duration // 单次 PING 等待，默认 3 秒
+	DeadAfter       time.Duration // 自最后一次收到帧起多久判定失效，默认 12 秒（NFR-016）
 }
 
 func (o *LinkOptions) fill() {
@@ -89,6 +92,15 @@ func (o *LinkOptions) fill() {
 	}
 	if o.RTT == 0 {
 		o.RTT = 50 * time.Millisecond
+	}
+	if o.KeepaliveIdle == 0 {
+		o.KeepaliveIdle = 3 * time.Second
+	}
+	if o.PingWait == 0 {
+		o.PingWait = 3 * time.Second
+	}
+	if o.DeadAfter == 0 {
+		o.DeadAfter = 12 * time.Second
 	}
 	if o.DgramQueue == 0 {
 		o.DgramQueue = 1 << 20
@@ -171,6 +183,14 @@ type Link struct {
 	pmu   sync.Mutex
 	pings map[[8]byte]chan struct{}
 
+	kaMu    sync.Mutex
+	kaTimer *time.Timer
+	kaKey   [8]byte
+	kaSent  time.Time
+	kaOut   bool // 保活 PING 已发出、尚未收到 PONG
+
+	goawayCode atomic.Int32 // 收到的 GOAWAY 码；-1 表示未收到
+
 	dstats DgramStats
 
 	rtt      atomic.Int64 // 纳秒
@@ -196,18 +216,62 @@ func NewLink(est *Established, opt LinkOptions) *Link {
 		l.nextID = 2
 	}
 	l.rtt.Store(int64(opt.RTT))
+	l.goawayCode.Store(-1)
 	l.lastRecv.Store(int64(time.Since(l.start)))
 	l.wg.Add(2)
 	go l.readLoop()
 	go l.writeLoop()
-	go func() { // 实测 RTT，用于接收窗口自适应
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if d, err := l.Ping(ctx); err == nil {
-			l.rtt.Store(int64(max(d, 100*time.Microsecond)))
-		}
-	}()
+	// 保活不占常驻 goroutine（ENG-045：每条链路只有读、写各 1 个）：自我重排的定时器。
+	// 建链后立即发一次 PING，用 PONG 实测 RTT（接收窗口自适应用）。
+	l.sendKeepalive()
+	l.kaMu.Lock()
+	l.kaTimer = time.AfterFunc(l.kaNext(), l.keepalive)
+	l.kaMu.Unlock()
 	return l
+}
+
+// ErrLinkDead：自最后一次收到对端帧起超过失效时间（ENG-019）。
+var ErrLinkDead = errors.New("vlink: link dead (no frame from peer within the failure timeout)")
+
+// sendKeepalive 发送保活 PING（固定的 8 字节随机值，记下发送时刻用于测 RTT）。
+func (l *Link) sendKeepalive() {
+	l.kaMu.Lock()
+	_, _ = rand.Read(l.kaKey[:])
+	l.kaSent = time.Now()
+	l.kaOut = true
+	key := l.kaKey
+	l.kaMu.Unlock()
+	l.sendCtrl(TypePing, 0, key[:])
+}
+
+func (l *Link) kaNext() time.Duration {
+	return max(min(l.opt.KeepaliveIdle/3, time.Second), 10*time.Millisecond)
+}
+
+// keepalive：任何入站帧都刷新存活时间；空闲达到 KeepaliveIdle 发 PING，单次等待 PingWait 后未收到回应
+// （且期间没有任何帧）再发；自最后一次收到帧起 DeadAfter 未收到任何帧即判定失效并关闭链路。
+func (l *Link) keepalive() {
+	if l.isClosed() {
+		return
+	}
+	since := l.SinceLastFrame()
+	if since >= l.opt.DeadAfter {
+		l.fail(fmt.Errorf("%w: %v since last frame", ErrLinkDead, since.Round(time.Millisecond)), false)
+		return
+	}
+	if since >= l.opt.KeepaliveIdle {
+		l.kaMu.Lock()
+		due := !l.kaOut || time.Since(l.kaSent) >= l.opt.PingWait
+		l.kaMu.Unlock()
+		if due {
+			l.sendKeepalive()
+		}
+	}
+	l.kaMu.Lock()
+	if l.kaTimer != nil {
+		l.kaTimer.Reset(l.kaNext())
+	}
+	l.kaMu.Unlock()
 }
 
 func (l *Link) Peer() PeerInfo                { return l.peer }
@@ -527,6 +591,29 @@ func (l *Link) Mode() LinkMode {
 	return l.peer.Hello.LinkMode
 }
 
+// GoawayReceived 返回对端发来的 GOAWAY 码（未收到时 ok 为 false）。
+func (l *Link) GoawayReceived() (GoawayCode, bool) {
+	c := l.goawayCode.Load()
+	return GoawayCode(c), c >= 0
+}
+
+// CloseGraceful 发送 GOAWAY(code) 后等待已有流结束（或 ctx 结束），再关闭链路（ENG-019 优雅关闭）。
+func (l *Link) CloseGraceful(ctx context.Context, code GoawayCode) error {
+	l.Drain(code)
+	t := time.NewTicker(20 * time.Millisecond)
+	defer t.Stop()
+	for l.NumStreams() > 0 {
+		select {
+		case <-ctx.Done():
+			return l.Shutdown(code)
+		case <-l.done:
+			return nil
+		case <-t.C:
+		}
+	}
+	return l.Shutdown(code)
+}
+
 // Usable 表示还能在这条链路上开新流（未关闭、未收到 GOAWAY、流 ID 未耗尽）。
 func (l *Link) Usable() bool {
 	l.mu.Lock()
@@ -556,6 +643,12 @@ func (l *Link) fail(err error, protocol bool) {
 			l.mu.Unlock()
 			_, _ = l.tc.Write(AppendFrame(nil, TypeGoaway, 0, AppendGoawayPayload(nil, last, GoawayProtocolError)))
 		}
+		l.kaMu.Lock()
+		if l.kaTimer != nil {
+			l.kaTimer.Stop()
+			l.kaTimer = nil
+		}
+		l.kaMu.Unlock()
 		l.wmu.Lock()
 		l.err = err
 		close(l.done)
@@ -644,14 +737,22 @@ func (l *Link) dispatch(h Header, p []byte) error {
 			delete(l.pings, [8]byte(p))
 		}
 		l.pmu.Unlock()
+		l.kaMu.Lock()
+		if l.kaOut && [8]byte(p) == l.kaKey {
+			l.kaOut = false
+			l.rtt.Store(int64(max(time.Since(l.kaSent), 100*time.Microsecond)))
+		}
+		l.kaMu.Unlock()
 		return nil
 	case TypeGoaway:
-		if _, _, err := ParseGoawayPayload(p); err != nil {
+		_, code, err := ParseGoawayPayload(p)
+		if err != nil {
 			return err
 		}
 		l.mu.Lock()
 		l.goawayIn = true
 		l.mu.Unlock()
+		l.goawayCode.Store(int32(code))
 		return nil
 	case TypeWindow:
 		inc, err := ParseWindowPayload(p)

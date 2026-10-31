@@ -62,9 +62,13 @@ type Peers struct {
 	Served func(peer types.UUID) (send, expect []vlink.ServedRule)
 	// 反向建链断线后的指数退避（ENG-018）：初始 1 秒，翻倍，上限 30 秒，±20% 抖动
 	ReverseBackoff, ReverseBackoffMax time.Duration
+	// StableAfter：链路存活超过它才算建链成功（清零失败次数），更早断开计为一次失败，默认 5 秒。
+	// 否则对端在握手后立即关闭链路（例如尚未把本节点加入配置）时，反向建链方会每个维护周期重连一次。
+	StableAfter time.Duration
 
-	root *lifecycle.Scope
-	kick chan struct{}
+	root     *lifecycle.Scope
+	kick     chan struct{}
+	draining atomic.Bool // 本节点排空中：所有链路（含之后建立的）发送 GOAWAY(draining)
 
 	mu    sync.Mutex
 	peers map[types.UUID]*peerState
@@ -102,10 +106,6 @@ func (ps *peerState) wake() {
 		ps.ready = nil
 	}
 }
-
-// stableAfter：链路存活超过它才算建链成功（清零失败次数）；更早断开计为一次失败。
-// 否则对端在握手后立即关闭链路（例如尚未把本节点加入配置）时，反向建链方会每个维护周期重连一次。
-const stableAfter = 5 * time.Second
 
 type linkInfo struct {
 	l         *vlink.Link
@@ -149,6 +149,9 @@ func (p *Peers) Start(root *lifecycle.Scope, ln net.Listener) error {
 	}
 	if p.Tick == 0 {
 		p.Tick = time.Second
+	}
+	if p.StableAfter == 0 {
+		p.StableAfter = 5 * time.Second
 	}
 	if p.ReverseBackoff == 0 {
 		p.ReverseBackoff = time.Second
@@ -263,6 +266,9 @@ func (p *Peers) register(est *vlink.Established, initiator bool, mode vlink.Link
 	if est.Peer.ServedMismatch {
 		p.Emit(types.Event{Kind: types.EventPeerDown, PeerID: peer, Detail: "served_digest mismatch"})
 	}
+	if p.draining.Load() {
+		l.Drain(vlink.GoawayDraining)
+	}
 	err := ls.Go(func(ctx context.Context) {
 		defer ls.Shutdown()
 		defer p.unregister(peer, li)
@@ -304,7 +310,12 @@ func (p *Peers) unregister(peer types.UUID, li *linkInfo) {
 	if ps := p.peers[peer]; ps != nil {
 		ps.links = remove(ps.links, li)
 		ps.poolIdle = remove(ps.poolIdle, li)
-		if ps.addr != "" && !li.byUs.Load() && time.Since(li.since) < stableAfter {
+		switch {
+		case li.byUs.Load():
+		case errors.Is(li.l.Err(), vlink.ErrLinkDead): // 保活判定失效：对端标记为不可用（ENG-019）
+			ps.failures++
+			ps.downUntil = time.Now().Add(p.backoff(ps))
+		case ps.addr != "" && time.Since(li.since) < p.StableAfter:
 			ps.failures++
 			ps.downUntil = time.Now().Add(p.backoff(ps))
 		}
@@ -386,10 +397,41 @@ func (p *Peers) Healthy(id types.UUID) bool {
 	if ps == nil {
 		return true
 	}
+	if peerDraining(ps) {
+		return false
+	}
 	if ps.addr == "" { // 由对端建链（反向）：有可用链路才算可用，否则立即换下一个成员
 		return p.bestMuxLocked(ps) != nil
 	}
 	return time.Now().After(ps.downUntil)
+}
+
+// peerDraining：对端在某条仍未关闭的链路上发来了 GOAWAY(draining)，在这些链路关闭（例如对端重启）
+// 之前不再选它、也不向它新建链路。
+func peerDraining(ps *peerState) bool {
+	for _, li := range ps.links {
+		if c, ok := li.l.GoawayReceived(); ok && c == vlink.GoawayDraining {
+			return true
+		}
+	}
+	return false
+}
+
+// DrainAll 让本节点的全部链路发送 GOAWAY(code)（节点维护排空，NOD-003）：对端不再在这些链路上开新流，
+// 已有流继续；之后建立的链路同样立即发送。
+func (p *Peers) DrainAll(code vlink.GoawayCode) {
+	p.draining.Store(true)
+	p.mu.Lock()
+	var ls []*vlink.Link
+	for _, ps := range p.peers {
+		for _, li := range ps.links {
+			ls = append(ls, li.l)
+		}
+	}
+	p.mu.Unlock()
+	for _, l := range ls {
+		l.Drain(code)
+	}
 }
 
 // usePool 判定本会话是否使用 pool 链路：UDP 固定 mux；TCP 由对端模式决定，auto 时看规则的会话时长（short）。
@@ -538,7 +580,7 @@ func (p *Peers) waitDial(ctx context.Context, id types.UUID) (*linkInfo, error) 
 		p.mu.Unlock()
 		return nil, ErrUnknownPeer
 	}
-	if time.Now().Before(ps.downUntil) {
+	if time.Now().Before(ps.downUntil) || peerDraining(ps) {
 		p.mu.Unlock()
 		return nil, ErrPeerDown
 	}
@@ -650,7 +692,7 @@ func (p *Peers) maintain() {
 	p.mu.Lock()
 	for _, ps := range p.peers {
 		for _, li := range ps.links {
-			if now.Sub(li.since) >= stableAfter {
+			if now.Sub(li.since) >= p.StableAfter {
 				ps.failures = 0
 			}
 			if li.l.NumStreams() > 0 {
@@ -659,7 +701,7 @@ func (p *Peers) maintain() {
 				li.idleSince = now
 			}
 		}
-		if ps.addr == "" || now.Before(ps.downUntil) {
+		if ps.addr == "" || now.Before(ps.downUntil) || peerDraining(ps) {
 			continue
 		}
 		// mux
