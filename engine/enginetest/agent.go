@@ -18,7 +18,7 @@ type Agent struct {
 	E engine.Engine
 
 	mu       sync.Mutex
-	usage    map[UsageKey]uint64                 // 累计原始字节
+	usage    map[UsageKey]uint64                   // 累计原始字节
 	consumed map[types.UUID]types.GrantConsumption // 每个计费授权最新的已用量
 	events   []types.Event
 	pulls    int
