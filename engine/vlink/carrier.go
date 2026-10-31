@@ -148,7 +148,14 @@ func baseConfig(id *Identity) *tls.Config {
 		MaxVersion:   tls.VersionTLS13,
 		Certificates: []tls.Certificate{id.Cert},
 		NextProtos:   []string{ALPN},
+		// 链路是长连接、以吞吐为主：始终使用最大记录（16 KiB），不在空闲后退回小记录（ENG-044）
+		DynamicRecordSizingDisabled: true,
 	}
+}
+
+// DefaultTLSRecordSizing 报告链路的 TLS 配置是否关闭了动态记录大小（测试用）。
+func DefaultTLSRecordSizing() bool {
+	return baseConfig(&Identity{}).DynamicRecordSizingDisabled
 }
 
 // ServerConfig 是接受方配置：要求客户端证书，链与身份在 VerifyConnection 中按 Trust 校验。

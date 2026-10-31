@@ -309,7 +309,7 @@ func (s *Stream) Write(b []byte) (int, error) {
 			}
 			continue
 		}
-		want := min(int64(len(b)-written), int64(MaxPayload), s.sendWin)
+		want := min(int64(len(b)-written), int64(MaxDataPayload), s.sendWin)
 		dl := s.wdlWake
 		s.mu.Unlock()
 

@@ -205,9 +205,10 @@ func (e *UDPEntry) session(ctx context.Context, client, local netip.AddrPort) *u
 	// 会话插入表后才有 self；在此之前被 kill（例如配置提交时收紧规则）则记下，插入后立即移除
 	var self atomic.Pointer[udpSession]
 	var dead atomic.Bool
-	kill := func() {
+	kill := func(reason error) {
 		dead.Store(true)
 		if p := self.Load(); p != nil {
+			resetTarget(p.target, reason)
 			e.remove(p)
 		}
 	}

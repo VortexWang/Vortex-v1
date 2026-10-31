@@ -15,16 +15,36 @@ import (
 
 // Admission 是新会话的准入门控（ENG-024），由 gate 实现：检查运行授权、份额、连接数与计费授权，
 // 通过时返回本会话拷贝点使用的 Hook（计量与限速）以及会话结束时必须调用一次的 release。
-// kill 由门控在限制生效（授权到期、份额失效、连接数降额）时调用，立即关闭该会话（ENG-028）；
+// kill 由门控在限制生效（授权到期、份额失效、连接数降额）时调用，立即关闭该会话（ENG-028），reason 为原因
+// （gate.ErrRunGrant 等，或本包的 ErrRuleRevoked / ErrDrained）；隧道会话据此向路径上其他节点发送带原因码的 RST。
 // 阻塞在读取上的会话不会调用 Hook，因此必须能被主动关闭。
 type Admission interface {
-	Admit(ctx context.Context, rule *types.Rule, client netip.AddrPort, kill func()) (hook pipe.Hook, release func(), err error)
+	Admit(ctx context.Context, rule *types.Rule, client netip.AddrPort, kill func(reason error)) (hook pipe.Hook, release func(), err error)
+}
+
+// 运行时关闭会话的原因（门控之外）。
+var (
+	ErrRuleRevoked = errors.New("unauthorized: rule removed or permissions tightened")
+	ErrDrained     = errors.New("no_route: drain deadline reached")
+)
+
+// Resetter 由隧道上游实现：以原因终止（向下游发送对应原因码的 RST），而不是普通关闭。
+type Resetter interface{ ResetWith(reason error) }
+
+// EndReasoner 由门控的 Hook 实现：会话因额度耗尽等原因自然结束时返回原因（否则 nil）。
+type EndReasoner interface{ EndReason() error }
+
+// resetTarget 在关闭会话前用原因终止上游（若上游支持）。
+func resetTarget(t any, reason error) {
+	if r, ok := t.(Resetter); ok && reason != nil {
+		r.ResetWith(reason)
+	}
 }
 
 // AllowAll 不做门控（测试与 M0 早期使用）。
 type AllowAll struct{}
 
-func (AllowAll) Admit(context.Context, *types.Rule, netip.AddrPort, func()) (pipe.Hook, func(), error) {
+func (AllowAll) Admit(context.Context, *types.Rule, netip.AddrPort, func(error)) (pipe.Hook, func(), error) {
 	return pipe.NopHook{}, func() {}, nil
 }
 
@@ -141,7 +161,14 @@ func (e *DirectEntry) handle(ctx context.Context, sess *lifecycle.Scope, client 
 		return
 	}
 	clientAP, _ := netip.ParseAddrPort(client.RemoteAddr().String())
-	hook, release, err := e.Admission.Admit(ctx, rule, clientAP, sess.Shutdown)
+	var up atomic.Value // 上游连接建立后才有；kill 时用原因终止它（ENG-028）
+	kill := func(reason error) {
+		if v := up.Load(); v != nil {
+			resetTarget(v.(*upConn).c, reason)
+		}
+		sess.Shutdown()
+	}
+	hook, release, err := e.Admission.Admit(ctx, rule, clientAP, kill)
 	if err != nil {
 		return // 门控拒绝：直接关闭连接，不连接目标（ENG-024）
 	}
@@ -159,6 +186,7 @@ func (e *DirectEntry) handle(ctx context.Context, sess *lifecycle.Scope, client 
 	if err != nil {
 		return
 	}
+	up.Store(&upConn{target})
 	if sess.Own(target) != nil {
 		return
 	}
@@ -183,8 +211,13 @@ func (e *DirectEntry) handle(ctx context.Context, sess *lifecycle.Scope, client 
 			}
 		},
 	})
+	if er, ok := hook.(EndReasoner); ok { // 额度耗尽等：把原因带给路径上其他节点
+		resetTarget(target, er.EndReason())
+	}
 }
 
 func (e *DirectEntry) dialTarget(ctx context.Context, r *types.Rule) (net.Conn, error) {
 	return e.targets.Dial(ctx, r)
 }
+
+type upConn struct{ c any }

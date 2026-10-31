@@ -771,3 +771,150 @@ func TestNodeDrainShiftsNewSessionsToOtherMember(t *testing.T) {
 		t.Fatal("drain did not complete after the last session ended")
 	}
 }
+
+// fakeExit 是一个只说 VLink 的出口：接受中继建来的链路，回应开流，把收到的流交给测试，用于观察
+// 从路径上游传来的 RST 原因码（ENG-028）。
+func fakeExit(t *testing.T, pki *enginetest.PKI, id types.UUID, known ...types.UUID) (netip.AddrPort, <-chan *vlink.Stream) {
+	t.Helper()
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	ident := pki.Node(id)
+	trust := &vlink.Trust{Roots: pki.Roots}
+	out := make(chan *vlink.Stream, 64)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				l := &vlink.Local{Identity: ident, Trust: trust, BootID: types.UUID{0xfe}}
+				est, err := vlink.Handshake(context.Background(), tls.Server(c, vlink.ServerConfig(ident, trust)), l, vlink.Expect{})
+				if err != nil {
+					return
+				}
+				link := vlink.NewLink(est, vlink.LinkOptions{})
+				t.Cleanup(func() { link.Close() })
+				for {
+					s, err := link.Accept(context.Background())
+					if err != nil {
+						return
+					}
+					s.Accept()
+					go func() { _, _ = io.Copy(io.Discard, s) }() // 吸收数据，直到流被终止
+					out <- s
+				}
+			}()
+		}
+	}()
+	return netip.MustParseAddrPort(ln.Addr().String()), out
+}
+
+// relayToFake：入口 A → 中继 B → 假出口 F。
+func relayToFake(t *testing.T, billing uint64) (*topo, <-chan *vlink.Stream) {
+	pki := enginetest.NewPKI()
+	a, b := newNode(t, pki, nodeA), newNode(t, pki, nodeB)
+	faddr, streams := fakeExit(t, pki, nodeC)
+	ra := hop(types.RoleEntry, 0, true)
+	ra.NextHop = members(b)
+	rb := hop(types.RoleRelay, 1, false, a)
+	rb.NextHop = members(&node{id: nodeC})
+	l := tcpL(ruleT)
+	pol := types.TargetPolicy{SelfHostedNode: true}
+	b.apply(t, &types.RuntimeConfig{Version: 1, Rules: []types.Rule{rb}, TargetPolicy: pol,
+		Peers: []types.Peer{a.peer(false), {NodeID: nodeC, Address: faddr.Addr().String(), LinkPort: faddr.Port(), Outbound: true}}})
+	cfgA := &types.RuntimeConfig{Version: 1, Listeners: []types.Listener{l}, Rules: []types.Rule{ra}, Peers: []types.Peer{b.peer(true)}, TargetPolicy: pol}
+	cfgA.NodeID = a.id
+	if _, _, err := a.ag.Apply(context.Background(), cfgA); err != nil {
+		t.Fatal(err)
+	}
+	a.ag.GrantAll(cfgA, enginetest.Grants{TTL: time.Hour, Billing: billing})
+	a.cfg = cfgA
+	return &topo{pki: pki, a: a, b: b, entry: a.rt.ListenerAddr(l)}, streams
+}
+
+func resetCode(t *testing.T, s *vlink.Stream) vlink.ErrorCode {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for s.Err() == nil && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	var se *vlink.StreamError
+	if !errors.As(s.Err(), &se) || !se.Remote {
+		t.Fatalf("stream at the far end ended with %v, want a remote RST", s.Err())
+	}
+	return se.Code
+}
+
+func TestQuotaExhaustionRSTReachesEndOfPath(t *testing.T) {
+	tp, streams := relayToFake(t, 1<<20) // 入口执行点只有 1 MiB 计费授权
+	c, err := net.Dial("tcp", tp.entry.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	go func() { _, _ = c.Write(make([]byte, 4<<20)) }()
+	var s *vlink.Stream
+	select {
+	case s = <-streams:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no stream reached the far end")
+	}
+	if code := resetCode(t, s); code != vlink.CodeQuotaExhausted {
+		t.Fatalf("far end got RST %v, want quota_exhausted (propagated through the relay)", code)
+	}
+}
+
+func TestRestrictionRSTReachesEndOfPath(t *testing.T) {
+	tp, streams := relayToFake(t, 0)
+	c, err := net.Dial("tcp", tp.entry.String()) // 假出口不发标识字节；这里只需要会话建立
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_, _ = c.Write([]byte("x"))
+	var s *vlink.Stream
+	select {
+	case s = <-streams:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no stream reached the far end")
+	}
+	// 入口收紧规则（下一组移除 B）：会话按 ENG-028 关闭，原因码 unauthorized 沿路径传到末端
+	cfg := *tp.a.cfg
+	r := cfg.Rules[0]
+	r.NextHop = members(&node{id: nodeD})
+	cfg.Rules, cfg.Version = []types.Rule{r}, 2
+	tp.a.apply(t, &cfg)
+	if code := resetCode(t, s); code != vlink.CodeUnauthorized {
+		t.Fatalf("far end got RST %v, want unauthorized", code)
+	}
+}
+
+func TestShareExpiryRSTReachesEndOfPath(t *testing.T) {
+	tp, streams := relayToFake(t, 0)
+	c, err := net.Dial("tcp", tp.entry.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_, _ = c.Write([]byte("x"))
+	var s *vlink.Stream
+	select {
+	case s = <-streams:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no stream reached the far end")
+	}
+	// 入口执行点的份额租约改为很快到期（运行授权与计费授权不变）：门控按 ENG-028 关闭会话，原因 rate_limited
+	set := tp.a.ag.GrantAll(tp.a.cfg, enginetest.Grants{TTL: time.Hour})
+	for i := range set.Shares {
+		set.Shares[i].Meta.GrantID = tp.a.ag.NewID()
+		set.Shares[i].Meta.TTL = 600 * time.Millisecond
+	}
+	tp.a.rt.UpdateGrants(set)
+	if code := resetCode(t, s); code != vlink.CodeRateLimited {
+		t.Fatalf("far end got RST %v, want rate_limited", code)
+	}
+}

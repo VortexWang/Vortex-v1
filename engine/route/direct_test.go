@@ -196,7 +196,7 @@ type testAdmission struct {
 	released atomic.Int64
 }
 
-func (a *testAdmission) Admit(context.Context, *types.Rule, netip.AddrPort, func()) (pipe.Hook, func(), error) {
+func (a *testAdmission) Admit(context.Context, *types.Rule, netip.AddrPort, func(error)) (pipe.Hook, func(), error) {
 	if a.deny.Load() {
 		return nil, nil, errors.New("conn_limited")
 	}

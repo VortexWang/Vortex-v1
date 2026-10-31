@@ -80,7 +80,8 @@ type session struct {
 	g       *Gate
 	rs      *ruleState
 	t       *tenantState // 非执行点为 nil
-	kill    func()
+	kill    func(reason error)
+	endErr  atomic.Pointer[error] // 会话自然结束的原因（额度耗尽）
 	start   time.Duration
 	killed  atomic.Bool
 	ended   atomic.Bool
@@ -100,6 +101,7 @@ type restriction struct {
 	tenant    types.UUID
 	rules     []types.UUID
 	reason    string
+	err       error // 交给 kill 的原因（映射为 RST 原因码）
 	remaining int
 }
 
@@ -277,7 +279,7 @@ func (g *Gate) ruleLocked(r *types.Rule) *ruleState {
 }
 
 // Admit 实现 route.Admission（ENG-024）。
-func (g *Gate) Admit(ctx context.Context, rule *types.Rule, _ netip.AddrPort, kill func()) (pipe.Hook, func(), error) {
+func (g *Gate) Admit(ctx context.Context, rule *types.Rule, _ netip.AddrPort, kill func(reason error)) (pipe.Hook, func(), error) {
 	now := g.Now()
 	g.mu.Lock()
 	if g.runUntil[rule.RuleID] <= now {
@@ -365,6 +367,8 @@ func (s *session) Acquire(ctx context.Context, d types.Direction, want int) (int
 	blk := s.rs.account.ReserveOrWait(ctx, n, g.opt.GrantWait, s.t.id)
 	if blk == nil {
 		s.refund(n)
+		e := ErrQuota
+		s.endErr.CompareAndSwap(nil, &e)
 		return 0, nil // 额度耗尽：该方向停止，会话随之结束（ENG-028）
 	}
 	if blk.N < n {
@@ -372,6 +376,14 @@ func (s *session) Acquire(ctx context.Context, d types.Direction, want int) (int
 	}
 	s.blk[d] = blk
 	return blk.N, nil
+}
+
+// EndReason 实现 route.EndReasoner：会话因计费授权耗尽结束时返回 ErrQuota。
+func (s *session) EndReason() error {
+	if p := s.endErr.Load(); p != nil {
+		return *p
+	}
+	return nil
 }
 
 func (s *session) refund(n int) {
@@ -466,7 +478,7 @@ func (g *Gate) enforce(r *restriction, victims []*session) {
 	}
 	for _, s := range kill {
 		if s.killed.CompareAndSwap(false, true) {
-			s.kill()
+			s.kill(r.err)
 		}
 	}
 }
@@ -489,7 +501,7 @@ func (g *Gate) sweep() {
 				for s := range rs.sessions {
 					v = append(v, s)
 				}
-				jobs = append(jobs, job{&restriction{key: key, tenant: rs.rule.TenantID, rules: []types.UUID{id}, reason: "run_grant_expired"}, v})
+				jobs = append(jobs, job{&restriction{key: key, tenant: rs.rule.TenantID, rules: []types.UUID{id}, reason: "run_grant_expired", err: ErrRunGrant}, v})
 			}
 		} else {
 			delete(g.restricted, key)
@@ -500,7 +512,7 @@ func (g *Gate) sweep() {
 		if t.rateUntil <= now || t.connUntil <= now {
 			if !g.restricted[key] && len(t.sessions) > 0 {
 				g.restricted[key] = true
-				jobs = append(jobs, job{&restriction{key: key, tenant: id, reason: "share_expired"}, append([]*session(nil), t.sessions...)})
+				jobs = append(jobs, job{&restriction{key: key, tenant: id, reason: "share_expired", err: ErrShare}, append([]*session(nil), t.sessions...)})
 			}
 		} else {
 			delete(g.restricted, key)
@@ -539,7 +551,7 @@ func (g *Gate) drainExcess(t *tenantState) {
 	if n := uint64(len(t.sessions)); n > t.connLimit {
 		excess = append(excess, t.sessions[t.connLimit:]...)
 	}
-	r := &restriction{key: "conn:" + string(t.id[:]), tenant: t.id, reason: "conn_downsized"}
+	r := &restriction{key: "conn:" + string(t.id[:]), tenant: t.id, reason: "conn_downsized", err: ErrConnLimited}
 	for _, s := range excess {
 		if s.drainTm == nil {
 			s := s

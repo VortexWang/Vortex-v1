@@ -43,7 +43,7 @@ const maxDatagram = 65535
 
 // handleUDP 处理已通过开流检查与门控的 UDP 会话（中继或出口）。上行在链路读 goroutine 中直接转发，
 // 下行：出口由本 goroutine 读取目标（ENG-045：出口每 UDP 会话 1 个 goroutine），中继同样以回调转发。
-func (r *Router) handleUDP(ctx context.Context, sess *lifecycle.Scope, rule *types.Rule, s *vlink.Stream, hook pipe.Hook) {
+func (r *Router) handleUDP(ctx context.Context, sess *lifecycle.Scope, rule *types.Rule, s *vlink.Stream, hook pipe.Hook, downRef *atomic.Value) {
 	idle := rule.UDPIdle
 	if idle <= 0 {
 		idle = 60 * time.Second
@@ -71,6 +71,7 @@ func (r *Router) handleUDP(ctx context.Context, sess *lifecycle.Scope, rule *typ
 			return
 		}
 		dp := down.(udpPath)
+		downRef.Store(dp)
 		if sess.Own(dp) != nil {
 			return
 		}
@@ -86,9 +87,7 @@ func (r *Router) handleUDP(ctx context.Context, sess *lifecycle.Scope, rule *typ
 			}
 		})
 		waitIdle(ended, idle, idleFor)
-		if se := remoteError(dp); se != nil {
-			s.Reset(se.Code, se.Text)
-		}
+		propagate(s, dp, hook)
 		return
 	}
 

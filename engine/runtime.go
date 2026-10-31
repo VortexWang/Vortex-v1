@@ -216,6 +216,10 @@ func (rt *Runtime) emit(ev types.Event) {
 	}
 }
 
+// AESHardware 报告本机是否具备 AES-GCM 硬件加速（ENG-044）。由 Agent 随节点信息上报；
+// 没有时隧道吞吐会明显下降。known 为 false 表示无法判断。
+func (rt *Runtime) AESHardware() (ok, known bool) { return vlink.AESHardware() }
+
 // NumPeerLinks 返回到对端节点的链路数（未启用隧道时为 0）。
 func (rt *Runtime) NumPeerLinks(id types.UUID) int {
 	if rt.peers == nil {
@@ -694,14 +698,14 @@ type admission struct {
 	drainAll bool
 }
 
-type admitted struct{ kill func() }
+type admitted struct{ kill func(error) }
 
 var (
 	errRevoked  = errors.New("no_route: rule snapshot revoked")
 	errDraining = errors.New("draining")
 )
 
-func (a *admission) Admit(ctx context.Context, rule *types.Rule, client netip.AddrPort, kill func()) (pipe.Hook, func(), error) {
+func (a *admission) Admit(ctx context.Context, rule *types.Rule, client netip.AddrPort, kill func(error)) (pipe.Hook, func(), error) {
 	a.mu.Lock()
 	if _, bad := a.revoked[rule]; bad {
 		a.mu.Unlock()
@@ -768,7 +772,7 @@ func (a *admission) countScope(ids []types.UUID) int {
 
 func (a *admission) killScope(ids []types.UUID) {
 	a.mu.Lock()
-	var kills []func()
+	var kills []func(error)
 	for r, m := range a.live {
 		if inScope(ids, r.RuleID) {
 			for s := range m {
@@ -778,7 +782,7 @@ func (a *admission) killScope(ids []types.UUID) {
 	}
 	a.mu.Unlock()
 	for _, k := range kills {
-		k()
+		k(route.ErrDrained)
 	}
 }
 
@@ -808,7 +812,7 @@ func (a *admission) revokeRules(ids map[types.UUID]bool, prev *route.Table) {
 			a.revoked[r] = now
 		}
 	}
-	var kills []func()
+	var kills []func(error)
 	for r, m := range a.live {
 		if ids[r.RuleID] {
 			a.revoked[r] = now
@@ -819,7 +823,7 @@ func (a *admission) revokeRules(ids map[types.UUID]bool, prev *route.Table) {
 	}
 	a.mu.Unlock()
 	for _, k := range kills {
-		k()
+		k(route.ErrRuleRevoked)
 	}
 }
 

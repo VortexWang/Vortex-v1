@@ -113,42 +113,42 @@ func TestDeadlineFromFirstReceiptNotExtendedByResend(t *testing.T) {
 func TestAdmissionChecks(t *testing.T) {
 	g := New(Options{Margin: smallMargin, GrantWait: 50 * time.Millisecond})
 	ctx := context.Background()
-	if _, _, err := g.Admit(ctx, epRule(), noAddr, func() {}); !errors.Is(err, ErrRunGrant) {
+	if _, _, err := g.Admit(ctx, epRule(), noAddr, func(error) {}); !errors.Is(err, ErrRunGrant) {
 		t.Fatalf("no run grant: %v", err)
 	}
 	// 只有运行授权：非执行点可准入，执行点因缺份额被拒
 	g.UpdateGrants(&types.GrantSet{Run: []types.RunGrant{{Meta: meta(1, time.Hour), RuleIDs: []types.UUID{ruleEP, ruleMid}}}})
 	mid := &types.Rule{RuleID: ruleMid, TenantID: tenantA, Role: types.RoleRelay}
-	if _, rel, err := g.Admit(ctx, mid, noAddr, func() {}); err != nil {
+	if _, rel, err := g.Admit(ctx, mid, noAddr, func(error) {}); err != nil {
 		t.Fatalf("non enforcement point: %v", err)
 	} else {
 		rel()
 	}
-	if _, _, err := g.Admit(ctx, epRule(), noAddr, func() {}); !errors.Is(err, ErrShare) {
+	if _, _, err := g.Admit(ctx, epRule(), noAddr, func(error) {}); !errors.Is(err, ErrShare) {
 		t.Fatalf("missing share: %v", err)
 	}
 	// 有份额无计费授权：等待 GrantWait 后拒绝
 	g.UpdateGrants(fullSet(time.Hour, 1e9, 2, 0))
 	start := time.Now()
-	if _, _, err := g.Admit(ctx, epRule(), noAddr, func() {}); !errors.Is(err, ErrQuota) || time.Since(start) < 45*time.Millisecond {
+	if _, _, err := g.Admit(ctx, epRule(), noAddr, func(error) {}); !errors.Is(err, ErrQuota) || time.Since(start) < 45*time.Millisecond {
 		t.Fatalf("no billing grant: %v after %v", err, time.Since(start))
 	}
 	// 计费授权在等待期间到达：准入成功
 	go func() { time.Sleep(20 * time.Millisecond); g.UpdateGrants(fullSet(time.Hour, 1e9, 2, 1<<20)) }()
-	_, r1, err := g.Admit(ctx, epRule(), noAddr, func() {})
+	_, r1, err := g.Admit(ctx, epRule(), noAddr, func(error) {})
 	if err != nil {
 		t.Fatalf("grant arrived during wait: %v", err)
 	}
-	_, r2, err := g.Admit(ctx, epRule(), noAddr, func() {})
+	_, r2, err := g.Admit(ctx, epRule(), noAddr, func(error) {})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := g.Admit(ctx, epRule(), noAddr, func() {}); !errors.Is(err, ErrConnLimited) {
+	if _, _, err := g.Admit(ctx, epRule(), noAddr, func(error) {}); !errors.Is(err, ErrConnLimited) {
 		t.Fatalf("third session with conn share 2: %v", err)
 	}
 	r1()
 	r1() // release 幂等
-	if _, r3, err := g.Admit(ctx, epRule(), noAddr, func() {}); err != nil {
+	if _, r3, err := g.Admit(ctx, epRule(), noAddr, func(error) {}); err != nil {
 		t.Fatalf("after release: %v", err)
 	} else {
 		r3()
@@ -159,7 +159,7 @@ func TestAdmissionChecks(t *testing.T) {
 func TestHookMeteringRefundAndBlockGrowth(t *testing.T) {
 	g := New(Options{Margin: smallMargin})
 	g.UpdateGrants(fullSet(time.Hour, 1e12, 10, 10<<20))
-	h, rel, err := g.Admit(context.Background(), epRule(), noAddr, func() {})
+	h, rel, err := g.Admit(context.Background(), epRule(), noAddr, func(error) {})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +212,7 @@ func TestRunGrantExpiryKillsSessionsWithEvents(t *testing.T) {
 	var rels []func()
 	for i := 0; i < 3; i++ {
 		killed.Add(1)
-		_, rel, err := g.Admit(context.Background(), epRule(), noAddr, killed.Done)
+		_, rel, err := g.Admit(context.Background(), epRule(), noAddr, func(error) { killed.Done() })
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -234,7 +234,7 @@ func TestRunGrantExpiryKillsSessionsWithEvents(t *testing.T) {
 	if ev.count(types.EventRestrictionCompleted) != 1 {
 		t.Fatal("completed event after last session released")
 	}
-	if _, _, err := g.Admit(context.Background(), epRule(), noAddr, func() {}); !errors.Is(err, ErrRunGrant) {
+	if _, _, err := g.Admit(context.Background(), epRule(), noAddr, func(error) {}); !errors.Is(err, ErrRunGrant) {
 		t.Fatalf("new sessions must be rejected after expiry: %v", err)
 	}
 }
@@ -246,7 +246,7 @@ func TestConnDownsizeDrainsNewestAfterWindow(t *testing.T) {
 	var mu sync.Mutex
 	for i := 0; i < 5; i++ {
 		i := i
-		if _, _, err := g.Admit(context.Background(), epRule(), noAddr, func() { mu.Lock(); killed[i] = true; mu.Unlock() }); err != nil {
+		if _, _, err := g.Admit(context.Background(), epRule(), noAddr, func(error) { mu.Lock(); killed[i] = true; mu.Unlock() }); err != nil {
 			t.Fatal(err)
 		}
 		time.Sleep(2 * time.Millisecond) // 区分建立顺序
@@ -254,7 +254,7 @@ func TestConnDownsizeDrainsNewestAfterWindow(t *testing.T) {
 	down := fullSet(time.Hour, 1e9, 3, 1<<20)
 	down.Shares[1].Meta.GrantID = types.UUID{33} // 新的连接份额租约：3
 	g.UpdateGrants(down)
-	if _, _, err := g.Admit(context.Background(), epRule(), noAddr, func() {}); !errors.Is(err, ErrConnLimited) {
+	if _, _, err := g.Admit(context.Background(), epRule(), noAddr, func(error) {}); !errors.Is(err, ErrConnLimited) {
 		t.Fatalf("over-limit new session must be rejected immediately: %v", err)
 	}
 	time.Sleep(50 * time.Millisecond)
@@ -275,7 +275,7 @@ func TestConnDownsizeDrainsNewestAfterWindow(t *testing.T) {
 func TestStarvationSignalInDemand(t *testing.T) {
 	g := New(Options{Margin: smallMargin})
 	g.UpdateGrants(fullSet(time.Hour, 8_000_000, 10, 100<<20)) // 1 MB/s
-	h, rel, _ := g.Admit(context.Background(), epRule(), noAddr, func() {})
+	h, rel, _ := g.Admit(context.Background(), epRule(), noAddr, func(error) {})
 	defer rel()
 	_ = g.UsageSnapshot()
 	deadline := time.Now().Add(1500 * time.Millisecond)

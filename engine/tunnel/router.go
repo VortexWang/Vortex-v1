@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"vortex/engine/gate"
@@ -198,8 +199,29 @@ func gateCode(err error) vlink.ErrorCode {
 		return vlink.CodeRateLimited
 	case errors.Is(err, gate.ErrRunGrant):
 		return vlink.CodeNoRoute
+	case errors.Is(err, route.ErrRuleRevoked):
+		return vlink.CodeUnauthorized
 	}
 	return vlink.CodeNoRoute
+}
+
+// ResetWith 实现 route.Resetter：以原因码终止出站流（ENG-028：向路径上其他节点发送 RST）。
+func (c *pathConn) ResetWith(reason error) { c.Stream.Reset(gateCode(reason), reasonText(reason)) }
+
+func reasonText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+// remoteReason 返回流被对端以 RST 终止的原因码（不是对端发出的返回 nil）。
+func remoteReason(s *vlink.Stream) *vlink.StreamError {
+	var se *vlink.StreamError
+	if errors.As(s.Err(), &se) && se.Remote {
+		return se
+	}
+	return nil
 }
 
 // check 执行 ENG-020 ①～④；返回 0 表示通过。
@@ -241,7 +263,17 @@ func (r *Router) HandleInbound(ctx context.Context, sess *lifecycle.Scope, l *vl
 		reject(code, reason)
 		return
 	}
-	hook, release, err := r.Admission.Admit(ctx, rule, o.Client, sess.Shutdown)
+	var downRef atomic.Value     // 下游建立后才有
+	kill := func(reason error) { // 限制生效：两个方向都发送带原因码的 RST，再关闭会话（ENG-028）
+		s.Reset(gateCode(reason), reasonText(reason))
+		if v := downRef.Load(); v != nil {
+			if rs, ok := v.(route.Resetter); ok {
+				rs.ResetWith(reason)
+			}
+		}
+		sess.Shutdown()
+	}
+	hook, release, err := r.Admission.Admit(ctx, rule, o.Client, kill)
 	if err != nil {
 		reject(gateCode(err), err.Error())
 		return
@@ -249,7 +281,7 @@ func (r *Router) HandleInbound(ctx context.Context, sess *lifecycle.Scope, l *vl
 	defer release()
 	s.Accept()
 	if o.Network == types.NetworkUDP {
-		r.handleUDP(ctx, sess, rule, s, hook)
+		r.handleUDP(ctx, sess, rule, s, hook, &downRef)
 		return
 	}
 
@@ -281,6 +313,7 @@ func (r *Router) HandleInbound(ctx context.Context, sess *lifecycle.Scope, l *vl
 			}
 		}
 	}
+	downRef.Store(down)
 	if sess.Own(down) != nil {
 		return
 	}
@@ -293,7 +326,37 @@ func (r *Router) HandleInbound(ctx context.Context, sess *lifecycle.Scope, l *vl
 			}
 		},
 	})
-	if se := remoteError(down); se != nil { // 下游的原因码逐段回传（ENG-015）
+	propagate(s, down, hook)
+}
+
+// propagate 在会话结束后把原因沿路径传递：下游的原因码逐段回传到入口（ENG-015），上游发来的 RST
+// 转发给下游（ENG-028），本节点额度耗尽时两个方向都带上原因。
+func propagate(s *vlink.Stream, down any, hook any) {
+	if er, ok := hook.(route.EndReasoner); ok {
+		if reason := er.EndReason(); reason != nil {
+			s.Reset(gateCode(reason), reasonText(reason))
+			if rs, ok := down.(route.Resetter); ok {
+				rs.ResetWith(reason)
+			}
+			return
+		}
+	}
+	if se := remoteError(down); se != nil {
 		s.Reset(se.Code, se.Text)
 	}
+	if se := remoteReason(s); se != nil {
+		if pc, ok := asPath(down); ok {
+			pc.Stream.Reset(se.Code, se.Text)
+		}
+	}
+}
+
+func asPath(c any) (*pathConn, bool) {
+	switch x := c.(type) {
+	case *pathConn:
+		return x, true
+	case udpPath:
+		return x.pathConn, true
+	}
+	return nil, false
 }

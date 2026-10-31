@@ -11,8 +11,11 @@ import (
 )
 
 const (
-	HeaderLen       = 8
-	MaxPayload      = 16384 // ENG-012
+	HeaderLen  = 8
+	MaxPayload = 16384 // ENG-012
+	// MaxDataPayload：发送 DATA 时每帧的载荷上限。帧头 8 字节 + 16,376 = 16,384，恰好等于一条 TLS 记录的
+	// 最大明文长度，连续写出的 DATA 帧与 TLS 记录一一对齐（ENG-044）。接收方仍接受 MaxPayload。
+	MaxDataPayload  = MaxPayload - HeaderLen
 	ProtocolVersion = 1
 	MinVersion      = 1 // 本实现支持的最低版本
 	ALPN            = "vortex-vlink/1"
