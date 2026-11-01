@@ -1,6 +1,7 @@
 package issuer
 
 import (
+	"encoding/json"
 	"sort"
 	"time"
 
@@ -179,4 +180,17 @@ func (is *Issuer) Held() []HeldGrant {
 		return string(out[i].ID[:]) < string(out[j].ID[:])
 	})
 	return out
+}
+
+// TransferRecord 是 grant.transfer 条目的内容（上报后端的 GrantTransferred）。
+type TransferRecord struct {
+	Node, OldBoot, NewBoot model.UUID
+	Revoked, Settling      []model.UUID
+}
+
+// DecodeTransfer 解析 grant.transfer 条目。
+func DecodeTransfer(data []byte) (TransferRecord, error) {
+	var d transferData
+	err := json.Unmarshal(data, &d)
+	return TransferRecord{d.Node, d.OldBoot, d.NewBoot, d.Revoked, d.Settle}, err
 }

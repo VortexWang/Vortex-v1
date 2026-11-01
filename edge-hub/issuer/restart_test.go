@@ -144,3 +144,27 @@ func TestHeldGrantsReport(t *testing.T) {
 		t.Fatalf("expired held grants still reported %+v", hs)
 	}
 }
+
+// HUB-017：额度已被回收的租户在对账完成前不签发计费授权（运行授权不受影响）；重启后保持。
+func TestBudgetRevoked(t *testing.T) {
+	h := newHub(t)
+	_, _ = h.q.ApplyBudget(tenantA, 1, 64<<20, 0)
+	ep := RuleState{RuleID: ruleX, TenantID: tenantA, EnforcementPoint: true, PathCoefMilli: 1000}
+	if err := h.is.SetBudgetRevoked([]model.UUID{tenantA}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.is.IssueBilling(BillingRequest{Node: node, Boot: boot, Rule: ep}); !errors.Is(err, ErrBudgetRevoked) {
+		t.Fatalf("billing for a revoked tenant: %v", err)
+	}
+	if g, _, _ := h.is.IssueRun(node, boot, []RuleState{ep}); g == nil {
+		t.Fatal("run grant must not be affected")
+	}
+	h2 := open(t, h.clk, h.st)
+	if _, err := h2.is.IssueBilling(BillingRequest{Node: node, Boot: boot, Rule: ep}); !errors.Is(err, ErrBudgetRevoked) {
+		t.Fatal("revocation lost on restart")
+	}
+	_ = h2.is.SetBudgetRevoked(nil)
+	if _, err := h2.is.IssueBilling(BillingRequest{Node: node, Boot: boot, Rule: ep}); err != nil {
+		t.Fatalf("after reconciliation: %v", err)
+	}
+}

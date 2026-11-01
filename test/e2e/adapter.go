@@ -1,6 +1,6 @@
 // Package e2e 是 Agent 与 Edge Hub 的端到端测试（M3）：真实 Engine + Agent + Controller，经内存控制流连接
 // 真实的 Edge Hub 会话处理。消息在两侧 Go 类型之间转换，位置与 gRPC 接入后的适配层相同。
-// 配置分发（HUB-T04）尚未实现，由本包的 distributor 代为下发期望配置并自动 Commit。
+// 后端由本包的 Backend 模拟：经真实的 upstream.Link 下发期望配置、Commit、份额与额度，确认账本，驱动对账。
 package e2e
 
 import (
@@ -11,9 +11,9 @@ import (
 	"time"
 
 	"vortex/edgehub/issuer"
-	"vortex/edgehub/leases"
 	"vortex/edgehub/model"
 	"vortex/edgehub/session"
+	"vortex/edgehub/upstream"
 	"vortex/engine/types"
 	"vortex/node/agent"
 	"vortex/node/agent/control"
@@ -43,6 +43,22 @@ func toHub(m agent.Out) session.AgentMsg {
 		}
 		b.Snapshot, _ = json.Marshal(m.Snapshot)
 		return b
+	case agent.PrepareReport:
+		payload, _ := json.Marshal(m)
+		ok := m.Err == "" && m.Result != nil && len(m.Result.Errors) == 0
+		return session.PrepareReport{Version: m.Version, OK: ok, Payload: payload}
+	case agent.ApplyReport:
+		payload, _ := json.Marshal(m)
+		return session.ApplyReport{Version: m.Version, Committed: m.Action == reconcile.ActionCommit && m.Err == "" && m.Result != nil, Payload: payload}
+	case agent.EngineEvent:
+		payload, _ := json.Marshal(m)
+		return session.Passthrough{Kind: "event", Payload: payload}
+	case agent.ProbeReport:
+		payload, _ := json.Marshal(m)
+		return session.Passthrough{Kind: "probes", Payload: payload}
+	case agent.StateReport:
+		payload, _ := json.Marshal(m)
+		return session.Passthrough{Kind: "state", Payload: payload}
 	case agent.HeldGrants:
 		var hs session.HeldGrants
 		for _, g := range m.Grants {
@@ -68,6 +84,20 @@ func toAgent(hub model.UUID, m session.HubMsg) agent.In {
 		return agent.ModeChange{Mode: agent.Mode(m.Mode)}
 	case session.UsageAck:
 		return agent.UsageAck{Boot: toTypes(m.Boot), Through: m.Through}
+	case session.DesiredConfig:
+		var cfg types.RuntimeConfig
+		if err := json.Unmarshal(m.Payload, &cfg); err != nil {
+			return nil
+		}
+		return agent.DesiredConfig{Config: &cfg}
+	case session.ApplyCommand:
+		a := reconcile.ActionAbort
+		if m.Commit {
+			a = reconcile.ActionCommit
+		}
+		return agent.ApplyCommand{Version: m.Version, Action: a}
+	case session.DrainCommand:
+		return agent.DrainCommand{}
 	case session.GrantResponse:
 		r := grants.Response{RequestID: m.RequestID, Error: m.Error}
 		for _, g := range m.Run {
@@ -96,16 +126,14 @@ func toAgent(hub model.UUID, m session.HubMsg) agent.In {
 	return nil
 }
 
-// Hub 是测试中的一个 Edge Hub 实例，外加代为分发配置的 distributor。
+// Hub 是测试中的一个 Edge Hub 实例与其后端链路。
 type Hub struct {
 	*session.Hub
-	Cfg    *types.RuntimeConfig
-	Shares []leases.Lease // 后端为节点生成的初始份额（在线时）
+	Link *upstream.Link
+	B    *Backend
 
-	mu       sync.Mutex
-	Prepares []agent.PrepareReport
-	Applies  []agent.ApplyReport
-	Down     bool
+	mu   sync.Mutex
+	Down bool
 }
 
 // Dialer 按 Endpoint.ID 找到 Hub，建立内存流。
@@ -156,22 +184,6 @@ func (c *conn) Send(m agent.Out) error {
 	if closed {
 		return errors.New("closed")
 	}
-	h := c.hub
-	switch m := m.(type) {
-	case agent.PrepareReport: // distributor：没有资源错误就 Commit
-		h.mu.Lock()
-		h.Prepares = append(h.Prepares, m)
-		h.mu.Unlock()
-		if m.Err == "" && m.Result != nil && len(m.Result.Errors) == 0 {
-			c.push(agent.ApplyCommand{Version: m.Version, Action: reconcile.ActionCommit})
-		}
-		return nil
-	case agent.ApplyReport:
-		h.mu.Lock()
-		h.Applies = append(h.Applies, m)
-		h.mu.Unlock()
-		return nil
-	}
 	am := toHub(m)
 	if am == nil {
 		return nil
@@ -179,16 +191,6 @@ func (c *conn) Send(m agent.Out) error {
 	if err := c.s.Handle(am); err != nil {
 		c.Close()
 		return err
-	}
-	if hello, ok := m.(agent.Hello); ok {
-		// 后端在节点接入后为其生成份额（在线时）；distributor 下发期望配置（尚未生效时）
-		if len(h.Leases.Current(toModel(hello.Node))) == 0 && len(h.Shares) > 0 && h.Mode.AcceptsConfigChanges() {
-			fresh, _ := h.Leases.ApplyUpdate(toModel(hello.Node), toModel(hello.Boot), h.Shares)
-			_ = fresh
-		}
-		if h.Cfg != nil && hello.AppliedConfigVersion < h.Cfg.Version {
-			c.push(agent.DesiredConfig{Config: h.Cfg})
-		}
 	}
 	return nil
 }

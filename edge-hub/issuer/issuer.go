@@ -41,7 +41,8 @@ var (
 	ErrNotEnforcement   = errors.New("NOT_ENFORCEMENT_POINT")
 	ErrNoBillingVersion = errors.New("NO_BILLING_VERSION")
 	ErrUnknownGrant     = errors.New("UNKNOWN_GRANT")
-	ErrStaleBoot        = errors.New("STALE_BOOT") // 该启动已被同一节点的新启动取代（LIM-010）
+	ErrStaleBoot        = errors.New("STALE_BOOT")     // 该启动已被同一节点的新启动取代（LIM-010）
+	ErrBudgetRevoked    = errors.New("BUDGET_REVOKED") // 后端已按 HUB-015 回收该租户在本实例的额度，对账完成前不签发（HUB-017）
 )
 
 type AccountStatus uint8
@@ -117,12 +118,13 @@ type Issuer struct {
 	boots    map[model.UUID]model.UUID          // 节点当前的启动
 	dead     map[model.UUID]map[model.UUID]bool // 节点已被取代的启动
 	held     map[model.UUID]HeldGrant           // 节点报告持有的、其他实例签发的授权（HUB-014）
+	revoked  map[model.UUID]bool                // HUB-017：额度已被回收的租户
 }
 
 // New 创建签发器；canRenewRun 通常为 mode.Machine.CanRenewRun。
 func New(clk clock.Clock, q *quota.Accounts, canRenewRun func() bool) *Issuer {
 	return &Issuer{clk: clk, q: q, canRun: canRenewRun, restrict: map[model.UUID]TenantRestriction{}, grants: map[model.UUID]*Grant{},
-		boots: map[model.UUID]model.UUID{}, dead: map[model.UUID]map[model.UUID]bool{}, held: map[model.UUID]HeldGrant{}}
+		boots: map[model.UUID]model.UUID{}, dead: map[model.UUID]map[model.UUID]bool{}, held: map[model.UUID]HeldGrant{}, revoked: map[model.UUID]bool{}}
 }
 
 // Bind 在账本重放完成后绑定账本。
@@ -146,6 +148,12 @@ func (is *Issuer) Replay(e ledger.Entry) (bool, error) {
 			return true, err
 		}
 		is.applyTransferLocked(d)
+	case KindRevokedBudget:
+		var ids []model.UUID
+		if err := json.Unmarshal(e.Data, &ids); err != nil {
+			return true, err
+		}
+		is.applyRevokedLocked(ids)
 	case KindHeld:
 		var d heldData
 		if err := json.Unmarshal(e.Data, &d); err != nil {
@@ -337,6 +345,9 @@ func (is *Issuer) IssueBilling(req BillingRequest) (*Grant, error) {
 	if err := is.checkLocked(r.TenantID, r.RuleID, now); err != nil {
 		return nil, err
 	}
+	if is.revoked[r.TenantID] {
+		return nil, ErrBudgetRevoked
+	}
 	ver, next, ok := is.activeVersionLocked(now)
 	if !ok {
 		return nil, ErrNoBillingVersion
@@ -413,4 +424,29 @@ func (is *Issuer) Outstanding(node, boot model.UUID) []Grant {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].IssuedAt.Before(out[j].IssuedAt) })
 	return out
+}
+
+// KindRevokedBudget 记录 HUB-017 停签的租户集合（整体替换）。
+const KindRevokedBudget = "issuer.budget_revoked"
+
+func (is *Issuer) applyRevokedLocked(ids []model.UUID) {
+	is.revoked = map[model.UUID]bool{}
+	for _, id := range ids {
+		is.revoked[id] = true
+	}
+}
+
+// SetBudgetRevoked 设置额度已被后端回收的租户（ReconcileDirective.budget_revoked_tenant_ids）：对账完成前
+// 不为它们签发计费授权（HUB-017）。对账完成时以空集合调用。写账本，重启后保持。
+func (is *Issuer) SetBudgetRevoked(ids []model.UUID) error {
+	is.mu.Lock()
+	defer is.mu.Unlock()
+	if ids == nil {
+		ids = []model.UUID{}
+	}
+	if _, err := is.l.Append(KindRevokedBudget, ids); err != nil {
+		return err
+	}
+	is.applyRevokedLocked(ids)
+	return nil
 }

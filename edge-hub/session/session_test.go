@@ -45,15 +45,22 @@ type fixture struct {
 }
 
 type upstream struct {
-	mu   sync.Mutex
-	acks []func()
-	got  []uint64
+	mu       sync.Mutex
+	acks     []func()
+	got      []uint64
+	nodeMsgs []AgentMsg
 }
 
-func (u *upstream) Forward(_ model.UUID, b UsageBatch, ack func()) {
+func (u *upstream) Usage(seq uint64, ack func()) {
 	u.mu.Lock()
-	u.got = append(u.got, b.Seq)
+	u.got = append(u.got, seq)
 	u.acks = append(u.acks, ack)
+	u.mu.Unlock()
+}
+
+func (u *upstream) Node(_ model.UUID, m AgentMsg) {
+	u.mu.Lock()
+	u.nodeMsgs = append(u.nodeMsgs, m)
 	u.mu.Unlock()
 }
 
@@ -255,9 +262,9 @@ func TestUsageAckFollowsUpstreamWhenOnline(t *testing.T) {
 	if ms := in.take(); len(ms) != 1 || ms[0] != (UsageAck{boot1, 1}) {
 		t.Fatalf("ack after upstream %+v", ms)
 	}
-	_ = s.Handle(UsageBatch{Boot: boot1, Seq: 1}) // 重发：再次转发（上游幂等），等上游确认
-	if len(f.up.got) != 2 || len(in.take()) != 0 {
-		t.Fatal("resend must go upstream again")
+	_ = s.Handle(UsageBatch{Boot: boot1, Seq: 1}) // 重发：不重复写账本，按原条目的确认情况确认
+	if len(f.up.got) != 2 || f.up.got[0] != f.up.got[1] {
+		t.Fatalf("resend must map to the same ledger entry: %v", f.up.got)
 	}
 	// 失联 30 秒进入自治：落盘即确认，并推送模式变化
 	f.clk.Advance(31 * time.Second)

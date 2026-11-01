@@ -79,10 +79,32 @@ type HeldGrant struct {
 
 type HeldGrants struct{ Grants []HeldGrant }
 
-func (Hello) agentMsg()        {}
-func (GrantRequest) agentMsg() {}
-func (UsageBatch) agentMsg()   {}
-func (HeldGrants) agentMsg()   {}
+// PrepareReport / ApplyReport 是配置两阶段的结果（RUL-010），原样转发给后端。
+type PrepareReport struct {
+	Version uint64
+	OK      bool // 没有资源错误与引擎错误
+	Payload json.RawMessage
+}
+
+type ApplyReport struct {
+	Version   uint64
+	Committed bool // Commit 成功
+	Payload   json.RawMessage
+}
+
+// Passthrough 是只需转发给后端的节点消息（引擎事件、探测结果、状态）。
+type Passthrough struct {
+	Kind    string // "event" / "probes" / "state"
+	Payload json.RawMessage
+}
+
+func (PrepareReport) agentMsg() {}
+func (ApplyReport) agentMsg()   {}
+func (Passthrough) agentMsg()   {}
+func (Hello) agentMsg()         {}
+func (GrantRequest) agentMsg()  {}
+func (UsageBatch) agentMsg()    {}
+func (HeldGrants) agentMsg()    {}
 
 type HubMsg interface{ hubMsg() }
 
@@ -108,6 +130,22 @@ type UsageAck struct {
 	Through uint64
 }
 
+// DesiredConfig / ApplyCommand / DrainCommand 是转发给节点的后端指令（载荷不解析）。
+type DesiredConfig struct {
+	Version uint64
+	Payload json.RawMessage
+}
+
+type ApplyCommand struct {
+	Version uint64
+	Commit  bool // false = Abort
+}
+
+type DrainCommand struct{ Payload json.RawMessage }
+
+func (DesiredConfig) hubMsg() {}
+func (ApplyCommand) hubMsg()  {}
+func (DrainCommand) hubMsg()  {}
 func (HubHello) hubMsg()      {}
 func (ModeChange) hubMsg()    {}
 func (GrantResponse) hubMsg() {}
@@ -125,9 +163,12 @@ type RulesFunc func(node model.UUID) []issuer.RuleState
 
 func (f RulesFunc) Rules(node model.UUID) []issuer.RuleState { return f(node) }
 
-// Upstream 把计量批次转发给后端；ack 在后端确认后调用（可异步）。
+// Upstream 是到后端的链路（upstream.Link 实现）。
 type Upstream interface {
-	Forward(node model.UUID, b UsageBatch, ack func())
+	// Usage：计量批次已写入账本第 seq 条；后端确认该条目后调用 ack（可异步、可立即）。
+	Usage(seq uint64, ack func())
+	// Node 转发节点消息（Prepare / Apply 结果、引擎事件、探测、持有授权报告）。
+	Node(node model.UUID, m AgentMsg)
 }
 
 // ---------------------------------------------------------------- Hub
@@ -137,7 +178,7 @@ type Options struct {
 	Clock    clock.Clock
 	Store    ledger.Store
 	Rules    Rules
-	Upstream Upstream // nil：本地落盘即确认
+	Upstream Upstream // nil：本地落盘即确认；也可在 Open 之后用 SetUpstream 设置
 }
 
 // Hub 是一个 Edge Hub 实例。
@@ -150,10 +191,13 @@ type Hub struct {
 	Issuer *issuer.Issuer
 	Leases *leases.Manager
 
-	opt      Options
-	mu       sync.Mutex
-	sessions map[model.UUID]*Session // 按节点
-	usage    map[usageKey]bool       // 已收到的批次（幂等键）
+	opt          Options
+	mu           sync.Mutex
+	sessions     map[model.UUID]*Session // 按节点
+	usage        map[usageKey]uint64     // 已收到的批次（幂等键）→ 账本序号
+	up           Upstream
+	configs      map[model.UUID]*nodeConfig // 配置分发（HUB-T04）
+	lastDeclared model.Mode
 }
 
 type usageKey struct {
@@ -174,7 +218,7 @@ func Open(opt Options) (*Hub, error) {
 		opt.Clock = clock.System{}
 	}
 	h := &Hub{ID: opt.HubID, Clk: opt.Clock, opt: opt, sessions: map[model.UUID]*Session{},
-		usage: map[usageKey]bool{}}
+		usage: map[usageKey]uint64{}, up: opt.Upstream, configs: map[model.UUID]*nodeConfig{}}
 	h.Mode = mode.New(opt.Clock)
 	h.Quota = quota.New(nil)
 	h.Issuer = issuer.New(opt.Clock, h.Quota, h.Mode.CanRenewRun)
@@ -198,7 +242,7 @@ func Open(opt Options) (*Hub, error) {
 			if err := json.Unmarshal(e.Data, &r); err != nil {
 				return err
 			}
-			h.noteUsageLocked(r.Node, r.Boot, r.Seq)
+			h.usage[usageKey{r.Node, r.Boot, r.Seq}] = e.Seq
 		}
 		return nil
 	})
@@ -210,22 +254,28 @@ func Open(opt Options) (*Hub, error) {
 	h.Quota.SetLedger(l)
 	h.Issuer.Bind(l)
 	h.Leases.Bind(l)
+	h.lastDeclared = h.declared()
 	h.Mode.OnChange(h.broadcastMode)
 	return h, nil
 }
 
-// noteUsageLocked 记录收到的批次，返回是否为新批次。
+// 计量批次的幂等：
 //
 // 不要求序号连续：同一启动的批次可能分别由不同实例确认（切换实例前已被原实例确认的批次不会重发）。
 // Agent 在一条流上总是按序号递增发送全部未确认批次，所以确认某个序号即表示这条流上更早的未确认批次
 // 都已落盘，累计确认成立。
-func (h *Hub) noteUsageLocked(node, boot model.UUID, seq uint64) bool {
-	k := usageKey{node, boot, seq}
-	if h.usage[k] {
-		return false
-	}
-	h.usage[k] = true
-	return true
+
+// SetUpstream 设置到后端的链路。
+func (h *Hub) SetUpstream(u Upstream) {
+	h.mu.Lock()
+	h.up = u
+	h.mu.Unlock()
+}
+
+func (h *Hub) upstream() Upstream {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.up
 }
 
 func (h *Hub) declared() model.Mode {
@@ -239,6 +289,11 @@ func (h *Hub) declared() model.Mode {
 func (h *Hub) broadcastMode(model.Mode) {
 	d := h.declared()
 	h.mu.Lock()
+	if d == h.lastDeclared {
+		h.mu.Unlock()
+		return // 例如自治 → 对账：对 Agent 声明的模式不变
+	}
+	h.lastDeclared = d
 	ss := make([]*Session, 0, len(h.sessions))
 	for _, s := range h.sessions {
 		ss = append(ss, s)
@@ -349,8 +404,26 @@ func (s *Session) Handle(m AgentMsg) error {
 		for i, g := range m.Grants {
 			gs[i], rem[g.ID] = g.HeldGrant, g.Remaining
 		}
-		_, err := h.Issuer.RecordHeld(hello.Node, hello.Boot, gs, func(g issuer.HeldGrant) time.Duration { return rem[g.ID] })
-		return err
+		if _, err := h.Issuer.RecordHeld(hello.Node, hello.Boot, gs, func(g issuer.HeldGrant) time.Duration { return rem[g.ID] }); err != nil {
+			return err
+		}
+		if up := h.upstream(); up != nil {
+			up.Node(hello.Node, m) // HUB-015 回收判定
+		}
+	case PrepareReport:
+		h.onPrepared(hello.Node, m)
+		if up := h.upstream(); up != nil {
+			up.Node(hello.Node, m)
+		}
+	case ApplyReport:
+		h.onApplied(hello.Node, m)
+		if up := h.upstream(); up != nil {
+			up.Node(hello.Node, m)
+		}
+	case Passthrough:
+		if up := h.upstream(); up != nil {
+			up.Node(hello.Node, m)
+		}
 	}
 	return nil
 }
@@ -390,6 +463,10 @@ func (s *Session) onHello(m Hello) error {
 	s.send(HubHello{Hub: h.ID, Mode: h.declared()})
 	if push != nil {
 		s.send(*push)
+	}
+	h.deliverConfig(m.Node, m.AppliedConfigVersion)
+	if up := h.upstream(); up != nil {
+		up.Node(m.Node, m) // 节点接入（HUB-004 状态；后端据此为新启动生成份额）
 	}
 	return nil
 }
@@ -453,18 +530,20 @@ func (s *Session) onGrant(hello Hello, r GrantRequest) GrantResponse {
 
 func (s *Session) onUsage(hello Hello, b UsageBatch) error {
 	h := s.hub
+	k := usageKey{hello.Node, b.Boot, b.Seq}
 	h.mu.Lock()
-	seen := h.usage[usageKey{hello.Node, b.Boot, b.Seq}]
+	seq, seen := h.usage[k]
 	h.mu.Unlock()
 	if seen { // 重发：只需再确认
-		s.ackUsage(hello.Node, b)
+		s.ackUsage(seq, b)
 		return nil
 	}
-	if _, err := h.Ledger.Append(KindUsage, usageRecord{Node: hello.Node, Boot: b.Boot, Seq: b.Seq, Snap: b.Snapshot}); err != nil {
+	seq, err := h.Ledger.Append(KindUsage, usageRecord{Node: hello.Node, Boot: b.Boot, Seq: b.Seq, Snap: b.Snapshot})
+	if err != nil {
 		return err
 	}
 	h.mu.Lock()
-	h.noteUsageLocked(hello.Node, b.Boot, b.Seq)
+	h.usage[k] = seq
 	h.mu.Unlock()
 	for _, c := range b.Consumptions {
 		if _, err := h.Issuer.ReportConsumption(c.Grant, c.Used, c.Final); err != nil {
@@ -474,16 +553,17 @@ func (s *Session) onUsage(hello Hello, b UsageBatch) error {
 	for _, d := range b.Demands {
 		h.Leases.ReportDemand(hello.Node, d.Tenant, leases.Demand{Bytes60s: d.Bytes60s, StarvedPermille: d.StarvedPermille})
 	}
-	s.ackUsage(hello.Node, b)
+	s.ackUsage(seq, b)
 	return nil
 }
 
-// ackUsage：在线且有上游时转发（包括重发的批次，上游按幂等键去重），上游确认后再确认；否则落盘即确认。
-func (s *Session) ackUsage(node model.UUID, b UsageBatch) {
+// ackUsage：在线且有上游时，账本条目被后端确认后才确认（HUB-003）；否则落盘即确认。
+// 重发的批次不重复写账本，按原条目的确认情况确认。
+func (s *Session) ackUsage(ledgerSeq uint64, b UsageBatch) {
 	h := s.hub
 	ack := func() { s.send(UsageAck{Boot: b.Boot, Through: b.Seq}) }
-	if h.opt.Upstream != nil && h.declared() == model.ModeOnline {
-		h.opt.Upstream.Forward(node, b, ack)
+	if up := h.upstream(); up != nil && h.declared() == model.ModeOnline {
+		up.Usage(ledgerSeq, ack)
 		return
 	}
 	ack()
@@ -494,4 +574,18 @@ func (h *Hub) Sessions() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return len(h.sessions)
+}
+
+// UsageEntry 是 usage.batch 条目的内容（上报后端的 NodeUsage）。
+type UsageEntry struct {
+	Node, Boot model.UUID
+	Seq        uint64
+	Snapshot   json.RawMessage
+}
+
+// DecodeUsage 解析 usage.batch 条目。
+func DecodeUsage(data []byte) (UsageEntry, error) {
+	var r usageRecord
+	err := json.Unmarshal(data, &r)
+	return UsageEntry{r.Node, r.Boot, r.Seq, r.Snap}, err
 }

@@ -325,3 +325,17 @@ func (q *Accounts) Reserved(tenant, grant model.UUID) (raw, coef, reserved uint6
 	r, ok := q.acct(tenant).grants[grant]
 	return r.Raw, r.Coef, r.Reserved, ok
 }
+
+// Settlement 是 quota.settle 条目的内容（上报后端的 GrantSettled）。
+type Settlement struct {
+	Tenant, Grant model.UUID
+	UsedRaw       uint64
+	Settled       uint64 // 计费字节
+}
+
+// DecodeSettle 解析 quota.settle 条目。
+func DecodeSettle(e ledger.Entry) (Settlement, error) {
+	var d settleData
+	err := json.Unmarshal(e.Data, &d)
+	return Settlement{d.Tenant, d.Grant, d.UsedRaw, d.Settled}, err
+}

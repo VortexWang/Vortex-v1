@@ -14,6 +14,7 @@ import (
 	"vortex/edgehub/ledger"
 	"vortex/edgehub/model"
 	"vortex/edgehub/session"
+	"vortex/edgehub/upstream"
 	"vortex/engine"
 	"vortex/engine/types"
 	"vortex/node/agent"
@@ -72,11 +73,20 @@ func newHub(t *testing.T, id types.UUID, clk *clock.Fake, cfg *types.RuntimeConf
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = sh.Quota.ApplyBudget(toModel(tenant), 1, 1<<30, 0) // 委托 1 GiB 计费字节
-	_ = sh.Issuer.SetBillingVersions([]issuer.BillingVersion{{Version: 1, EffectiveAt: clk.Now().Add(-time.Hour)}})
-	return &Hub{Hub: sh, Cfg: cfg, Shares: []leases.Lease{
+	link := upstream.New(sh)
+	b := NewBackend(link, []leases.Lease{
 		{Tenant: toModel(tenant), Kind: model.GrantShareRate, Amount: 10_000_000_000},
-		{Tenant: toModel(tenant), Kind: model.GrantShareConn, Amount: 1000}}}
+		{Tenant: toModel(tenant), Kind: model.GrantShareConn, Amount: 1000}})
+	t.Cleanup(b.Close)
+	if err := b.Connect(); err != nil {
+		t.Fatal(err)
+	}
+	_ = link.Handle(upstream.Budget{Tenant: toModel(tenant), Version: 1, Delegated: 1 << 30}) // 委托 1 GiB 计费字节
+	_ = link.Handle(upstream.BillingVersions{Versions: []issuer.BillingVersion{{Version: 1, EffectiveAt: clk.Now().Add(-time.Hour)}}})
+	if err := b.SendDesired(nodeID, cfg); err != nil {
+		t.Fatal(err)
+	}
+	return &Hub{Hub: sh, Link: link, B: b}
 }
 
 type logs struct{ boot, usage, config *store.Mem }
@@ -155,18 +165,6 @@ func eventually(t *testing.T, what string, f func() bool) {
 	}
 }
 
-func usageRecords(h *Hub) int {
-	n := 0
-	_ = h.Ledger.Close // 账本条目通过 Unacked 读出（尚未对后端确认）
-	es, _ := h.Ledger.Unacked()
-	for _, e := range es {
-		if e.Kind == session.KindUsage {
-			n++
-		}
-	}
-	return n
-}
-
 // 端到端：接入在线实例 → 配置下发与应用 → 授权 → 转发与计量 → 实例进入自治，60 秒内（这里缩短为毫秒级探测）
 // 切换到在线实例并报告持有授权 → 节点重启：恢复配置、授权待确认、新实例按 LIM-010 转移、恢复转发；
 // 全程两个实例都不超发（NFR-016、NFR-017、NFR-018、HUB-014、LIM-010）。
@@ -193,20 +191,22 @@ func TestAgentEdgeHubEndToEnd(t *testing.T) {
 	n1.a.Tick(context.Background())
 	n1.a.SealTick()
 	eventually(t, "usage acked by A", func() bool { return n1.a.Status().PendingBatches == 0 })
-	if usageRecords(a) == 0 {
-		t.Fatal("A has no usage records")
-	}
 	issuedA := a.Quota.View(toModel(tenant))
 	if issuedA.Issued == 0 {
 		t.Fatal("A issued no billing grant")
 	}
 
 	// 2. A 与后端失联 30 秒 → 自治 → Agent 切换到在线的 B，报告持有的 A 授权；转发不中断
+	if bs := a.B.Batches(nodeID, n1.a.Status().Boot); bs == 0 {
+		t.Fatal("backend got no usage via A (online: ack only after the backend)")
+	}
+	a.Link.Disconnected()
 	clkA.Advance(31 * time.Second)
 	if err := a.Tick(); err != nil {
 		t.Fatal(err)
 	}
 	eventually(t, "switched to B", func() bool { cur, m := n1.c.Current(); return cur == hubB && m == agent.ModeOnline })
+	eventually(t, "backend got the foreign-grant report from B", func() bool { b.B.mu.Lock(); defer b.B.mu.Unlock(); return b.B.Foreign > 0 })
 	eventually(t, "B recorded A's grants", func() bool {
 		for _, g := range b.Issuer.Held() {
 			if g.IssuerHub == toModel(hubA) {
@@ -226,7 +226,9 @@ func TestAgentEdgeHubEndToEnd(t *testing.T) {
 	n1.stop()
 
 	// 3. 重启：恢复配置 → 授权待确认 → 连上（A 自治则切到 B）→ B 转移并签发 → 恢复转发
+	a.mu.Lock()
 	a.Down = true // A 不可达：直接连 B
+	a.mu.Unlock()
 	n2 := startNode(t, l, d, eps)
 	defer n2.stop()
 	eventually(t, "recovered", func() bool { return n2.a.Status().Phase == reconcile.PhaseApplied })
@@ -237,12 +239,24 @@ func TestAgentEdgeHubEndToEnd(t *testing.T) {
 		t.Fatalf("B's view of the node boot %v", bt)
 	}
 	eventually(t, "old boot batches reported", func() bool { return n2.a.Status().PendingBatches == 0 })
-	b.mu.Lock()
-	applies := append([]agent.ApplyReport(nil), b.Applies...)
-	b.mu.Unlock()
-	if len(applies) == 0 || applies[len(applies)-1].Err != "" {
-		t.Fatalf("recovery apply report %+v", applies)
+	if b.B.Batches(nodeID, oldBoot) == 0 {
+		t.Fatal("backend never got the previous boot's batches")
 	}
+	eventually(t, "recovery commit reported", func() bool {
+		b.B.mu.Lock()
+		defer b.B.mu.Unlock()
+		return len(b.B.Applied) > 0
+	})
+
+	// 4. A 恢复与后端的通信：对账（限制 → STARTED → 上报 → 确认 → COMPLETED）后回到在线，账本全部确认
+	a.mu.Lock()
+	a.Down = false
+	a.mu.Unlock()
+	if err := a.B.Connect(); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "A back online", func() bool { return a.Mode.Mode() == model.ModeOnline })
+	eventually(t, "A ledger acked", func() bool { es, _ := a.Ledger.Unacked(); return len(es) == 0 })
 
 	// 不超发：两个实例各自的 issued + 本地已结算 ≤ 委托额度
 	for _, h := range []*Hub{a, b} {
