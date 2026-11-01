@@ -204,7 +204,20 @@ func TestFullStack(t *testing.T) {
 		t.Fatalf("backend saw apply results %v", applied)
 	}
 	// 计量经 Edge Hub 到后端：节点每 10 秒封批，这里直接看 Edge Hub 账本上报的结果（等一次封批）
-	eventually(t, "usage reached the backend", func() bool { be.mu.Lock(); defer be.mu.Unlock(); return be.usage > 0 })
+	// 节点每 10 秒封批一次，再经 Edge Hub 落盘与上报：给 30 秒
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		be.mu.Lock()
+		n := be.usage
+		be.mu.Unlock()
+		if n > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timeout: usage reached the backend")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 	if _, err := os.Stat(filepath.Join(dir, "hub", "ledger.db")); err != nil {
 		t.Fatal("hub ledger is not SQLite")
 	}
