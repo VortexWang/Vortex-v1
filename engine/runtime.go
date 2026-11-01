@@ -54,13 +54,16 @@ type Options struct {
 
 // TunnelOptions 启用隧道转发（入口、中继、出口）。
 type TunnelOptions struct {
-	Identity     *vlink.Identity
-	Roots        *x509.CertPool // 平台 CA
-	BootID       types.UUID
-	LinkListener net.Listener // 接受入站链路；nil 表示本节点不接受（例如只做入口）
-	Link         vlink.LinkOptions
-	DialTimeout  time.Duration
-	PeerHealthy  func(types.UUID) bool // 下一组成员的探测结果（AGT-007）；nil 表示只按链路状态判断
+	Identity *vlink.Identity
+	// CurrentIdentity 若非 nil，每次建链时调用以取得当前身份（证书续签后新链路使用新证书，AGT-012）；
+	// 返回的 NodeID 必须与 Identity.NodeID 相同。
+	CurrentIdentity func() *vlink.Identity
+	Roots           *x509.CertPool // 平台 CA
+	BootID          types.UUID
+	LinkListener    net.Listener // 接受入站链路；nil 表示本节点不接受（例如只做入口）
+	Link            vlink.LinkOptions
+	DialTimeout     time.Duration
+	PeerHealthy     func(types.UUID) bool // 下一组成员的探测结果（AGT-007）；nil 表示只按链路状态判断
 }
 
 type listenerKey struct {
@@ -170,7 +173,13 @@ func New(opt Options) *Runtime {
 		rt.exits = &route.TargetDialer{Resolver: rt.resolver, Guard: rt.guard.Load, Healthy: opt.Healthy, Events: rt.emit, Timeout: opt.DialTimeout}
 		rt.peers = &tunnel.Peers{
 			Local: func() *vlink.Local {
-				return &vlink.Local{Identity: t.Identity, Trust: trust, BootID: t.BootID, Generation: rt.generation.Load(),
+				id := t.Identity
+				if t.CurrentIdentity != nil {
+					if cur := t.CurrentIdentity(); cur != nil && cur.NodeID == t.Identity.NodeID {
+						id = cur
+					}
+				}
+				return &vlink.Local{Identity: id, Trust: trust, BootID: t.BootID, Generation: rt.generation.Load(),
 					Capabilities: vlink.CapDgram, Mode: vlink.ModeMux}
 			},
 			Emit: rt.emit, LinkOptions: t.Link, DialTimeout: t.DialTimeout, Probe: t.PeerHealthy,

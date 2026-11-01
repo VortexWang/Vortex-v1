@@ -11,6 +11,7 @@ import (
 
 	"vortex/engine"
 	"vortex/engine/types"
+	"vortex/node/agent/boot"
 	"vortex/node/agent/grants"
 	"vortex/node/agent/probe"
 	"vortex/node/agent/reconcile"
@@ -479,5 +480,25 @@ func TestShutdownDrainsAfterClosingEngine(t *testing.T) {
 	p := a2.rep.Pending()
 	if len(p) != 1 || p[0].Boot != a.boot.Current || p[0].Snapshot.Deltas[0].RawBytes != 4096 {
 		t.Fatalf("usage of sessions ended by shutdown lost: %+v", p)
+	}
+}
+
+// 调用方先开始启动（Engine 的链路需要 boot_id）时，Agent 使用同一个 boot_id，且不再生成新的。
+func TestPreStartedBoot(t *testing.T) {
+	l := newLogs()
+	b, err := boot.Start(l.boot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := New(context.Background(), Options{Node: nodeID, Engine: &closingEngine{}, Boot: &b, BootLog: l.boot, UsageLog: l.usage, ConfigLog: l.config})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.boot.Current != b.Current || a.Hello().Boot != b.Current {
+		t.Fatal("agent did not use the pre-started boot")
+	}
+	next, _ := boot.Start(l.boot)
+	if next.Previous != b.Current {
+		t.Fatalf("an extra boot was recorded: previous %x, want %x", next.Previous, b.Current)
 	}
 }

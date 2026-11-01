@@ -959,3 +959,47 @@ func TestTargetResetIsNotAPathFailure(t *testing.T) {
 		t.Fatalf("normal session ends reported as path failures: %+v", evs)
 	}
 }
+
+// threeHopWithEntry 与 threeHop 相同，但入口 A 的引擎参数由 tun 给出（链路监听与 BootID 由此函数填写）。
+func threeHopWithEntry(t *testing.T, pki *enginetest.PKI, tun *engine.TunnelOptions) netip.AddrPort {
+	t.Helper()
+	tun.BootID, tun.DialTimeout = types.UUID{0xb0, nodeA[0]}, time.Second
+	rt := engine.New(engine.Options{Tunnel: tun})
+	a := &node{id: nodeA, rt: rt, ag: enginetest.Start(rt, 20*time.Millisecond)}
+	t.Cleanup(func() { a.ag.Stop(); _ = rt.Close() })
+	b, c := newNode(t, pki, nodeB), newNode(t, pki, nodeC)
+	target := tagServer(t, 'T')
+	ra := hop(types.RoleEntry, 0, true)
+	ra.NextHop = members(b)
+	rb := hop(types.RoleRelay, 1, false, a)
+	rb.NextHop = members(c)
+	rc := hop(types.RoleExit, 2, false, b)
+	rc.Targets = []types.Target{{Host: target.Addr().String(), Port: target.Port(), Weight: 1}}
+	l := tcpL(ruleT)
+	pol := types.TargetPolicy{SelfHostedNode: true}
+	c.apply(t, &types.RuntimeConfig{Version: 1, Generation: 1, Rules: []types.Rule{rc}, Peers: []types.Peer{b.peer(false)}, TargetPolicy: pol})
+	b.apply(t, &types.RuntimeConfig{Version: 1, Generation: 1, Rules: []types.Rule{rb}, Peers: []types.Peer{a.peer(false), c.peer(true)}, TargetPolicy: pol})
+	a.apply(t, &types.RuntimeConfig{Version: 1, Generation: 1, Listeners: []types.Listener{l}, Rules: []types.Rule{ra}, Peers: []types.Peer{b.peer(true)}, TargetPolicy: pol})
+	return a.rt.ListenerAddr(l)
+}
+
+// 证书续签（AGT-012）后新建的链路使用 CurrentIdentity 给出的证书。
+func TestCurrentIdentityUsedForNewLinks(t *testing.T) {
+	pki := enginetest.NewPKI()
+	stale := enginetest.NewPKI().Node(nodeA) // 其他 CA 签发：对端不信任
+	entry := threeHopWithEntry(t, pki, &engine.TunnelOptions{Identity: stale, Roots: pki.Roots,
+		CurrentIdentity: func() *vlink.Identity { return pki.Node(nodeA) }})
+	if _, tag := dial(t, entry); tag != 'T' {
+		t.Fatal("link with the current identity failed")
+	}
+}
+
+// CurrentIdentity 返回的身份若不是本节点，则不采用（仍用 Identity）。
+func TestCurrentIdentityForOtherNodeIgnored(t *testing.T) {
+	pki := enginetest.NewPKI()
+	entry := threeHopWithEntry(t, pki, &engine.TunnelOptions{Identity: pki.Node(nodeA), Roots: pki.Roots,
+		CurrentIdentity: func() *vlink.Identity { return pki.Node(nodeB) }})
+	if _, tag := dial(t, entry); tag != 'T' {
+		t.Fatal("identity for another node was used")
+	}
+}

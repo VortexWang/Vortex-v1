@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,7 +18,9 @@ import (
 
 	"vortex/engine"
 	"vortex/engine/types"
+	"vortex/engine/vlink"
 	"vortex/node/agent"
+	"vortex/node/agent/boot"
 	"vortex/node/agent/certs"
 	"vortex/node/agent/control"
 	"vortex/node/agent/grpcconn"
@@ -47,6 +50,9 @@ type Config struct {
 	CertFile string `json:"cert_file"`
 	KeyFile  string `json:"key_file"`
 	CAFile   string `json:"ca_file"`
+	// LinkListen 是节点间链路（VLink）的监听地址，例如 "0.0.0.0:7443"。为空时本节点不接受入站链路
+	// （仍可作为入口或反向建链方主动建链）；节点间链路需要节点证书（cert_file/key_file/ca_file）。
+	LinkListen string `json:"link_listen"`
 
 	renewEvery time.Duration // 证书检查周期（测试用；默认 1 小时）
 }
@@ -121,6 +127,36 @@ func Dialer(cfg *Config) (control.Dialer, error) {
 	return grpcconn.Dialer{Holder: certs.NewHolder(cert), Roots: roots}, nil
 }
 
+// tunnelOptions 由节点证书构造 Engine 的节点间链路参数（ENG-015 起；身份即注册得到的节点证书）。
+// 没有 gRPC 证书时返回 nil（只支持直接转发）。证书续签后新建的链路使用新证书。
+func tunnelOptions(cfg *Config, node, bootID types.UUID, dialer control.Dialer, prober *probe.Prober) (*engine.TunnelOptions, error) {
+	gd, ok := dialer.(grpcconn.Dialer)
+	if !ok || gd.Holder == nil {
+		if cfg.LinkListen != "" {
+			return nil, errors.New("link_listen requires a node certificate (cert_file/key_file/ca_file)")
+		}
+		return nil, nil
+	}
+	ident := func() *vlink.Identity { return &vlink.Identity{NodeID: node, Cert: gd.Holder.Get()} }
+	leaf, err := gd.Holder.Leaf()
+	if err != nil {
+		return nil, err
+	}
+	if id, err := vlink.NodeIDFromCert(leaf); err != nil || id != node {
+		return nil, fmt.Errorf("node certificate identity does not match node_id %s", cfg.NodeID)
+	}
+	t := &engine.TunnelOptions{Identity: ident(), CurrentIdentity: ident, Roots: gd.Roots, BootID: bootID,
+		PeerHealthy: prober.PeerHealthy}
+	if cfg.LinkListen != "" {
+		ln, err := net.Listen("tcp", cfg.LinkListen)
+		if err != nil {
+			return nil, fmt.Errorf("link_listen: %w", err)
+		}
+		t.LinkListener = ln
+	}
+	return t, nil
+}
+
 // Run 组装并运行节点，直至 ctx 结束。dialer 为 nil 时不建立控制连接。
 func Run(ctx context.Context, cfg *Config, dialer control.Dialer, log *slog.Logger) error {
 	node, err := ParseUUID(cfg.NodeID)
@@ -161,13 +197,26 @@ func Run(ctx context.Context, cfg *Config, dialer control.Dialer, log *slog.Logg
 		return err
 	}
 
+	b, err := boot.Start(bootLog)
+	if err != nil {
+		return err
+	}
 	prober := probe.New()
-	eng := engine.New(engine.Options{Healthy: prober.TargetHealthy})
+	tun, err := tunnelOptions(cfg, node, b.Current, dialer, prober)
+	if err != nil {
+		return err
+	}
+	if tun == nil {
+		log.Warn("no node certificate: tunnel (multi-hop) forwarding disabled, direct forwarding only")
+	} else if tun.LinkListener != nil {
+		log.Info("link listener", "addr", tun.LinkListener.Addr().String())
+	}
+	eng := engine.New(engine.Options{Healthy: prober.TargetHealthy, Tunnel: tun})
 	disk := &report.DiskGuard{Path: cfg.DataDir, Low: cfg.DiskLowBytes, High: cfg.DiskHighBytes,
 		OnLow: func(free uint64) { log.Warn("disk low: new sessions should stop (AGT-006)", "free", free) },
 		OnOK:  func(free uint64) { log.Info("disk recovered", "free", free) }}
 	a, err := agent.New(ctx, agent.Options{Node: node, AgentVersion: Version, Engine: eng,
-		BootLog: bootLog, UsageLog: usageLog, ConfigLog: configLog, Disk: disk,
+		BootLog: bootLog, Boot: &b, UsageLog: usageLog, ConfigLog: configLog, Disk: disk,
 		OnApplied: func(c *types.RuntimeConfig) { prober.SetSubjects(probe.Subjects(c)) }})
 	if err != nil {
 		eng.Close()

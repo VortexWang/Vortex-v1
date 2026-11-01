@@ -36,9 +36,11 @@ type Options struct {
 	Engine       engine.Engine
 	Clock        clock.Clock // nil = 系统时钟
 	BootLog      store.Log
-	UsageLog     store.Log
-	ConfigLog    store.Log
-	Disk         *report.DiskGuard // nil = 不检查
+	// Boot 若非 nil，是调用方已用 boot.Start 开始的本次启动（Engine 的节点间链路需要先知道 boot_id）；此时不读 BootLog。
+	Boot      *boot.Boot
+	UsageLog  store.Log
+	ConfigLog store.Log
+	Disk      *report.DiskGuard // nil = 不检查
 	// OnApplied 在配置生效（Commit 成功，含启动恢复）后调用，例如更新探测对象。在 Agent 的锁内调用，不得回调 Agent。
 	OnApplied func(*types.RuntimeConfig)
 	// RenewEvery 是运行授权与份额的续期周期；0 = 60 秒（测试用较短的值配合较短的授权有效期）。
@@ -67,9 +69,14 @@ func New(ctx context.Context, opt Options) (*Agent, error) {
 	if clk == nil {
 		clk = clock.System{}
 	}
-	b, err := boot.Start(opt.BootLog)
-	if err != nil {
-		return nil, err
+	var b boot.Boot
+	if opt.Boot != nil {
+		b = *opt.Boot
+	} else {
+		var err error
+		if b, err = boot.Start(opt.BootLog); err != nil {
+			return nil, err
+		}
 	}
 	rep, err := report.Open(clk, opt.UsageLog, b.Current)
 	if err != nil {

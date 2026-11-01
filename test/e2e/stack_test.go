@@ -35,7 +35,8 @@ import (
 // 节点接入后为其启动下发份额；Prepare 成功即 Commit；账本条目立即确认。
 type protoBackend struct {
 	backendv1.UnimplementedHubControlServer
-	cfg *types.RuntimeConfig
+	cfg  *types.RuntimeConfig
+	more []*types.RuntimeConfig // 其他节点的期望配置（按 NodeID 下发）
 
 	mu      sync.Mutex
 	usage   int
@@ -58,6 +59,10 @@ func (b *protoBackend) Connect(s grpc.BidiStreamingServer[backendv1.HubUpMessage
 				Versions: []*backendv1.BillingVersion{{Version: 1}}}}})
 			send(&backendv1.BackendMessage{Body: &backendv1.BackendMessage_Desired{Desired: &backendv1.NodeDesiredConfig{
 				NodeId: nodewire.UUID(nodeID), Config: nodewire.Config(b.cfg)}}})
+			for _, c := range b.more {
+				send(&backendv1.BackendMessage{Body: &backendv1.BackendMessage_Desired{Desired: &backendv1.NodeDesiredConfig{
+					NodeId: nodewire.UUID(c.NodeID), Config: nodewire.Config(c)}}})
+			}
 		case *backendv1.HubUpMessage_NodeStatus:
 			for _, n := range x.NodeStatus.Nodes {
 				key := string(n.GetBootId().GetValue())
