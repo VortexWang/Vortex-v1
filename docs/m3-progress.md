@@ -85,7 +85,9 @@ CI 首次运行发现一处计量丢失并已修正：进程退出时如果先�
 
 第十五批变异检查 26 项全部被发现，其中 4 项是补测试后被发现的（两种兼容检查的拒绝情形原先被另一项检查兜住、连接后重发升级进度、不可逆标记的转换）；另删去 1 处冗余检查（下载超限时写入本身已返回错误）。
 
-契约缺口（需要变更评审）：① HubControl 只有 `EnrollHub`，没有 Edge Hub 实例证书的续签 RPC；实例证书到期前只能重新引导。建议新增 `RenewHubCert(RenewHubCertRequest{csr_der}) returns (RenewHubCertResponse{certificate_chain_der})`，身份取自当前 mTLS 证书。 ② HubControl 的上行消息没有升级进度（`UpgradeStatus`）的对应字段，Edge Hub 收到后无法转给后端；目前后端只能从 `NodeStatus.agent_version` 与 boot_id 的变化判断升级结果，看不到“已回退”与失败原因。建议在 `HubUpMessage` 增加 `NodeUpgradeForward{node_id, vortex.edgehub.v1.UpgradeStatus status}`。
+契约缺口（需要变更评审）：① HubControl 只有 `EnrollHub`，没有 Edge Hub 实例证书的续签 RPC；实例证书到期前只能重新引导。建议新增 `RenewHubCert(RenewHubCertRequest{csr_der}) returns (RenewHubCertResponse{certificate_chain_der})`，身份取自当前 mTLS 证书。 ② 升级进度无法转给后端：已确认并按契约变更 CC-01 新增 `HubUpMessage.node_upgrade`，Edge Hub 原样转发，端到端测试中后端收到下载、排空、已切换、健康、已回退（含原因）与签名错误的失败。
+
+发布签名格式（契约补充 L7）已确认。剩余风险已确认：新程序在启动计数之前崩溃（仅 Go 运行时初始化阶段）时本机制无法回退，切换前已执行过新程序的 `version -json`；部署批次在 systemd 单元中加一道保护。
 
 ## 下一步
 

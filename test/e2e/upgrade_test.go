@@ -245,7 +245,9 @@ func TestUpgradeAndRollback(t *testing.T) {
 	// ③ 签名不是平台发布密钥：拒绝，程序不变、不重启
 	_, other, _ := ed25519.GenerateKey(rand.Reader)
 	be.push(command("2.0.0", v2, other))
-	long("bad signature reported", func() bool { return svc.upgradeLogged("2.0.0", upgrade.PhaseFailed) })
+	long("bad signature reported to the backend", func() bool {
+		return be.upgraded("2.0.0", edgehubv1.UpgradePhase_UPGRADE_PHASE_FAILED, "signature")
+	})
 	if b, _ := os.ReadFile(bin); !bytes.Equal(b, v1) || len(svc.exitCodes()) != 0 || !ok(addr) {
 		t.Fatal("unsigned upgrade changed the node")
 	}
@@ -253,7 +255,15 @@ func TestUpgradeAndRollback(t *testing.T) {
 	// ① 升级到 2.0.0
 	be.push(command("2.0.0", v2, priv))
 	long("2.0.0 online", func() bool { return onlineVersion(be) == "2.0.0" })
-	long("2.0.0 healthy", func() bool { return svc.upgradeLogged("2.0.0", upgrade.PhaseHealthy) })
+	long("2.0.0 healthy, reported to the backend", func() bool {
+		return svc.upgradeLogged("2.0.0", upgrade.PhaseHealthy) && be.upgraded("2.0.0", edgehubv1.UpgradePhase_UPGRADE_PHASE_HEALTHY, "")
+	})
+	for _, ph := range []edgehubv1.UpgradePhase{edgehubv1.UpgradePhase_UPGRADE_PHASE_DOWNLOADING, edgehubv1.UpgradePhase_UPGRADE_PHASE_DRAINING,
+		edgehubv1.UpgradePhase_UPGRADE_PHASE_SWITCHED} {
+		if !be.upgraded("2.0.0", ph, "") {
+			t.Fatalf("backend did not see phase %v", ph)
+		}
+	}
 	long("forwarding after upgrade", func() bool { return ok(addr) })
 	if b, _ := os.ReadFile(bin); !bytes.Equal(b, v2) {
 		t.Fatal("binary not replaced")
@@ -268,7 +278,7 @@ func TestUpgradeAndRollback(t *testing.T) {
 	// ② 升级到每次启动都崩溃的 3.0.0：回退到 2.0.0
 	be.push(command("3.0.0", v3, priv))
 	long("rolled back to 2.0.0", func() bool {
-		return svc.upgradeLogged("3.0.0", upgrade.PhaseRolledBack) && onlineVersion(be) == "2.0.0"
+		return be.upgraded("3.0.0", edgehubv1.UpgradePhase_UPGRADE_PHASE_ROLLED_BACK, "3 starts") && onlineVersion(be) == "2.0.0"
 	})
 	long("forwarding after rollback", func() bool { return ok(addr) })
 	if b, _ := os.ReadFile(bin); !bytes.Equal(b, v2) {

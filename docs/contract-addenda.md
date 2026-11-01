@@ -10,4 +10,12 @@
 | L4 | 2026-11-01 | C2 | 约定引擎错误的表示：`PrepareReport` / `ApplyReport` 没有错误字段，引擎拒绝配置或指令（配置无效、版本过旧、未决版本不符）时，Prepare 在 `PrepareResult.errors` 加一条对象为空、`code = ENGINE_ERROR`、`detail` 为错误文本的记录；Apply 在 `ApplyResult.objects` 加一条对象为空、`status = FAILED`、`error_code = "ENGINE_ERROR: <文本>"` 的记录 | M3 接入 gRPC 时发现：Agent 必须如实上报这类失败（RUL-010～013 的编排在后端），契约没有对应字段 | 不变（只约定已有字段的取值） |
 | L5 | 2026-11-01 | C2 | 约定 Edge Hub 证书身份：SAN URI `spiffe://vortex/hub/<hub_id>`（8-4-4-4-12 小写），与节点的 `spiffe://vortex/node/<node_id>`（C1 第 1 节）对应；Agent 按平台 CA 校验链并要求 URI 与实例列表中的 `hub_id` 一致，不做主机名校验。后端证书 SAN URI 为 `spiffe://vortex/backend`，Edge Hub 同样按平台 CA 校验并要求该 URI。Edge Hub 证书同时是 Agent 的服务端证书与后端的客户端证书，扩展用途须同时含 serverAuth 与 clientAuth | 契约规定组件间双向证书认证（SEC-001），但只定义了节点身份的格式 | 不变 |
 | L6 | 2026-11-01 | C2 | 约定 Edge Hub 墙钟的传递：`NodeControl.Connect` 的 gRPC 响应头（metadata）`vortex-hub-time-unix-nano`，值为 Edge Hub 墙钟的 Unix 纳秒（十进制），在任何 HubMessage 之前发出。Agent 以“流建立 → 收到响应头”的往返中点估计偏差、往返的一半为不确定度，扣除不确定度后仍超过 5 秒即告警（AGT-005：只告警，授权按相对时长计算，不受影响）。缺少该头时不比对 | AGT-005 要求检测本地与 Edge Hub 的时钟偏差，但 C2 的消息里没有 Edge Hub 时间字段 | protobuf 消息不变；新增的是传输层 metadata，旧版本任一端忽略它即可互通。**这是新增约定而非澄清，请在下次契约评审时确认**；若评审要求改为消息字段，可在 `HubHello` 增加 `google.protobuf.Timestamp hub_time`（新编号，向后兼容） |
-| L7 | 2026-11-01 | C2 | 约定 `UpgradeCommand.signature`（“平台发布签名”）的格式：Ed25519，签名内容为 `"vortex-node-release-v1" 0x00 version 0x00 sha256(32 字节) irreversible(1 字节，0/1)`；不可逆标记是发布的属性，一并签名，控制通道无法改动。公钥随安装包分发（节点配置 `release_key_file`，PEM `PUBLIC KEY`）。兼容矩阵由新程序自己给出：`vortex-node version -json` 输出 `{version, store_schema, store_schema_min, store_schema_max}`，旧版本在校验签名与摘要后执行它读取 | 契约只有 `signature` 字段，没有规定算法与签名内容；“升级包携带兼容矩阵”没有规定载体 | 不变（约定已有字段的取值；兼容矩阵在程序内，不经线上） |
+| L7 | 2026-11-01 | C2 | 约定 `UpgradeCommand.signature`（“平台发布签名”）的格式：Ed25519，签名内容为 `"vortex-node-release-v1" 0x00 version 0x00 sha256(32 字节) irreversible(1 字节，0/1)`；不可逆标记是发布的属性，一并签名，控制通道无法改动。公钥随安装包分发（节点配置 `release_key_file`，PEM `PUBLIC KEY`）。兼容矩阵由新程序自己给出：`vortex-node version -json` 输出 `{version, store_schema, store_schema_min, store_schema_max}`，旧版本在校验签名与摘要后执行它读取 | 契约只有 `signature` 字段，没有规定算法与签名内容；“升级包携带兼容矩阵”没有规定载体 | 不变（约定已有字段的取值；兼容矩阵在程序内，不经线上）。2026-11-01 已确认 |
+
+## 契约变更
+
+改变线上格式的修改（只允许向后兼容的新增），须经确认后实施，并通过 `buf breaking`。
+
+| 编号 | 日期 | 契约 | 内容 | 原因 | 兼容性 | 确认 |
+| --- | --- | --- | --- | --- | --- | --- |
+| CC-01 | 2026-11-01 | C2 | `backend.v1.HubUpMessage` 新增 `NodeUpgradeForward node_upgrade = 9`（`node_id`、`vortex.edgehub.v1.UpgradeStatus status`）：Edge Hub 原样转发节点的升级进度 | 原契约中 Agent 上报 `UpgradeStatus`，但 Edge Hub → 后端没有对应字段，后端看不到“已回退”与失败原因（AGT-008） | 新增 oneof 成员与消息，编号未用过；旧后端忽略未知字段；`buf breaking` 相对 main 通过 | 2026-11-01 已确认 |

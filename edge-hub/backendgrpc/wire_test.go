@@ -10,6 +10,7 @@ import (
 
 	"vortex/edgehub/issuer"
 	"vortex/edgehub/model"
+	"vortex/edgehub/session"
 	"vortex/edgehub/upstream"
 	"vortex/edgehub/wire"
 	backendv1 "vortex/proto/gen/go/vortex/backend/v1"
@@ -96,5 +97,21 @@ func TestUpLedger(t *testing.T) {
 	}
 	if _, err := Up(upstream.LedgerEntries{Entries: []upstream.LedgerEntry{{Seq: 1}}}, "", "", time.Now()); err == nil {
 		t.Fatal("empty entry accepted")
+	}
+}
+
+// 节点的升级进度原样转给后端（AGT-008，C2 变更 CC-01）。
+func TestUpUpgradeStatus(t *testing.T) {
+	raw, _ := proto.Marshal(&edgehubv1.UpgradeStatus{TargetVersion: "2.0.0", Phase: edgehubv1.UpgradePhase_UPGRADE_PHASE_ROLLED_BACK, Error: "x"})
+	m, err := Up(upstream.NodeForward{Node: model.UUID{4}, Msg: session.Passthrough{Kind: "upgrade", Payload: raw}}, "", "", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := m.GetNodeUpgrade()
+	if u.GetNodeId().GetValue()[0] != 4 || u.GetStatus().GetTargetVersion() != "2.0.0" || u.GetStatus().GetPhase() != edgehubv1.UpgradePhase_UPGRADE_PHASE_ROLLED_BACK {
+		t.Fatalf("%+v", m)
+	}
+	if _, err := Up(upstream.NodeForward{Node: model.UUID{4}, Msg: session.Passthrough{Kind: "upgrade", Payload: []byte{0xff, 0xff}}}, "", "", time.Now()); err == nil {
+		t.Fatal("corrupt upgrade status accepted")
 	}
 }

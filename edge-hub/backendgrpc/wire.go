@@ -127,10 +127,14 @@ func Up(m upstream.Up, region, version string, now time.Time) (*backendv1.HubUpM
 				return nil, err
 			}
 			return &backendv1.HubUpMessage{Body: &backendv1.HubUpMessage_Probes{Probes: &backendv1.ProbeSummary{NodeId: wire.UUID(m.Node), Report: &pr}}}, nil
+		case "upgrade":
+			var us edgehubv1.UpgradeStatus
+			if err := proto.Unmarshal(m.Msg.Payload, &us); err != nil {
+				return nil, err
+			}
+			return &backendv1.HubUpMessage{Body: &backendv1.HubUpMessage_NodeUpgrade{NodeUpgrade: &backendv1.NodeUpgradeForward{NodeId: wire.UUID(m.Node), Status: &us}}}, nil
 		}
-		// 实际状态随 NodeStatusBatch 上报；升级进度（UpgradeStatus）在 HubUpMessage 中没有对应字段（契约缺口），
-		// 后端以 NodeStatus 的 agent_version 与 boot_id 判断升级结果
-		return nil, nil
+		return nil, nil // 实际状态随 NodeStatusBatch 上报
 	}
 	return nil, fmt.Errorf("%w: unknown up message %T", wire.ErrInvalid, m)
 }

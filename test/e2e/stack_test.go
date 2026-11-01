@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -38,12 +39,25 @@ type protoBackend struct {
 	cfg  *types.RuntimeConfig
 	more []*types.RuntimeConfig // 其他节点的期望配置（按 NodeID 下发）
 
-	mu      sync.Mutex
-	usage   int
-	applied []uint64
-	pushed  map[string]bool
-	out     func(*backendv1.BackendMessage) // 当前流（push 用）
-	version map[string]string               // 在线节点的程序版本（NodeStatus.agent_version），按 node_id
+	mu       sync.Mutex
+	usage    int
+	applied  []uint64
+	pushed   map[string]bool
+	out      func(*backendv1.BackendMessage) // 当前流（push 用）
+	version  map[string]string               // 在线节点的程序版本（NodeStatus.agent_version），按 node_id
+	upgrades []*edgehubv1.UpgradeStatus      // Edge Hub 转发的升级进度（AGT-008）
+}
+
+// upgraded 报告后端是否收到某版本的某个升级阶段（错误文本包含 errPart）。
+func (b *protoBackend) upgraded(target string, phase edgehubv1.UpgradePhase, errPart string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, u := range b.upgrades {
+		if u.TargetVersion == target && u.Phase == phase && strings.Contains(u.Error, errPart) {
+			return true
+		}
+	}
+	return false
 }
 
 // push 经当前流下发一条消息。
@@ -117,6 +131,10 @@ func (b *protoBackend) Connect(s grpc.BidiStreamingServer[backendv1.HubUpMessage
 							{Meta: meta(), TenantId: nodewire.UUID(tenant), Kind: runtimev1.ShareKind_SHARE_KIND_CONN, Amount: 1000}}}}})
 				}
 			}
+		case *backendv1.HubUpMessage_NodeUpgrade:
+			b.mu.Lock()
+			b.upgrades = append(b.upgrades, x.NodeUpgrade.GetStatus())
+			b.mu.Unlock()
 		case *backendv1.HubUpMessage_ApplyProgress:
 			if p := x.ApplyProgress.GetPrepare(); p != nil && len(p.GetResult().GetErrors()) == 0 {
 				send(&backendv1.BackendMessage{Body: &backendv1.BackendMessage_Command{Command: &backendv1.NodeApplyCommand{

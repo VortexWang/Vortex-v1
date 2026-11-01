@@ -60,6 +60,7 @@ message HubUpMessage {
     ForeignGrants foreign_grants = 6;                     // HUB-015 回收判定
     NodeEventForward node_event = 7;                      // 审计与限制状态（LIM-008、ENG-023）
     ProbeSummary probes = 8;                              // FE-006
+    NodeUpgradeForward node_upgrade = 9;                  // AGT-008（C2 变更 CC-01）
   }
 }
 
@@ -170,6 +171,12 @@ message ForeignGrants {
 message NodeEventForward {
   vortex.common.v1.Uuid node_id = 1;
   vortex.runtime.v1.EngineEvent event = 2;
+}
+
+// 节点上报的升级进度，Edge Hub 原样转发（AGT-008）。
+message NodeUpgradeForward {
+  vortex.common.v1.Uuid node_id = 1;
+  vortex.edgehub.v1.UpgradeStatus status = 2;
 }
 
 message ProbeSummary {

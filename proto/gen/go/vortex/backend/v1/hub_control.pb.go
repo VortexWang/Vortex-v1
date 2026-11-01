@@ -375,6 +375,7 @@ type HubUpMessage struct {
 	//	*HubUpMessage_ForeignGrants
 	//	*HubUpMessage_NodeEvent
 	//	*HubUpMessage_Probes
+	//	*HubUpMessage_NodeUpgrade
 	Body          isHubUpMessage_Body `protobuf_oneof:"body"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -489,6 +490,15 @@ func (x *HubUpMessage) GetProbes() *ProbeSummary {
 	return nil
 }
 
+func (x *HubUpMessage) GetNodeUpgrade() *NodeUpgradeForward {
+	if x != nil {
+		if x, ok := x.Body.(*HubUpMessage_NodeUpgrade); ok {
+			return x.NodeUpgrade
+		}
+	}
+	return nil
+}
+
 type isHubUpMessage_Body interface {
 	isHubUpMessage_Body()
 }
@@ -525,6 +535,10 @@ type HubUpMessage_Probes struct {
 	Probes *ProbeSummary `protobuf:"bytes,8,opt,name=probes,proto3,oneof"` // FE-006
 }
 
+type HubUpMessage_NodeUpgrade struct {
+	NodeUpgrade *NodeUpgradeForward `protobuf:"bytes,9,opt,name=node_upgrade,json=nodeUpgrade,proto3,oneof"` // AGT-008（C2 变更 CC-01）
+}
+
 func (*HubUpMessage_Register) isHubUpMessage_Body() {}
 
 func (*HubUpMessage_NodeStatus) isHubUpMessage_Body() {}
@@ -540,6 +554,8 @@ func (*HubUpMessage_ForeignGrants) isHubUpMessage_Body() {}
 func (*HubUpMessage_NodeEvent) isHubUpMessage_Body() {}
 
 func (*HubUpMessage_Probes) isHubUpMessage_Body() {}
+
+func (*HubUpMessage_NodeUpgrade) isHubUpMessage_Body() {}
 
 // 每条 Connect 流的第一条消息。
 type HubRegister struct {
@@ -1562,6 +1578,59 @@ func (x *NodeEventForward) GetEvent() *v12.EngineEvent {
 	return nil
 }
 
+// 节点上报的升级进度，Edge Hub 原样转发（AGT-008）。
+type NodeUpgradeForward struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	NodeId        *v1.Uuid               `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	Status        *v11.UpgradeStatus     `protobuf:"bytes,2,opt,name=status,proto3" json:"status,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *NodeUpgradeForward) Reset() {
+	*x = NodeUpgradeForward{}
+	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NodeUpgradeForward) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NodeUpgradeForward) ProtoMessage() {}
+
+func (x *NodeUpgradeForward) ProtoReflect() protoreflect.Message {
+	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NodeUpgradeForward.ProtoReflect.Descriptor instead.
+func (*NodeUpgradeForward) Descriptor() ([]byte, []int) {
+	return file_vortex_backend_v1_hub_control_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *NodeUpgradeForward) GetNodeId() *v1.Uuid {
+	if x != nil {
+		return x.NodeId
+	}
+	return nil
+}
+
+func (x *NodeUpgradeForward) GetStatus() *v11.UpgradeStatus {
+	if x != nil {
+		return x.Status
+	}
+	return nil
+}
+
 type ProbeSummary struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	NodeId        *v1.Uuid               `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
@@ -1572,7 +1641,7 @@ type ProbeSummary struct {
 
 func (x *ProbeSummary) Reset() {
 	*x = ProbeSummary{}
-	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[19]
+	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1584,7 +1653,7 @@ func (x *ProbeSummary) String() string {
 func (*ProbeSummary) ProtoMessage() {}
 
 func (x *ProbeSummary) ProtoReflect() protoreflect.Message {
-	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[19]
+	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1597,7 +1666,7 @@ func (x *ProbeSummary) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProbeSummary.ProtoReflect.Descriptor instead.
 func (*ProbeSummary) Descriptor() ([]byte, []int) {
-	return file_vortex_backend_v1_hub_control_proto_rawDescGZIP(), []int{19}
+	return file_vortex_backend_v1_hub_control_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *ProbeSummary) GetNodeId() *v1.Uuid {
@@ -1635,7 +1704,7 @@ type BackendMessage struct {
 
 func (x *BackendMessage) Reset() {
 	*x = BackendMessage{}
-	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[20]
+	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1647,7 +1716,7 @@ func (x *BackendMessage) String() string {
 func (*BackendMessage) ProtoMessage() {}
 
 func (x *BackendMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[20]
+	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1660,7 +1729,7 @@ func (x *BackendMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BackendMessage.ProtoReflect.Descriptor instead.
 func (*BackendMessage) Descriptor() ([]byte, []int) {
-	return file_vortex_backend_v1_hub_control_proto_rawDescGZIP(), []int{20}
+	return file_vortex_backend_v1_hub_control_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *BackendMessage) GetBody() isBackendMessage_Body {
@@ -1834,7 +1903,7 @@ type NodeDesiredConfig struct {
 
 func (x *NodeDesiredConfig) Reset() {
 	*x = NodeDesiredConfig{}
-	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[21]
+	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1846,7 +1915,7 @@ func (x *NodeDesiredConfig) String() string {
 func (*NodeDesiredConfig) ProtoMessage() {}
 
 func (x *NodeDesiredConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[21]
+	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1859,7 +1928,7 @@ func (x *NodeDesiredConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NodeDesiredConfig.ProtoReflect.Descriptor instead.
 func (*NodeDesiredConfig) Descriptor() ([]byte, []int) {
-	return file_vortex_backend_v1_hub_control_proto_rawDescGZIP(), []int{21}
+	return file_vortex_backend_v1_hub_control_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *NodeDesiredConfig) GetNodeId() *v1.Uuid {
@@ -1886,7 +1955,7 @@ type NodeApplyCommand struct {
 
 func (x *NodeApplyCommand) Reset() {
 	*x = NodeApplyCommand{}
-	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[22]
+	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1898,7 +1967,7 @@ func (x *NodeApplyCommand) String() string {
 func (*NodeApplyCommand) ProtoMessage() {}
 
 func (x *NodeApplyCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[22]
+	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1911,7 +1980,7 @@ func (x *NodeApplyCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NodeApplyCommand.ProtoReflect.Descriptor instead.
 func (*NodeApplyCommand) Descriptor() ([]byte, []int) {
-	return file_vortex_backend_v1_hub_control_proto_rawDescGZIP(), []int{22}
+	return file_vortex_backend_v1_hub_control_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *NodeApplyCommand) GetNodeId() *v1.Uuid {
@@ -1939,7 +2008,7 @@ type RestrictionSnapshot struct {
 
 func (x *RestrictionSnapshot) Reset() {
 	*x = RestrictionSnapshot{}
-	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[23]
+	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1951,7 +2020,7 @@ func (x *RestrictionSnapshot) String() string {
 func (*RestrictionSnapshot) ProtoMessage() {}
 
 func (x *RestrictionSnapshot) ProtoReflect() protoreflect.Message {
-	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[23]
+	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1964,7 +2033,7 @@ func (x *RestrictionSnapshot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RestrictionSnapshot.ProtoReflect.Descriptor instead.
 func (*RestrictionSnapshot) Descriptor() ([]byte, []int) {
-	return file_vortex_backend_v1_hub_control_proto_rawDescGZIP(), []int{23}
+	return file_vortex_backend_v1_hub_control_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *RestrictionSnapshot) GetSnapshotVersion() uint64 {
@@ -1994,7 +2063,7 @@ type TenantRestriction struct {
 
 func (x *TenantRestriction) Reset() {
 	*x = TenantRestriction{}
-	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[24]
+	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2006,7 +2075,7 @@ func (x *TenantRestriction) String() string {
 func (*TenantRestriction) ProtoMessage() {}
 
 func (x *TenantRestriction) ProtoReflect() protoreflect.Message {
-	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[24]
+	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2019,7 +2088,7 @@ func (x *TenantRestriction) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TenantRestriction.ProtoReflect.Descriptor instead.
 func (*TenantRestriction) Descriptor() ([]byte, []int) {
-	return file_vortex_backend_v1_hub_control_proto_rawDescGZIP(), []int{24}
+	return file_vortex_backend_v1_hub_control_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *TenantRestriction) GetTenantId() *v1.Uuid {
@@ -2072,7 +2141,7 @@ type BudgetUpdate struct {
 
 func (x *BudgetUpdate) Reset() {
 	*x = BudgetUpdate{}
-	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[25]
+	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2084,7 +2153,7 @@ func (x *BudgetUpdate) String() string {
 func (*BudgetUpdate) ProtoMessage() {}
 
 func (x *BudgetUpdate) ProtoReflect() protoreflect.Message {
-	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[25]
+	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2097,7 +2166,7 @@ func (x *BudgetUpdate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BudgetUpdate.ProtoReflect.Descriptor instead.
 func (*BudgetUpdate) Descriptor() ([]byte, []int) {
-	return file_vortex_backend_v1_hub_control_proto_rawDescGZIP(), []int{25}
+	return file_vortex_backend_v1_hub_control_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *BudgetUpdate) GetTenantId() *v1.Uuid {
@@ -2138,7 +2207,7 @@ type ShareLeaseUpdate struct {
 
 func (x *ShareLeaseUpdate) Reset() {
 	*x = ShareLeaseUpdate{}
-	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[26]
+	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2150,7 +2219,7 @@ func (x *ShareLeaseUpdate) String() string {
 func (*ShareLeaseUpdate) ProtoMessage() {}
 
 func (x *ShareLeaseUpdate) ProtoReflect() protoreflect.Message {
-	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[26]
+	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2163,7 +2232,7 @@ func (x *ShareLeaseUpdate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShareLeaseUpdate.ProtoReflect.Descriptor instead.
 func (*ShareLeaseUpdate) Descriptor() ([]byte, []int) {
-	return file_vortex_backend_v1_hub_control_proto_rawDescGZIP(), []int{26}
+	return file_vortex_backend_v1_hub_control_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *ShareLeaseUpdate) GetNodeId() *v1.Uuid {
@@ -2190,7 +2259,7 @@ type LedgerAck struct {
 
 func (x *LedgerAck) Reset() {
 	*x = LedgerAck{}
-	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[27]
+	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2202,7 +2271,7 @@ func (x *LedgerAck) String() string {
 func (*LedgerAck) ProtoMessage() {}
 
 func (x *LedgerAck) ProtoReflect() protoreflect.Message {
-	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[27]
+	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2215,7 +2284,7 @@ func (x *LedgerAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LedgerAck.ProtoReflect.Descriptor instead.
 func (*LedgerAck) Descriptor() ([]byte, []int) {
-	return file_vortex_backend_v1_hub_control_proto_rawDescGZIP(), []int{27}
+	return file_vortex_backend_v1_hub_control_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *LedgerAck) GetAckedThroughSeq() uint64 {
@@ -2234,7 +2303,7 @@ type BillingVersionSync struct {
 
 func (x *BillingVersionSync) Reset() {
 	*x = BillingVersionSync{}
-	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[28]
+	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2246,7 +2315,7 @@ func (x *BillingVersionSync) String() string {
 func (*BillingVersionSync) ProtoMessage() {}
 
 func (x *BillingVersionSync) ProtoReflect() protoreflect.Message {
-	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[28]
+	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2259,7 +2328,7 @@ func (x *BillingVersionSync) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BillingVersionSync.ProtoReflect.Descriptor instead.
 func (*BillingVersionSync) Descriptor() ([]byte, []int) {
-	return file_vortex_backend_v1_hub_control_proto_rawDescGZIP(), []int{28}
+	return file_vortex_backend_v1_hub_control_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *BillingVersionSync) GetVersions() []*BillingVersion {
@@ -2280,7 +2349,7 @@ type BillingVersion struct {
 
 func (x *BillingVersion) Reset() {
 	*x = BillingVersion{}
-	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[29]
+	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2292,7 +2361,7 @@ func (x *BillingVersion) String() string {
 func (*BillingVersion) ProtoMessage() {}
 
 func (x *BillingVersion) ProtoReflect() protoreflect.Message {
-	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[29]
+	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2305,7 +2374,7 @@ func (x *BillingVersion) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BillingVersion.ProtoReflect.Descriptor instead.
 func (*BillingVersion) Descriptor() ([]byte, []int) {
-	return file_vortex_backend_v1_hub_control_proto_rawDescGZIP(), []int{29}
+	return file_vortex_backend_v1_hub_control_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *BillingVersion) GetVersion() uint64 {
@@ -2339,7 +2408,7 @@ type GroupMultiplier struct {
 
 func (x *GroupMultiplier) Reset() {
 	*x = GroupMultiplier{}
-	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[30]
+	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2351,7 +2420,7 @@ func (x *GroupMultiplier) String() string {
 func (*GroupMultiplier) ProtoMessage() {}
 
 func (x *GroupMultiplier) ProtoReflect() protoreflect.Message {
-	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[30]
+	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2364,7 +2433,7 @@ func (x *GroupMultiplier) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GroupMultiplier.ProtoReflect.Descriptor instead.
 func (*GroupMultiplier) Descriptor() ([]byte, []int) {
-	return file_vortex_backend_v1_hub_control_proto_rawDescGZIP(), []int{30}
+	return file_vortex_backend_v1_hub_control_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *GroupMultiplier) GetNodeGroupId() *v1.Uuid {
@@ -2393,7 +2462,7 @@ type ReconcileDirective struct {
 
 func (x *ReconcileDirective) Reset() {
 	*x = ReconcileDirective{}
-	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[31]
+	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2405,7 +2474,7 @@ func (x *ReconcileDirective) String() string {
 func (*ReconcileDirective) ProtoMessage() {}
 
 func (x *ReconcileDirective) ProtoReflect() protoreflect.Message {
-	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[31]
+	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2418,7 +2487,7 @@ func (x *ReconcileDirective) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReconcileDirective.ProtoReflect.Descriptor instead.
 func (*ReconcileDirective) Descriptor() ([]byte, []int) {
-	return file_vortex_backend_v1_hub_control_proto_rawDescGZIP(), []int{31}
+	return file_vortex_backend_v1_hub_control_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *ReconcileDirective) GetPhase() ReconcilePhase {
@@ -2456,7 +2525,7 @@ type NodeOperation struct {
 
 func (x *NodeOperation) Reset() {
 	*x = NodeOperation{}
-	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[32]
+	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2468,7 +2537,7 @@ func (x *NodeOperation) String() string {
 func (*NodeOperation) ProtoMessage() {}
 
 func (x *NodeOperation) ProtoReflect() protoreflect.Message {
-	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[32]
+	mi := &file_vortex_backend_v1_hub_control_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2481,7 +2550,7 @@ func (x *NodeOperation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NodeOperation.ProtoReflect.Descriptor instead.
 func (*NodeOperation) Descriptor() ([]byte, []int) {
-	return file_vortex_backend_v1_hub_control_proto_rawDescGZIP(), []int{32}
+	return file_vortex_backend_v1_hub_control_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *NodeOperation) GetNodeId() *v1.Uuid {
@@ -2552,7 +2621,7 @@ const file_vortex_backend_v1_hub_control_proto_rawDesc = "" +
 	"\x17observed_remote_address\x18\x02 \x01(\tR\x15observedRemoteAddress\"`\n" +
 	"\x14RenewNodeCertRequest\x12/\n" +
 	"\anode_id\x18\x01 \x01(\v2\x16.vortex.common.v1.UuidR\x06nodeId\x12\x17\n" +
-	"\acsr_der\x18\x02 \x01(\fR\x06csrDer\"\xbd\x04\n" +
+	"\acsr_der\x18\x02 \x01(\fR\x06csrDer\"\x89\x05\n" +
 	"\fHubUpMessage\x12<\n" +
 	"\bregister\x18\x01 \x01(\v2\x1e.vortex.backend.v1.HubRegisterH\x00R\bregister\x12E\n" +
 	"\vnode_status\x18\x02 \x01(\v2\".vortex.backend.v1.NodeStatusBatchH\x00R\n" +
@@ -2563,7 +2632,8 @@ const file_vortex_backend_v1_hub_control_proto_rawDesc = "" +
 	"\x0eforeign_grants\x18\x06 \x01(\v2 .vortex.backend.v1.ForeignGrantsH\x00R\rforeignGrants\x12D\n" +
 	"\n" +
 	"node_event\x18\a \x01(\v2#.vortex.backend.v1.NodeEventForwardH\x00R\tnodeEvent\x129\n" +
-	"\x06probes\x18\b \x01(\v2\x1f.vortex.backend.v1.ProbeSummaryH\x00R\x06probesB\x06\n" +
+	"\x06probes\x18\b \x01(\v2\x1f.vortex.backend.v1.ProbeSummaryH\x00R\x06probes\x12J\n" +
+	"\fnode_upgrade\x18\t \x01(\v2%.vortex.backend.v1.NodeUpgradeForwardH\x00R\vnodeUpgradeB\x06\n" +
 	"\x04body\"\xba\x02\n" +
 	"\vHubRegister\x12\x16\n" +
 	"\x06region\x18\x01 \x01(\tR\x06region\x12\x1f\n" +
@@ -2640,7 +2710,10 @@ const file_vortex_backend_v1_hub_control_proto_rawDesc = "" +
 	"\x06grants\x18\x02 \x03(\v2\x1c.vortex.edgehub.v1.HeldGrantR\x06grants\"y\n" +
 	"\x10NodeEventForward\x12/\n" +
 	"\anode_id\x18\x01 \x01(\v2\x16.vortex.common.v1.UuidR\x06nodeId\x124\n" +
-	"\x05event\x18\x02 \x01(\v2\x1e.vortex.runtime.v1.EngineEventR\x05event\"w\n" +
+	"\x05event\x18\x02 \x01(\v2\x1e.vortex.runtime.v1.EngineEventR\x05event\"\x7f\n" +
+	"\x12NodeUpgradeForward\x12/\n" +
+	"\anode_id\x18\x01 \x01(\v2\x16.vortex.common.v1.UuidR\x06nodeId\x128\n" +
+	"\x06status\x18\x02 \x01(\v2 .vortex.edgehub.v1.UpgradeStatusR\x06status\"w\n" +
 	"\fProbeSummary\x12/\n" +
 	"\anode_id\x18\x01 \x01(\v2\x16.vortex.common.v1.UuidR\x06nodeId\x126\n" +
 	"\x06report\x18\x02 \x01(\v2\x1e.vortex.edgehub.v1.ProbeReportR\x06report\"\xcf\x05\n" +
@@ -2731,7 +2804,7 @@ func file_vortex_backend_v1_hub_control_proto_rawDescGZIP() []byte {
 }
 
 var file_vortex_backend_v1_hub_control_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_vortex_backend_v1_hub_control_proto_msgTypes = make([]protoimpl.MessageInfo, 33)
+var file_vortex_backend_v1_hub_control_proto_msgTypes = make([]protoimpl.MessageInfo, 34)
 var file_vortex_backend_v1_hub_control_proto_goTypes = []any{
 	(AccountStatus)(0),            // 0: vortex.backend.v1.AccountStatus
 	(ReconcilePhase)(0),           // 1: vortex.backend.v1.ReconcilePhase
@@ -2754,45 +2827,47 @@ var file_vortex_backend_v1_hub_control_proto_goTypes = []any{
 	(*BudgetRequest)(nil),         // 18: vortex.backend.v1.BudgetRequest
 	(*ForeignGrants)(nil),         // 19: vortex.backend.v1.ForeignGrants
 	(*NodeEventForward)(nil),      // 20: vortex.backend.v1.NodeEventForward
-	(*ProbeSummary)(nil),          // 21: vortex.backend.v1.ProbeSummary
-	(*BackendMessage)(nil),        // 22: vortex.backend.v1.BackendMessage
-	(*NodeDesiredConfig)(nil),     // 23: vortex.backend.v1.NodeDesiredConfig
-	(*NodeApplyCommand)(nil),      // 24: vortex.backend.v1.NodeApplyCommand
-	(*RestrictionSnapshot)(nil),   // 25: vortex.backend.v1.RestrictionSnapshot
-	(*TenantRestriction)(nil),     // 26: vortex.backend.v1.TenantRestriction
-	(*BudgetUpdate)(nil),          // 27: vortex.backend.v1.BudgetUpdate
-	(*ShareLeaseUpdate)(nil),      // 28: vortex.backend.v1.ShareLeaseUpdate
-	(*LedgerAck)(nil),             // 29: vortex.backend.v1.LedgerAck
-	(*BillingVersionSync)(nil),    // 30: vortex.backend.v1.BillingVersionSync
-	(*BillingVersion)(nil),        // 31: vortex.backend.v1.BillingVersion
-	(*GroupMultiplier)(nil),       // 32: vortex.backend.v1.GroupMultiplier
-	(*ReconcileDirective)(nil),    // 33: vortex.backend.v1.ReconcileDirective
-	(*NodeOperation)(nil),         // 34: vortex.backend.v1.NodeOperation
-	(*v1.Uuid)(nil),               // 35: vortex.common.v1.Uuid
-	(*v11.EnrollRequest)(nil),     // 36: vortex.edgehub.v1.EnrollRequest
-	(v1.HubMode)(0),               // 37: vortex.common.v1.HubMode
-	(*timestamppb.Timestamp)(nil), // 38: google.protobuf.Timestamp
-	(*v12.RuntimeState)(nil),      // 39: vortex.runtime.v1.RuntimeState
-	(*v11.PrepareReport)(nil),     // 40: vortex.edgehub.v1.PrepareReport
-	(*v11.ApplyReport)(nil),       // 41: vortex.edgehub.v1.ApplyReport
-	(v11.GrantKind)(0),            // 42: vortex.edgehub.v1.GrantKind
-	(*v11.UsageBatch)(nil),        // 43: vortex.edgehub.v1.UsageBatch
-	(*v11.HeldGrant)(nil),         // 44: vortex.edgehub.v1.HeldGrant
-	(*v12.EngineEvent)(nil),       // 45: vortex.runtime.v1.EngineEvent
-	(*v11.ProbeReport)(nil),       // 46: vortex.edgehub.v1.ProbeReport
-	(*v12.RevocationList)(nil),    // 47: vortex.runtime.v1.RevocationList
-	(*v12.RuntimeConfig)(nil),     // 48: vortex.runtime.v1.RuntimeConfig
-	(*v11.ApplyCommand)(nil),      // 49: vortex.edgehub.v1.ApplyCommand
-	(*v12.ShareLease)(nil),        // 50: vortex.runtime.v1.ShareLease
-	(*v11.DrainCommand)(nil),      // 51: vortex.edgehub.v1.DrainCommand
-	(*v11.UpgradeCommand)(nil),    // 52: vortex.edgehub.v1.UpgradeCommand
-	(*v11.EnrollResponse)(nil),    // 53: vortex.edgehub.v1.EnrollResponse
-	(*v11.RenewCertResponse)(nil), // 54: vortex.edgehub.v1.RenewCertResponse
+	(*NodeUpgradeForward)(nil),    // 21: vortex.backend.v1.NodeUpgradeForward
+	(*ProbeSummary)(nil),          // 22: vortex.backend.v1.ProbeSummary
+	(*BackendMessage)(nil),        // 23: vortex.backend.v1.BackendMessage
+	(*NodeDesiredConfig)(nil),     // 24: vortex.backend.v1.NodeDesiredConfig
+	(*NodeApplyCommand)(nil),      // 25: vortex.backend.v1.NodeApplyCommand
+	(*RestrictionSnapshot)(nil),   // 26: vortex.backend.v1.RestrictionSnapshot
+	(*TenantRestriction)(nil),     // 27: vortex.backend.v1.TenantRestriction
+	(*BudgetUpdate)(nil),          // 28: vortex.backend.v1.BudgetUpdate
+	(*ShareLeaseUpdate)(nil),      // 29: vortex.backend.v1.ShareLeaseUpdate
+	(*LedgerAck)(nil),             // 30: vortex.backend.v1.LedgerAck
+	(*BillingVersionSync)(nil),    // 31: vortex.backend.v1.BillingVersionSync
+	(*BillingVersion)(nil),        // 32: vortex.backend.v1.BillingVersion
+	(*GroupMultiplier)(nil),       // 33: vortex.backend.v1.GroupMultiplier
+	(*ReconcileDirective)(nil),    // 34: vortex.backend.v1.ReconcileDirective
+	(*NodeOperation)(nil),         // 35: vortex.backend.v1.NodeOperation
+	(*v1.Uuid)(nil),               // 36: vortex.common.v1.Uuid
+	(*v11.EnrollRequest)(nil),     // 37: vortex.edgehub.v1.EnrollRequest
+	(v1.HubMode)(0),               // 38: vortex.common.v1.HubMode
+	(*timestamppb.Timestamp)(nil), // 39: google.protobuf.Timestamp
+	(*v12.RuntimeState)(nil),      // 40: vortex.runtime.v1.RuntimeState
+	(*v11.PrepareReport)(nil),     // 41: vortex.edgehub.v1.PrepareReport
+	(*v11.ApplyReport)(nil),       // 42: vortex.edgehub.v1.ApplyReport
+	(v11.GrantKind)(0),            // 43: vortex.edgehub.v1.GrantKind
+	(*v11.UsageBatch)(nil),        // 44: vortex.edgehub.v1.UsageBatch
+	(*v11.HeldGrant)(nil),         // 45: vortex.edgehub.v1.HeldGrant
+	(*v12.EngineEvent)(nil),       // 46: vortex.runtime.v1.EngineEvent
+	(*v11.UpgradeStatus)(nil),     // 47: vortex.edgehub.v1.UpgradeStatus
+	(*v11.ProbeReport)(nil),       // 48: vortex.edgehub.v1.ProbeReport
+	(*v12.RevocationList)(nil),    // 49: vortex.runtime.v1.RevocationList
+	(*v12.RuntimeConfig)(nil),     // 50: vortex.runtime.v1.RuntimeConfig
+	(*v11.ApplyCommand)(nil),      // 51: vortex.edgehub.v1.ApplyCommand
+	(*v12.ShareLease)(nil),        // 52: vortex.runtime.v1.ShareLease
+	(*v11.DrainCommand)(nil),      // 53: vortex.edgehub.v1.DrainCommand
+	(*v11.UpgradeCommand)(nil),    // 54: vortex.edgehub.v1.UpgradeCommand
+	(*v11.EnrollResponse)(nil),    // 55: vortex.edgehub.v1.EnrollResponse
+	(*v11.RenewCertResponse)(nil), // 56: vortex.edgehub.v1.RenewCertResponse
 }
 var file_vortex_backend_v1_hub_control_proto_depIdxs = []int32{
-	35, // 0: vortex.backend.v1.EnrollHubResponse.hub_id:type_name -> vortex.common.v1.Uuid
-	36, // 1: vortex.backend.v1.EnrollNodeRequest.request:type_name -> vortex.edgehub.v1.EnrollRequest
-	35, // 2: vortex.backend.v1.RenewNodeCertRequest.node_id:type_name -> vortex.common.v1.Uuid
+	36, // 0: vortex.backend.v1.EnrollHubResponse.hub_id:type_name -> vortex.common.v1.Uuid
+	37, // 1: vortex.backend.v1.EnrollNodeRequest.request:type_name -> vortex.edgehub.v1.EnrollRequest
+	36, // 2: vortex.backend.v1.RenewNodeCertRequest.node_id:type_name -> vortex.common.v1.Uuid
 	7,  // 3: vortex.backend.v1.HubUpMessage.register:type_name -> vortex.backend.v1.HubRegister
 	9,  // 4: vortex.backend.v1.HubUpMessage.node_status:type_name -> vortex.backend.v1.NodeStatusBatch
 	11, // 5: vortex.backend.v1.HubUpMessage.apply_progress:type_name -> vortex.backend.v1.NodeApplyProgress
@@ -2800,91 +2875,94 @@ var file_vortex_backend_v1_hub_control_proto_depIdxs = []int32{
 	18, // 7: vortex.backend.v1.HubUpMessage.budget_request:type_name -> vortex.backend.v1.BudgetRequest
 	19, // 8: vortex.backend.v1.HubUpMessage.foreign_grants:type_name -> vortex.backend.v1.ForeignGrants
 	20, // 9: vortex.backend.v1.HubUpMessage.node_event:type_name -> vortex.backend.v1.NodeEventForward
-	21, // 10: vortex.backend.v1.HubUpMessage.probes:type_name -> vortex.backend.v1.ProbeSummary
-	37, // 11: vortex.backend.v1.HubRegister.mode:type_name -> vortex.common.v1.HubMode
-	38, // 12: vortex.backend.v1.HubRegister.autonomy_started_at:type_name -> google.protobuf.Timestamp
-	8,  // 13: vortex.backend.v1.HubRegister.budget_versions:type_name -> vortex.backend.v1.TenantBudgetVersion
-	35, // 14: vortex.backend.v1.TenantBudgetVersion.tenant_id:type_name -> vortex.common.v1.Uuid
-	10, // 15: vortex.backend.v1.NodeStatusBatch.nodes:type_name -> vortex.backend.v1.NodeStatus
-	35, // 16: vortex.backend.v1.NodeStatus.node_id:type_name -> vortex.common.v1.Uuid
-	35, // 17: vortex.backend.v1.NodeStatus.boot_id:type_name -> vortex.common.v1.Uuid
-	38, // 18: vortex.backend.v1.NodeStatus.last_seen_at:type_name -> google.protobuf.Timestamp
-	39, // 19: vortex.backend.v1.NodeStatus.state:type_name -> vortex.runtime.v1.RuntimeState
-	35, // 20: vortex.backend.v1.NodeApplyProgress.node_id:type_name -> vortex.common.v1.Uuid
-	40, // 21: vortex.backend.v1.NodeApplyProgress.prepare:type_name -> vortex.edgehub.v1.PrepareReport
-	41, // 22: vortex.backend.v1.NodeApplyProgress.apply:type_name -> vortex.edgehub.v1.ApplyReport
-	13, // 23: vortex.backend.v1.LedgerEntries.entries:type_name -> vortex.backend.v1.LedgerEntry
-	38, // 24: vortex.backend.v1.LedgerEntry.recorded_at:type_name -> google.protobuf.Timestamp
-	14, // 25: vortex.backend.v1.LedgerEntry.grant_issued:type_name -> vortex.backend.v1.GrantIssued
-	15, // 26: vortex.backend.v1.LedgerEntry.grant_settled:type_name -> vortex.backend.v1.GrantSettled
-	16, // 27: vortex.backend.v1.LedgerEntry.node_usage:type_name -> vortex.backend.v1.NodeUsage
-	17, // 28: vortex.backend.v1.LedgerEntry.grant_transferred:type_name -> vortex.backend.v1.GrantTransferred
-	35, // 29: vortex.backend.v1.GrantIssued.grant_id:type_name -> vortex.common.v1.Uuid
-	42, // 30: vortex.backend.v1.GrantIssued.kind:type_name -> vortex.edgehub.v1.GrantKind
-	35, // 31: vortex.backend.v1.GrantIssued.tenant_id:type_name -> vortex.common.v1.Uuid
-	35, // 32: vortex.backend.v1.GrantIssued.node_id:type_name -> vortex.common.v1.Uuid
-	35, // 33: vortex.backend.v1.GrantIssued.boot_id:type_name -> vortex.common.v1.Uuid
-	35, // 34: vortex.backend.v1.GrantIssued.rule_id:type_name -> vortex.common.v1.Uuid
-	35, // 35: vortex.backend.v1.GrantSettled.grant_id:type_name -> vortex.common.v1.Uuid
-	35, // 36: vortex.backend.v1.GrantSettled.tenant_id:type_name -> vortex.common.v1.Uuid
-	35, // 37: vortex.backend.v1.NodeUsage.node_id:type_name -> vortex.common.v1.Uuid
-	43, // 38: vortex.backend.v1.NodeUsage.batch:type_name -> vortex.edgehub.v1.UsageBatch
-	35, // 39: vortex.backend.v1.GrantTransferred.node_id:type_name -> vortex.common.v1.Uuid
-	35, // 40: vortex.backend.v1.GrantTransferred.old_boot_id:type_name -> vortex.common.v1.Uuid
-	35, // 41: vortex.backend.v1.GrantTransferred.new_boot_id:type_name -> vortex.common.v1.Uuid
-	35, // 42: vortex.backend.v1.GrantTransferred.revoked_grant_ids:type_name -> vortex.common.v1.Uuid
-	35, // 43: vortex.backend.v1.GrantTransferred.new_grant_ids:type_name -> vortex.common.v1.Uuid
-	35, // 44: vortex.backend.v1.BudgetRequest.tenant_id:type_name -> vortex.common.v1.Uuid
-	35, // 45: vortex.backend.v1.ForeignGrants.node_id:type_name -> vortex.common.v1.Uuid
-	44, // 46: vortex.backend.v1.ForeignGrants.grants:type_name -> vortex.edgehub.v1.HeldGrant
-	35, // 47: vortex.backend.v1.NodeEventForward.node_id:type_name -> vortex.common.v1.Uuid
-	45, // 48: vortex.backend.v1.NodeEventForward.event:type_name -> vortex.runtime.v1.EngineEvent
-	35, // 49: vortex.backend.v1.ProbeSummary.node_id:type_name -> vortex.common.v1.Uuid
-	46, // 50: vortex.backend.v1.ProbeSummary.report:type_name -> vortex.edgehub.v1.ProbeReport
-	23, // 51: vortex.backend.v1.BackendMessage.desired:type_name -> vortex.backend.v1.NodeDesiredConfig
-	24, // 52: vortex.backend.v1.BackendMessage.command:type_name -> vortex.backend.v1.NodeApplyCommand
-	25, // 53: vortex.backend.v1.BackendMessage.restrictions:type_name -> vortex.backend.v1.RestrictionSnapshot
-	47, // 54: vortex.backend.v1.BackendMessage.revocations:type_name -> vortex.runtime.v1.RevocationList
-	27, // 55: vortex.backend.v1.BackendMessage.budget:type_name -> vortex.backend.v1.BudgetUpdate
-	28, // 56: vortex.backend.v1.BackendMessage.leases:type_name -> vortex.backend.v1.ShareLeaseUpdate
-	29, // 57: vortex.backend.v1.BackendMessage.ledger_ack:type_name -> vortex.backend.v1.LedgerAck
-	30, // 58: vortex.backend.v1.BackendMessage.billing_versions:type_name -> vortex.backend.v1.BillingVersionSync
-	33, // 59: vortex.backend.v1.BackendMessage.reconcile:type_name -> vortex.backend.v1.ReconcileDirective
-	34, // 60: vortex.backend.v1.BackendMessage.node_operation:type_name -> vortex.backend.v1.NodeOperation
-	35, // 61: vortex.backend.v1.NodeDesiredConfig.node_id:type_name -> vortex.common.v1.Uuid
-	48, // 62: vortex.backend.v1.NodeDesiredConfig.config:type_name -> vortex.runtime.v1.RuntimeConfig
-	35, // 63: vortex.backend.v1.NodeApplyCommand.node_id:type_name -> vortex.common.v1.Uuid
-	49, // 64: vortex.backend.v1.NodeApplyCommand.command:type_name -> vortex.edgehub.v1.ApplyCommand
-	26, // 65: vortex.backend.v1.RestrictionSnapshot.tenants:type_name -> vortex.backend.v1.TenantRestriction
-	35, // 66: vortex.backend.v1.TenantRestriction.tenant_id:type_name -> vortex.common.v1.Uuid
-	0,  // 67: vortex.backend.v1.TenantRestriction.account_status:type_name -> vortex.backend.v1.AccountStatus
-	38, // 68: vortex.backend.v1.TenantRestriction.plan_expires_at:type_name -> google.protobuf.Timestamp
-	35, // 69: vortex.backend.v1.TenantRestriction.stopped_rule_ids:type_name -> vortex.common.v1.Uuid
-	35, // 70: vortex.backend.v1.BudgetUpdate.tenant_id:type_name -> vortex.common.v1.Uuid
-	35, // 71: vortex.backend.v1.ShareLeaseUpdate.node_id:type_name -> vortex.common.v1.Uuid
-	50, // 72: vortex.backend.v1.ShareLeaseUpdate.leases:type_name -> vortex.runtime.v1.ShareLease
-	31, // 73: vortex.backend.v1.BillingVersionSync.versions:type_name -> vortex.backend.v1.BillingVersion
-	38, // 74: vortex.backend.v1.BillingVersion.effective_at:type_name -> google.protobuf.Timestamp
-	32, // 75: vortex.backend.v1.BillingVersion.multipliers:type_name -> vortex.backend.v1.GroupMultiplier
-	35, // 76: vortex.backend.v1.GroupMultiplier.node_group_id:type_name -> vortex.common.v1.Uuid
-	1,  // 77: vortex.backend.v1.ReconcileDirective.phase:type_name -> vortex.backend.v1.ReconcilePhase
-	35, // 78: vortex.backend.v1.ReconcileDirective.budget_revoked_tenant_ids:type_name -> vortex.common.v1.Uuid
-	35, // 79: vortex.backend.v1.NodeOperation.node_id:type_name -> vortex.common.v1.Uuid
-	51, // 80: vortex.backend.v1.NodeOperation.drain:type_name -> vortex.edgehub.v1.DrainCommand
-	52, // 81: vortex.backend.v1.NodeOperation.upgrade:type_name -> vortex.edgehub.v1.UpgradeCommand
-	2,  // 82: vortex.backend.v1.HubControl.EnrollHub:input_type -> vortex.backend.v1.EnrollHubRequest
-	4,  // 83: vortex.backend.v1.HubControl.EnrollNode:input_type -> vortex.backend.v1.EnrollNodeRequest
-	5,  // 84: vortex.backend.v1.HubControl.RenewNodeCert:input_type -> vortex.backend.v1.RenewNodeCertRequest
-	6,  // 85: vortex.backend.v1.HubControl.Connect:input_type -> vortex.backend.v1.HubUpMessage
-	3,  // 86: vortex.backend.v1.HubControl.EnrollHub:output_type -> vortex.backend.v1.EnrollHubResponse
-	53, // 87: vortex.backend.v1.HubControl.EnrollNode:output_type -> vortex.edgehub.v1.EnrollResponse
-	54, // 88: vortex.backend.v1.HubControl.RenewNodeCert:output_type -> vortex.edgehub.v1.RenewCertResponse
-	22, // 89: vortex.backend.v1.HubControl.Connect:output_type -> vortex.backend.v1.BackendMessage
-	86, // [86:90] is the sub-list for method output_type
-	82, // [82:86] is the sub-list for method input_type
-	82, // [82:82] is the sub-list for extension type_name
-	82, // [82:82] is the sub-list for extension extendee
-	0,  // [0:82] is the sub-list for field type_name
+	22, // 10: vortex.backend.v1.HubUpMessage.probes:type_name -> vortex.backend.v1.ProbeSummary
+	21, // 11: vortex.backend.v1.HubUpMessage.node_upgrade:type_name -> vortex.backend.v1.NodeUpgradeForward
+	38, // 12: vortex.backend.v1.HubRegister.mode:type_name -> vortex.common.v1.HubMode
+	39, // 13: vortex.backend.v1.HubRegister.autonomy_started_at:type_name -> google.protobuf.Timestamp
+	8,  // 14: vortex.backend.v1.HubRegister.budget_versions:type_name -> vortex.backend.v1.TenantBudgetVersion
+	36, // 15: vortex.backend.v1.TenantBudgetVersion.tenant_id:type_name -> vortex.common.v1.Uuid
+	10, // 16: vortex.backend.v1.NodeStatusBatch.nodes:type_name -> vortex.backend.v1.NodeStatus
+	36, // 17: vortex.backend.v1.NodeStatus.node_id:type_name -> vortex.common.v1.Uuid
+	36, // 18: vortex.backend.v1.NodeStatus.boot_id:type_name -> vortex.common.v1.Uuid
+	39, // 19: vortex.backend.v1.NodeStatus.last_seen_at:type_name -> google.protobuf.Timestamp
+	40, // 20: vortex.backend.v1.NodeStatus.state:type_name -> vortex.runtime.v1.RuntimeState
+	36, // 21: vortex.backend.v1.NodeApplyProgress.node_id:type_name -> vortex.common.v1.Uuid
+	41, // 22: vortex.backend.v1.NodeApplyProgress.prepare:type_name -> vortex.edgehub.v1.PrepareReport
+	42, // 23: vortex.backend.v1.NodeApplyProgress.apply:type_name -> vortex.edgehub.v1.ApplyReport
+	13, // 24: vortex.backend.v1.LedgerEntries.entries:type_name -> vortex.backend.v1.LedgerEntry
+	39, // 25: vortex.backend.v1.LedgerEntry.recorded_at:type_name -> google.protobuf.Timestamp
+	14, // 26: vortex.backend.v1.LedgerEntry.grant_issued:type_name -> vortex.backend.v1.GrantIssued
+	15, // 27: vortex.backend.v1.LedgerEntry.grant_settled:type_name -> vortex.backend.v1.GrantSettled
+	16, // 28: vortex.backend.v1.LedgerEntry.node_usage:type_name -> vortex.backend.v1.NodeUsage
+	17, // 29: vortex.backend.v1.LedgerEntry.grant_transferred:type_name -> vortex.backend.v1.GrantTransferred
+	36, // 30: vortex.backend.v1.GrantIssued.grant_id:type_name -> vortex.common.v1.Uuid
+	43, // 31: vortex.backend.v1.GrantIssued.kind:type_name -> vortex.edgehub.v1.GrantKind
+	36, // 32: vortex.backend.v1.GrantIssued.tenant_id:type_name -> vortex.common.v1.Uuid
+	36, // 33: vortex.backend.v1.GrantIssued.node_id:type_name -> vortex.common.v1.Uuid
+	36, // 34: vortex.backend.v1.GrantIssued.boot_id:type_name -> vortex.common.v1.Uuid
+	36, // 35: vortex.backend.v1.GrantIssued.rule_id:type_name -> vortex.common.v1.Uuid
+	36, // 36: vortex.backend.v1.GrantSettled.grant_id:type_name -> vortex.common.v1.Uuid
+	36, // 37: vortex.backend.v1.GrantSettled.tenant_id:type_name -> vortex.common.v1.Uuid
+	36, // 38: vortex.backend.v1.NodeUsage.node_id:type_name -> vortex.common.v1.Uuid
+	44, // 39: vortex.backend.v1.NodeUsage.batch:type_name -> vortex.edgehub.v1.UsageBatch
+	36, // 40: vortex.backend.v1.GrantTransferred.node_id:type_name -> vortex.common.v1.Uuid
+	36, // 41: vortex.backend.v1.GrantTransferred.old_boot_id:type_name -> vortex.common.v1.Uuid
+	36, // 42: vortex.backend.v1.GrantTransferred.new_boot_id:type_name -> vortex.common.v1.Uuid
+	36, // 43: vortex.backend.v1.GrantTransferred.revoked_grant_ids:type_name -> vortex.common.v1.Uuid
+	36, // 44: vortex.backend.v1.GrantTransferred.new_grant_ids:type_name -> vortex.common.v1.Uuid
+	36, // 45: vortex.backend.v1.BudgetRequest.tenant_id:type_name -> vortex.common.v1.Uuid
+	36, // 46: vortex.backend.v1.ForeignGrants.node_id:type_name -> vortex.common.v1.Uuid
+	45, // 47: vortex.backend.v1.ForeignGrants.grants:type_name -> vortex.edgehub.v1.HeldGrant
+	36, // 48: vortex.backend.v1.NodeEventForward.node_id:type_name -> vortex.common.v1.Uuid
+	46, // 49: vortex.backend.v1.NodeEventForward.event:type_name -> vortex.runtime.v1.EngineEvent
+	36, // 50: vortex.backend.v1.NodeUpgradeForward.node_id:type_name -> vortex.common.v1.Uuid
+	47, // 51: vortex.backend.v1.NodeUpgradeForward.status:type_name -> vortex.edgehub.v1.UpgradeStatus
+	36, // 52: vortex.backend.v1.ProbeSummary.node_id:type_name -> vortex.common.v1.Uuid
+	48, // 53: vortex.backend.v1.ProbeSummary.report:type_name -> vortex.edgehub.v1.ProbeReport
+	24, // 54: vortex.backend.v1.BackendMessage.desired:type_name -> vortex.backend.v1.NodeDesiredConfig
+	25, // 55: vortex.backend.v1.BackendMessage.command:type_name -> vortex.backend.v1.NodeApplyCommand
+	26, // 56: vortex.backend.v1.BackendMessage.restrictions:type_name -> vortex.backend.v1.RestrictionSnapshot
+	49, // 57: vortex.backend.v1.BackendMessage.revocations:type_name -> vortex.runtime.v1.RevocationList
+	28, // 58: vortex.backend.v1.BackendMessage.budget:type_name -> vortex.backend.v1.BudgetUpdate
+	29, // 59: vortex.backend.v1.BackendMessage.leases:type_name -> vortex.backend.v1.ShareLeaseUpdate
+	30, // 60: vortex.backend.v1.BackendMessage.ledger_ack:type_name -> vortex.backend.v1.LedgerAck
+	31, // 61: vortex.backend.v1.BackendMessage.billing_versions:type_name -> vortex.backend.v1.BillingVersionSync
+	34, // 62: vortex.backend.v1.BackendMessage.reconcile:type_name -> vortex.backend.v1.ReconcileDirective
+	35, // 63: vortex.backend.v1.BackendMessage.node_operation:type_name -> vortex.backend.v1.NodeOperation
+	36, // 64: vortex.backend.v1.NodeDesiredConfig.node_id:type_name -> vortex.common.v1.Uuid
+	50, // 65: vortex.backend.v1.NodeDesiredConfig.config:type_name -> vortex.runtime.v1.RuntimeConfig
+	36, // 66: vortex.backend.v1.NodeApplyCommand.node_id:type_name -> vortex.common.v1.Uuid
+	51, // 67: vortex.backend.v1.NodeApplyCommand.command:type_name -> vortex.edgehub.v1.ApplyCommand
+	27, // 68: vortex.backend.v1.RestrictionSnapshot.tenants:type_name -> vortex.backend.v1.TenantRestriction
+	36, // 69: vortex.backend.v1.TenantRestriction.tenant_id:type_name -> vortex.common.v1.Uuid
+	0,  // 70: vortex.backend.v1.TenantRestriction.account_status:type_name -> vortex.backend.v1.AccountStatus
+	39, // 71: vortex.backend.v1.TenantRestriction.plan_expires_at:type_name -> google.protobuf.Timestamp
+	36, // 72: vortex.backend.v1.TenantRestriction.stopped_rule_ids:type_name -> vortex.common.v1.Uuid
+	36, // 73: vortex.backend.v1.BudgetUpdate.tenant_id:type_name -> vortex.common.v1.Uuid
+	36, // 74: vortex.backend.v1.ShareLeaseUpdate.node_id:type_name -> vortex.common.v1.Uuid
+	52, // 75: vortex.backend.v1.ShareLeaseUpdate.leases:type_name -> vortex.runtime.v1.ShareLease
+	32, // 76: vortex.backend.v1.BillingVersionSync.versions:type_name -> vortex.backend.v1.BillingVersion
+	39, // 77: vortex.backend.v1.BillingVersion.effective_at:type_name -> google.protobuf.Timestamp
+	33, // 78: vortex.backend.v1.BillingVersion.multipliers:type_name -> vortex.backend.v1.GroupMultiplier
+	36, // 79: vortex.backend.v1.GroupMultiplier.node_group_id:type_name -> vortex.common.v1.Uuid
+	1,  // 80: vortex.backend.v1.ReconcileDirective.phase:type_name -> vortex.backend.v1.ReconcilePhase
+	36, // 81: vortex.backend.v1.ReconcileDirective.budget_revoked_tenant_ids:type_name -> vortex.common.v1.Uuid
+	36, // 82: vortex.backend.v1.NodeOperation.node_id:type_name -> vortex.common.v1.Uuid
+	53, // 83: vortex.backend.v1.NodeOperation.drain:type_name -> vortex.edgehub.v1.DrainCommand
+	54, // 84: vortex.backend.v1.NodeOperation.upgrade:type_name -> vortex.edgehub.v1.UpgradeCommand
+	2,  // 85: vortex.backend.v1.HubControl.EnrollHub:input_type -> vortex.backend.v1.EnrollHubRequest
+	4,  // 86: vortex.backend.v1.HubControl.EnrollNode:input_type -> vortex.backend.v1.EnrollNodeRequest
+	5,  // 87: vortex.backend.v1.HubControl.RenewNodeCert:input_type -> vortex.backend.v1.RenewNodeCertRequest
+	6,  // 88: vortex.backend.v1.HubControl.Connect:input_type -> vortex.backend.v1.HubUpMessage
+	3,  // 89: vortex.backend.v1.HubControl.EnrollHub:output_type -> vortex.backend.v1.EnrollHubResponse
+	55, // 90: vortex.backend.v1.HubControl.EnrollNode:output_type -> vortex.edgehub.v1.EnrollResponse
+	56, // 91: vortex.backend.v1.HubControl.RenewNodeCert:output_type -> vortex.edgehub.v1.RenewCertResponse
+	23, // 92: vortex.backend.v1.HubControl.Connect:output_type -> vortex.backend.v1.BackendMessage
+	89, // [89:93] is the sub-list for method output_type
+	85, // [85:89] is the sub-list for method input_type
+	85, // [85:85] is the sub-list for extension type_name
+	85, // [85:85] is the sub-list for extension extendee
+	0,  // [0:85] is the sub-list for field type_name
 }
 
 func init() { file_vortex_backend_v1_hub_control_proto_init() }
@@ -2901,6 +2979,7 @@ func file_vortex_backend_v1_hub_control_proto_init() {
 		(*HubUpMessage_ForeignGrants)(nil),
 		(*HubUpMessage_NodeEvent)(nil),
 		(*HubUpMessage_Probes)(nil),
+		(*HubUpMessage_NodeUpgrade)(nil),
 	}
 	file_vortex_backend_v1_hub_control_proto_msgTypes[9].OneofWrappers = []any{
 		(*NodeApplyProgress_Prepare)(nil),
@@ -2912,7 +2991,7 @@ func file_vortex_backend_v1_hub_control_proto_init() {
 		(*LedgerEntry_NodeUsage)(nil),
 		(*LedgerEntry_GrantTransferred)(nil),
 	}
-	file_vortex_backend_v1_hub_control_proto_msgTypes[20].OneofWrappers = []any{
+	file_vortex_backend_v1_hub_control_proto_msgTypes[21].OneofWrappers = []any{
 		(*BackendMessage_Desired)(nil),
 		(*BackendMessage_Command)(nil),
 		(*BackendMessage_Restrictions)(nil),
@@ -2924,7 +3003,7 @@ func file_vortex_backend_v1_hub_control_proto_init() {
 		(*BackendMessage_Reconcile)(nil),
 		(*BackendMessage_NodeOperation)(nil),
 	}
-	file_vortex_backend_v1_hub_control_proto_msgTypes[32].OneofWrappers = []any{
+	file_vortex_backend_v1_hub_control_proto_msgTypes[33].OneofWrappers = []any{
 		(*NodeOperation_Drain)(nil),
 		(*NodeOperation_Upgrade)(nil),
 	}
@@ -2934,7 +3013,7 @@ func file_vortex_backend_v1_hub_control_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_vortex_backend_v1_hub_control_proto_rawDesc), len(file_vortex_backend_v1_hub_control_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   33,
+			NumMessages:   34,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
