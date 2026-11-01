@@ -53,7 +53,8 @@ func buildNode(t *testing.T, out, version string, ldflags ...string) []byte {
 	return b
 }
 
-// service 模拟 systemd（Restart=always）：程序退出后 100 毫秒以同样的参数重新启动安装路径上的程序。
+// service 模拟 systemd（Restart=always）：程序退出后 100 毫秒以同样的参数重新启动安装路径上的程序；
+// 每次启动前像 deploy/node/vortex-node.service 的 ExecStartPre 一样执行 `<程序>.prev upgrade-guard`（失败忽略）。
 type service struct {
 	mu    sync.Mutex
 	exits []int
@@ -61,10 +62,12 @@ type service struct {
 	cmd   *exec.Cmd
 	stop  bool
 	done  chan struct{}
+
+	guardArgs []string
 }
 
-func startService(t *testing.T, bin string, args ...string) *service {
-	s := &service{done: make(chan struct{})}
+func startService(t *testing.T, bin string, guard []string, args ...string) *service {
+	s := &service{done: make(chan struct{}), guardArgs: guard}
 	go func() {
 		defer close(s.done)
 		for {
@@ -72,6 +75,13 @@ func startService(t *testing.T, bin string, args ...string) *service {
 			if s.stop {
 				s.mu.Unlock()
 				return
+			}
+			if _, err := os.Stat(bin + ".prev"); err == nil && len(s.guardArgs) > 0 {
+				g := exec.Command(bin+".prev", s.guardArgs...)
+				g.Stderr = &lockedWriter{mu: &s.mu, w: &s.logs}
+				s.mu.Unlock()
+				_ = g.Run()
+				s.mu.Lock()
 			}
 			cmd := exec.Command(bin, args...)
 			cmd.Stderr = &lockedWriter{mu: &s.mu, w: &s.logs}
@@ -157,6 +167,8 @@ func onlineVersion(be *protoBackend) string {
 // 升级与回退（AGT-008、AGT-T13）：真实的 vortex-node 进程在模拟 systemd 下运行，经 edge-hub 接入模拟后端。
 // ① 后端下发 2.0.0：下载、校验签名与摘要、执行新程序读取兼容信息、排空、保留 .prev、原子替换、以退出码 75
 // 请求重启；新版本连接 Edge Hub 并恢复配置后报告健康，转发恢复。② 下发 3.0.0（每次启动都在启动检查后崩溃）：
+// 连续 3 次启动未健康，第 4 次启动前由上一版本的 upgrade-guard（ExecStartPre）回退到 2.0.0。④ 下发 4.0.0（一启动就崩溃，
+// 走不到自己的启动计数）：同样由 Guard 回退。
 // 连续 3 次启动未健康，第 4 次启动时回退到 2.0.0 并重启，旧版本报告已回退。③ 签名错误的指令被拒绝，程序不变。
 func TestUpgradeAndRollback(t *testing.T) {
 	if testing.Short() {
@@ -165,7 +177,8 @@ func TestUpgradeAndRollback(t *testing.T) {
 	dir := t.TempDir()
 	v1 := buildNode(t, filepath.Join(dir, "build", "v1"), "1.0.0")
 	v2 := buildNode(t, filepath.Join(dir, "build", "v2"), "2.0.0")
-	v3 := buildNode(t, filepath.Join(dir, "build", "v3"), "3.0.0", "-X vortex/node/app.faultCrashAfterUpgradeCheck=1")
+	v3 := buildNode(t, filepath.Join(dir, "build", "v3"), "3.0.0", "-X vortex/node/app.faultCrash=after-upgrade-check")
+	v4 := buildNode(t, filepath.Join(dir, "build", "v4"), "4.0.0", "-X vortex/node/app.faultCrash=at-start")
 
 	// 发布：Ed25519 签名，公钥随安装包分发
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
@@ -175,7 +188,7 @@ func TestUpgradeAndRollback(t *testing.T) {
 	if k, err := nodeapp.LoadReleaseKey(keyFile); err != nil || !k.Equal(pub) {
 		t.Fatalf("release key %v", err)
 	}
-	pkgs := map[string][]byte{"/2.0.0": v2, "/3.0.0": v3}
+	pkgs := map[string][]byte{"/2.0.0": v2, "/3.0.0": v3, "/4.0.0": v4}
 	rel := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, ok := pkgs[r.URL.Path]
 		if !ok {
@@ -228,7 +241,7 @@ func TestUpgradeAndRollback(t *testing.T) {
 	cb, _ := json.Marshal(nodeCfg)
 	cfgPath := filepath.Join(dir, "node.json")
 	_ = os.WriteFile(cfgPath, cb, 0o600)
-	svc := startService(t, bin, "run", "-config", cfgPath)
+	svc := startService(t, bin, []string{"upgrade-guard", "-config", cfgPath}, "run", "-config", cfgPath)
 
 	long := func(what string, f func() bool) {
 		t.Helper()
@@ -284,15 +297,23 @@ func TestUpgradeAndRollback(t *testing.T) {
 	if b, _ := os.ReadFile(bin); !bytes.Equal(b, v2) {
 		t.Fatal("binary not restored")
 	}
-	// 2.0.0 → 3.0.0（75）→ 崩溃 ×3 → 第 4 次启动回退（75）
-	ex := svc.exitCodes()[1:]
-	crashes := 0
-	for _, c := range ex[1 : len(ex)-1] {
-		if c != 75 {
-			crashes++
+	// 2.0.0 → 3.0.0（75）→ 崩溃 ×3 → 第 4 次启动前 Guard 回退，2.0.0 直接启动
+	checkCrashes := func(ex []int) {
+		t.Helper()
+		if len(ex) != 4 || ex[0] != 75 || ex[1] == 75 || ex[2] == 75 || ex[3] == 75 || ex[1] == 0 {
+			t.Fatalf("exit codes %v, want [75 crash crash crash]", ex)
 		}
 	}
-	if len(ex) != 5 || ex[0] != 75 || crashes != 3 || ex[len(ex)-1] != 75 {
-		t.Fatalf("exit codes after 2.0.0 %v", ex)
+	checkCrashes(svc.exitCodes()[1:])
+
+	// ④ 升级到一启动就崩溃的 4.0.0（走不到新版本自己的启动计数）：上一版本的 Guard 计数并回退
+	be.push(command("4.0.0", v4, priv))
+	long("4.0.0 rolled back by the guard", func() bool {
+		return be.upgraded("4.0.0", edgehubv1.UpgradePhase_UPGRADE_PHASE_ROLLED_BACK, "3 starts") && onlineVersion(be) == "2.0.0"
+	})
+	long("forwarding after the second rollback", func() bool { return ok(addr) })
+	if b, _ := os.ReadFile(bin); !bytes.Equal(b, v2) {
+		t.Fatal("binary not restored")
 	}
+	checkCrashes(svc.exitCodes()[5:])
 }

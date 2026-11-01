@@ -104,7 +104,8 @@ type State struct {
 	Phase        Phase     `json:"phase"`
 	Irreversible bool      `json:"irreversible"`
 	SwitchedAt   time.Time `json:"switched_at"`
-	Starts       int       `json:"starts"` // 新版本已启动的次数
+	Starts       int       `json:"starts"`            // 新版本已启动的次数
+	Counted      bool      `json:"counted,omitempty"` // 本次启动已由 Guard 计数（Begin 不再计数）
 	Error        string    `json:"error,omitempty"`
 }
 
@@ -386,7 +387,11 @@ func (m *Manager) Begin() bool {
 	}
 	switch {
 	case st.Phase == PhaseSwitched && m.Self.Version == st.Target:
-		st.Starts++
+		if st.Counted {
+			st.Counted = false
+		} else {
+			st.Starts++
+		}
 		if err := m.saveState(st); err != nil {
 			m.report(st.Target, PhaseFailed, err)
 			return false
@@ -434,6 +439,31 @@ func (m *Manager) Await(ctx context.Context) bool {
 		return false // 进程正在退出：下次启动继续计数
 	}
 	return m.fail(st, fmt.Errorf("new version not healthy within %v", m.HealthTimeout))
+}
+
+// Guard 由上一版本的程序（.prev）在每次启动新版本之前执行（systemd ExecStartPre，见 deploy/node）：
+// 新版本处于切换后的检查期时，由它计数启动次数，超过上限即恢复 .prev。这样即使新版本在走到 Begin 之前就崩溃
+// （例如运行时初始化阶段），也能回退。不可逆迁移不回退。返回是否已回退。没有升级在进行时什么也不做。
+func (m *Manager) Guard() (bool, error) {
+	m.defaults()
+	st, err := m.LoadState()
+	if err != nil || st == nil || st.Phase != PhaseSwitched || st.From != m.Self.Version {
+		return false, err
+	}
+	st.Starts++
+	st.Counted = true
+	if st.Starts <= m.MaxStarts || st.Irreversible {
+		return false, m.saveState(st)
+	}
+	st.Phase, st.Counted = PhaseRolledBack, false
+	st.Error = fmt.Sprintf("new version did not become healthy in %d starts", m.MaxStarts)
+	if err := m.saveState(st); err != nil {
+		return false, err
+	}
+	if err := copyAtomic(m.Binary+".prev", m.Binary); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (m *Manager) waitHealthy(ctx context.Context) bool {

@@ -394,3 +394,72 @@ func TestSwitchFailureRestarts(t *testing.T) {
 		t.Fatal("state kept after a failed switch")
 	}
 }
+
+// 上一版本的 Guard（ExecStartPre）计数每次启动：新版本在 Begin 之前就崩溃，也会在超过上限时被回退；
+// Guard 已计数的启动 Begin 不再重复计数。
+func TestGuardRollsBackEarlyCrashes(t *testing.T) {
+	f := newFixture(t)
+	_ = f.manager("1.0.0").Run(context.Background(), f.command("2.0.0"))
+	guard := f.manager("1.0.0") // .prev
+	for i := 1; i <= 3; i++ {
+		if rolled, err := guard.Guard(); rolled || err != nil {
+			t.Fatalf("start %d: rolled %v err %v", i, rolled, err)
+		}
+		// 新版本崩溃，从未执行 Begin
+	}
+	rolled, err := guard.Guard()
+	if !rolled || err != nil || f.installed() != "bin:1.0.0" {
+		t.Fatalf("rolled %v err %v installed %q", rolled, err, f.installed())
+	}
+	f.phases()
+	f.manager("1.0.0").Resume(context.Background()) // ExecStart 运行恢复后的旧版本
+	if s := f.last(); s.Phase != PhaseRolledBack || !strings.Contains(s.Error, "3 starts") {
+		t.Fatalf("status %+v", s)
+	}
+	if again, _ := guard.Guard(); again {
+		t.Fatal("guard acted without an upgrade in progress")
+	}
+}
+
+func TestGuardAndBeginCountOncePerStart(t *testing.T) {
+	f := newFixture(t)
+	_ = f.manager("1.0.0").Run(context.Background(), f.command("2.0.0"))
+	guard := f.manager("1.0.0")
+	for i := 1; i <= 3; i++ {
+		_, _ = guard.Guard()
+		m2 := f.manager("2.0.0")
+		if m2.Begin() {
+			t.Fatalf("start %d: rolled back by Begin", i)
+		}
+		st, _ := m2.LoadState()
+		if st.Starts != i || st.Counted {
+			t.Fatalf("start %d: state %+v", i, st)
+		}
+	}
+	// 没有 Guard 的启动（例如上一版本没有 Guard 子命令）由 Begin 计数
+	if !f.manager("2.0.0").Begin() || f.installed() != "bin:1.0.0" {
+		t.Fatal("fourth start not rolled back by Begin")
+	}
+}
+
+func TestGuardIrreversibleAndForeignState(t *testing.T) {
+	f := newFixture(t)
+	_ = f.manager("1.0.0").Run(context.Background(), f.commandOpt("2.0.0", true))
+	guard := f.manager("1.0.0")
+	for i := 0; i < 5; i++ {
+		if rolled, _ := guard.Guard(); rolled {
+			t.Fatal("irreversible migration rolled back by the guard")
+		}
+	}
+	f2 := newFixture(t)
+	_ = f2.manager("1.0.0").Run(context.Background(), f2.command("2.0.0"))
+	stranger := f2.manager("2.0.0")
+	for i := 0; i < 5; i++ {
+		if rolled, _ := stranger.Guard(); rolled {
+			t.Fatal("guard of another version acted")
+		}
+	}
+	if st, _ := stranger.LoadState(); st.Starts != 0 {
+		t.Fatalf("foreign guard counted: %+v", st)
+	}
+}

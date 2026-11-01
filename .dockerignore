@@ -1,0 +1,6 @@
+# 镜像构建只需要 Go 模块源码（deploy/*/Dockerfile）
+*
+!engine
+!proto/gen/go
+!node
+!edge-hub

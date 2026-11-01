@@ -61,6 +61,8 @@ type Config struct {
 	ReleaseKeyFile string `json:"release_key_file"`
 	// Binary 是 systemd 启动的程序路径，升级时原子替换它；为空时取当前程序（os.Executable）。
 	Binary string `json:"binary"`
+	// DisableSelfUpgrade：容器部署时由镜像升级，拒绝升级指令（报告失败）。
+	DisableSelfUpgrade bool `json:"disable_self_upgrade"`
 
 	renewEvery time.Duration // 证书检查周期（测试用；默认 1 小时）
 }
@@ -91,6 +93,9 @@ func FormatUUID(u types.UUID) string {
 	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:]
 }
 
+// EnvDisableSelfUpgrade 为 "1" 时禁用自升级（容器镜像中设置，deploy/node/Dockerfile）。
+const EnvDisableSelfUpgrade = "VORTEX_DISABLE_SELF_UPGRADE"
+
 func LoadConfig(path string) (*Config, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -111,6 +116,9 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if c.DiskHighBytes == 0 {
 		c.DiskHighBytes = 2 << 30
+	}
+	if os.Getenv(EnvDisableSelfUpgrade) == "1" { // 容器镜像设置：由镜像升级
+		c.DisableSelfUpgrade = true
 	}
 	return &c, nil
 }
@@ -165,9 +173,8 @@ func tunnelOptions(cfg *Config, node, bootID types.UUID, dialer control.Dialer, 
 	return t, nil
 }
 
-// faultCrashAfterUpgradeCheck 非空时，进程在升级启动检查之后崩溃（故障注入，只用于测试构建：
-// -ldflags "-X vortex/node/app.faultCrashAfterUpgradeCheck=1"），用于验证启动后崩溃的版本被回退。
-var faultCrashAfterUpgradeCheck string
+// faultCrash 是故障注入，只用于测试构建（-ldflags "-X vortex/node/app.faultCrash=…"），验证启动后崩溃的版本被回退。
+var faultCrash string // "at-start"：Run 一开始即崩溃；"after-upgrade-check"：升级启动检查之后崩溃
 
 // ErrRestart：Run 因升级或回退而结束，进程应退出并由 systemd 重新启动（AGT-008）。
 var ErrRestart = errors.New("restart requested (upgrade)")
@@ -205,6 +212,9 @@ func healthy(s agent.Status) bool {
 
 // Run 组装并运行节点，直至 ctx 结束；因升级或回退需要重启时返回 ErrRestart。dialer 为 nil 时不建立控制连接。
 func Run(parent context.Context, cfg *Config, dialer control.Dialer, log *slog.Logger) error {
+	if faultCrash == "at-start" {
+		panic("fault injection: crash at start") // 仅测试构建
+	}
 	ctx, stopRun := context.WithCancelCause(parent)
 	defer stopRun(nil)
 	node, err := ParseUUID(cfg.NodeID)
@@ -230,7 +240,7 @@ func Run(parent context.Context, cfg *Config, dialer control.Dialer, log *slog.L
 		log.Warn("upgraded version failed to start repeatedly: rolled back, restarting")
 		return ErrRestart
 	}
-	if faultCrashAfterUpgradeCheck != "" {
+	if faultCrash == "after-upgrade-check" {
 		panic("fault injection: crash after the upgrade start check") // 仅测试构建（-ldflags -X）
 	}
 	// 本地存储：一个 SQLite（WAL）数据库，启动标识、计量、最后生效配置各一张表（AGT-003）
@@ -281,6 +291,10 @@ func Run(parent context.Context, cfg *Config, dialer control.Dialer, log *slog.L
 		OnApplied: func(c *types.RuntimeConfig) { prober.SetSubjects(probe.Subjects(c)) },
 		OnUpgrade: func(c upgrade.Command) {
 			log.Info("upgrade command", "version", c.Version, "irreversible", c.Irreversible)
+			if st := refuseUpgrade(cfg, c); st != nil {
+				go a.ReportUpgrade(*st)
+				return
+			}
 			if err := up.Start(ctx, c); err != nil {
 				log.Warn("upgrade ignored", "version", c.Version, "err", err)
 			}
@@ -371,16 +385,47 @@ func Run(parent context.Context, cfg *Config, dialer control.Dialer, log *slog.L
 	return nil
 }
 
+// refuseUpgrade：禁用自升级（容器部署）时返回要上报的失败。
+func refuseUpgrade(cfg *Config, c upgrade.Command) *upgrade.Status {
+	if !cfg.DisableSelfUpgrade {
+		return nil
+	}
+	return &upgrade.Status{Target: c.Version, Phase: upgrade.PhaseFailed, Error: "self-upgrade disabled (container deployment): update the image"}
+}
+
+// binaryPath 是安装的程序路径：配置的 binary，否则为当前程序（作为 .prev 执行 Guard 时去掉后缀）。
+func binaryPath(cfg *Config) (string, error) {
+	if cfg.Binary != "" {
+		return cfg.Binary, nil
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	if exe, err = filepath.EvalSymlinks(exe); err != nil {
+		return "", err
+	}
+	return installedPath(exe), nil
+}
+
+// installedPath：作为 .prev 运行时，安装路径是去掉后缀的那一个。
+func installedPath(exe string) string { return strings.TrimSuffix(exe, ".prev") }
+
+// UpgradeGuard 是 `vortex-node upgrade-guard`：由上一版本的程序（.prev）在每次启动之前执行（systemd ExecStartPre），
+// 计数升级后新版本的启动次数，超过上限时恢复上一版本（AGT-008）。返回是否已回退。
+func UpgradeGuard(cfg *Config) (bool, error) {
+	bin, err := binaryPath(cfg)
+	if err != nil {
+		return false, err
+	}
+	m := &upgrade.Manager{Self: Manifest(), Binary: bin, Dir: filepath.Join(cfg.DataDir, "upgrade")}
+	return m.Guard()
+}
+
 func upgradeManager(cfg *Config, agentOf func() *agent.Agent, disk *report.DiskGuard, log *slog.Logger, restart func()) (*upgrade.Manager, error) {
-	bin := cfg.Binary
-	if bin == "" {
-		exe, err := os.Executable()
-		if err != nil {
-			return nil, err
-		}
-		if bin, err = filepath.EvalSymlinks(exe); err != nil {
-			return nil, err
-		}
+	bin, err := binaryPath(cfg)
+	if err != nil {
+		return nil, err
 	}
 	m := &upgrade.Manager{Self: Manifest(), Binary: bin, Dir: filepath.Join(cfg.DataDir, "upgrade"),
 		Drain:   func(ctx context.Context) error { return agentOf().Drain(ctx, nil) },
@@ -442,6 +487,10 @@ type EnrollParams struct {
 	ConfigPath string // 写入的节点配置文件
 	Socket     string
 	Caps       *edgehubv1.NodeCapabilities
+	// 写入节点配置的部署项（安装脚本填写）
+	LinkListen     string
+	ReleaseKeyFile string
+	Binary         string
 }
 
 // Enroll 本地生成私钥与 CSR，用令牌经 Edge Hub 换取节点证书，校验后写入数据目录（私钥 0600），并写节点配置。
@@ -474,6 +523,7 @@ func Enroll(ctx context.Context, p EnrollParams) (*Config, error) {
 		return nil, err
 	}
 	cfg := &Config{NodeID: FormatUUID(id), DataDir: p.DataDir, Socket: p.Socket,
+		LinkListen: p.LinkListen, ReleaseKeyFile: p.ReleaseKeyFile, Binary: p.Binary,
 		CertFile: filepath.Join(p.DataDir, "node.crt"), KeyFile: filepath.Join(p.DataDir, "node.key"), CAFile: filepath.Join(p.DataDir, "ca.crt")}
 	_, caPEM, err := certs.PoolFromDER(resp.GetCaBundleDer())
 	if err != nil {

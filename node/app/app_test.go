@@ -2,6 +2,7 @@ package app
 
 import (
 	"crypto/tls"
+	"os"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"vortex/node/agent/certs"
 	"vortex/node/agent/grpcconn"
 	"vortex/node/agent/probe"
+	"vortex/node/agent/upgrade"
 )
 
 var self = types.UUID{0x0d}
@@ -69,5 +71,40 @@ func TestStatusViewClockSkew(t *testing.T) {
 	v := StatusView(agent.Status{ClockSkew: &agent.ClockSkew{Offset: -7500 * time.Millisecond, Alert: true}}, nil)
 	if v.ClockSkewMs == nil || *v.ClockSkewMs != -7500 || !v.ClockSkewAlert {
 		t.Fatalf("status %+v", v)
+	}
+}
+
+func TestDisableSelfUpgradeFromEnvironment(t *testing.T) {
+	path := t.TempDir() + "/node.json"
+	_ = os.WriteFile(path, []byte(`{"node_id":"0d000000-0000-4000-8000-000000000001"}`), 0o600)
+	if c, err := LoadConfig(path); err != nil || c.DisableSelfUpgrade {
+		t.Fatalf("default %+v %v", c, err)
+	}
+	t.Setenv(EnvDisableSelfUpgrade, "1")
+	if c, _ := LoadConfig(path); !c.DisableSelfUpgrade {
+		t.Fatal("environment not honoured")
+	}
+}
+
+func TestRefuseUpgradeWhenDisabled(t *testing.T) {
+	if refuseUpgrade(&Config{}, upgrade.Command{Version: "2"}) != nil {
+		t.Fatal("refused while enabled")
+	}
+	st := refuseUpgrade(&Config{DisableSelfUpgrade: true}, upgrade.Command{Version: "2"})
+	if st == nil || st.Phase != upgrade.PhaseFailed || st.Target != "2" || st.Error == "" {
+		t.Fatalf("%+v", st)
+	}
+}
+
+// 作为 .prev 执行 Guard 时，程序路径去掉 .prev 后缀；配置了 binary 时用配置。
+func TestBinaryPath(t *testing.T) {
+	if p, _ := binaryPath(&Config{Binary: "/opt/x"}); p != "/opt/x" {
+		t.Fatal(p)
+	}
+	if p, err := binaryPath(&Config{}); err != nil || p == "" {
+		t.Fatal(p, err)
+	}
+	if installedPath("/opt/vortex/node/vortex-node.prev") != "/opt/vortex/node/vortex-node" || installedPath("/a/vortex-node") != "/a/vortex-node" {
+		t.Fatal("installed path")
 	}
 }

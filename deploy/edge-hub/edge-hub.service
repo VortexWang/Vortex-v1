@@ -1,0 +1,45 @@
+# VORTEX Edge Hub（区域边缘控制器；HUB-T17）。由 deploy/edge-hub/install.sh 安装到 /etc/systemd/system。
+[Unit]
+Description=VORTEX Edge Hub
+Documentation=https://github.com/VortexWang/Vortex-v1/tree/main/deploy
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=vortex-hub
+Group=vortex-hub
+ExecStart=/opt/vortex/edge-hub/edge-hub run -config /etc/vortex/edge-hub.json
+Restart=always
+RestartSec=1
+TimeoutStopSec=30
+LimitNOFILE=1048576
+
+# 只需监听非特权端口（默认 7400）
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+# 账本（SQLite）、实例证书与私钥
+StateDirectory=vortex-edge-hub
+StateDirectoryMode=0700
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

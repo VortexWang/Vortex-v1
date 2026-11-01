@@ -188,3 +188,21 @@ jobs:
       - uses: actions/checkout@v4
       - name: 额度语义模拟（契约语义 0 违例，对照组必须出现违例）
         run: python3 test/budget-sim/budget_sim.py && python3 test/budget-sim/budget_sim.py --delta
+
+  deploy:
+    # 部署文件（AGT-T17、HUB-T17）：安装脚本、systemd 单元校验与安全评估、容器镜像可构建且可运行。
+    # 安装脚本的功能由 test/e2e TestInstallScripts 验证
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装脚本与 systemd 单元
+        run: sudo sh scripts/deploy-check.sh
+      - name: 容器镜像
+        run: |
+          docker build -f deploy/node/Dockerfile --build-arg VERSION=ci -t vortex-node:ci .
+          docker build -f deploy/edge-hub/Dockerfile --build-arg VERSION=ci -t vortex-edge-hub:ci .
+          test "$(docker run --rm vortex-node:ci version)" = ci
+          test "$(docker run --rm vortex-edge-hub:ci version)" = ci
+          docker run --rm vortex-node:ci version -json | grep -q '"store_schema":1'
+          # 镜像以非 root 运行
+          test "$(docker inspect -f '{{.Config.User}}' vortex-node:ci)" = nonroot:nonroot

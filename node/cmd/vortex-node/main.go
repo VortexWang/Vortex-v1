@@ -36,7 +36,7 @@ func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: vortex-node run|status|drain|enroll|version")
+		fmt.Fprintln(stderr, "usage: vortex-node run|status|drain|enroll|upgrade-guard|version")
 		return 2
 	}
 	switch args[0] {
@@ -115,6 +115,27 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		fmt.Fprintln(stdout, "drained")
 		return 0
+	case "upgrade-guard": // systemd ExecStartPre，由上一版本执行（AGT-008）；失败不阻止启动
+		fs := flag.NewFlagSet("upgrade-guard", flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		cfgPath := fs.String("config", "/etc/vortex/node.json", "node config file")
+		if fs.Parse(args[1:]) != nil {
+			return 2
+		}
+		cfg, err := app.LoadConfig(*cfgPath)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		rolled, err := app.UpgradeGuard(cfg)
+		if err != nil {
+			fmt.Fprintln(stderr, "upgrade-guard:", err)
+			return 1
+		}
+		if rolled {
+			fmt.Fprintln(stderr, "upgrade-guard: new version failed to start repeatedly; previous version restored")
+		}
+		return 0
 	case "enroll":
 		fs := flag.NewFlagSet("enroll", flag.ContinueOnError)
 		fs.SetOutput(stderr)
@@ -124,13 +145,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 		dataDir := fs.String("data-dir", "/var/lib/vortex", "data directory for keys and state")
 		cfgPath := fs.String("config", "/etc/vortex/node.json", "node config file to write")
 		sock := fs.String("socket", app.DefaultSocket, "local API socket")
+		link := fs.String("link-listen", "", "VLink listen address to write into the config, e.g. 0.0.0.0:7443")
+		relKey := fs.String("release-key", "", "platform release public key (PEM) to write into the config")
+		bin := fs.String("binary", "", "installed program path to write into the config (replaced on upgrade)")
 		if fs.Parse(args[1:]) != nil || *token == "" || *hub == "" {
 			fmt.Fprintln(stderr, "enroll: -token and -hub are required")
 			return 2
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		cfg, err := app.Enroll(ctx, app.EnrollParams{Token: *token, Hub: *hub, CAFile: *ca, DataDir: *dataDir, ConfigPath: *cfgPath, Socket: *sock})
+		cfg, err := app.Enroll(ctx, app.EnrollParams{Token: *token, Hub: *hub, CAFile: *ca, DataDir: *dataDir, ConfigPath: *cfgPath, Socket: *sock,
+			LinkListen: *link, ReleaseKeyFile: *relKey, Binary: *bin})
 		if err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
