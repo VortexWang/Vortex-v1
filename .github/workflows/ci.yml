@@ -28,8 +28,8 @@ jobs:
       - name: 模糊测试（帧解析与链路帧处理，ENG-T37）
         run: |
           set -o pipefail
-          go test -run XXX -fuzz FuzzFrames -fuzztime 20s ./engine/vlink 2>&1 | tail -3 | tee -a /tmp/race.log
-          go test -run XXX -fuzz FuzzLinkFrames -fuzztime 40s ./engine/vlink 2>&1 | tail -3 | tee -a /tmp/race.log
+          go test -run XXX -fuzz FuzzFrames -fuzztime 20s ./engine/vlink 2>&1 | tail -30 | tee -a /tmp/race.log
+          go test -run XXX -fuzz FuzzLinkFrames -fuzztime 40s ./engine/vlink 2>&1 | tail -30 | tee -a /tmp/race.log
       - name: 失败测试注解
         if: failure()
         run: |

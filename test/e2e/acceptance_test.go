@@ -166,7 +166,7 @@ func (a *acceptance) write() {
 	_ = os.WriteFile(filepath.Join(a.out, "m3-acceptance.md"), []byte(md.String()), 0o644)
 	if a.t.Failed() {
 		for _, sock := range []string{"run/vortex/node.sock", "run/vortex-x1/node.sock", "run/vortex-x2/node.sock"} {
-			b, _ := exec.Command(filepath.Join(a.root, "opt/vortex/node/vortex-node"), "status", "-socket", filepath.Join(a.root, sock)).CombinedOutput()
+			b, _ := exec.Command(filepath.Join("/", a.root, "opt/vortex/node/vortex-node"), "status", "-socket", filepath.Join("/", a.root, sock)).CombinedOutput()
 			a.t.Logf("status %s: %s", sock, b)
 		}
 		if a.be != nil {
@@ -362,7 +362,7 @@ func (a *acceptance) platform() {
 		})
 		a.units["edge-hub"] = sdUnit{"edge-hub.service"}
 	} else {
-		a.units["edge-hub"] = localUnit{startService(t, filepath.Join(a.root, "opt/vortex/edge-hub/edge-hub"), nil, "run", "-config", filepath.Join(a.root, "etc/vortex/edge-hub.json"))}
+		a.units["edge-hub"] = localUnit{startService(t, filepath.Join("/", a.root, "opt/vortex/edge-hub/edge-hub"), nil, "run", "-config", filepath.Join("/", a.root, "etc/vortex/edge-hub.json"))}
 	}
 }
 
@@ -417,8 +417,8 @@ func (a *acceptance) nodes() {
 		a.sh("systemctl", "start", "vortex-node.service")
 		a.units["e"] = sdUnit{"vortex-node.service"}
 	} else {
-		cfg := filepath.Join(a.root, "etc/vortex/node.json")
-		a.units["e"] = localUnit{startServicePrefix(t, []string{"ip", "netns", "exec", "vxa-e"}, filepath.Join(a.root, "opt/vortex/node/vortex-node"),
+		cfg := filepath.Join("/", a.root, "etc/vortex/node.json")
+		a.units["e"] = localUnit{startServicePrefix(t, []string{"ip", "netns", "exec", "vxa-e"}, filepath.Join("/", a.root, "opt/vortex/node/vortex-node"),
 			[]string{"upgrade-guard", "-config", cfg}, "run", "-config", cfg)}
 	}
 	a.waitFor("all three nodes online on 1.0.0", 60*time.Second, func() bool {
@@ -433,9 +433,9 @@ func (a *acceptance) nodes() {
 func (a *acceptance) startExit(name string, id types.UUID, ip, unitSrc string) {
 	t := a.t
 	r := a.root
-	bindir := filepath.Join(r, "opt/vortex/node-"+name)
-	data := filepath.Join(r, "var/lib/vortex-"+name)
-	cfgPath := filepath.Join(r, "etc/vortex/node-"+name+".json")
+	bindir := filepath.Join("/", r, "opt/vortex/node-"+name)
+	data := filepath.Join("/", r, "var/lib/vortex-"+name)
+	cfgPath := filepath.Join("/", r, "etc/vortex/node-"+name+".json")
 	_ = os.MkdirAll(bindir, 0o755)
 	_ = os.MkdirAll(data, 0o700)
 	bin := filepath.Join(bindir, "vortex-node")
@@ -443,10 +443,10 @@ func (a *acceptance) startExit(name string, id types.UUID, ip, unitSrc string) {
 		t.Fatal(err)
 	}
 	c, k := writePEM(t, data, "node", a.p.node(t, id))
-	cfg := &nodeapp.Config{NodeID: vlink.FormatUUID(id), DataDir: data, Socket: filepath.Join(r, "run/vortex-"+name, "node.sock"),
+	cfg := &nodeapp.Config{NodeID: vlink.FormatUUID(id), DataDir: data, Socket: filepath.Join("/", r, "run/vortex-"+name, "node.sock"),
 		EdgeHubs: []nodeapp.HubEntry{{HubID: vlink.FormatUUID(hubA), Address: hubIP + ":7400"}}, DiskLowBytes: 1, DiskHighBytes: 1,
-		CertFile: c, KeyFile: k, CAFile: filepath.Join(r, "etc/vortex/ca.crt"), LinkListen: fmt.Sprintf("%s:%d", ip, linkPort),
-		ReleaseKeyFile: filepath.Join(r, "etc/vortex/release.pub"), Binary: bin}
+		CertFile: c, KeyFile: k, CAFile: filepath.Join("/", r, "etc/vortex/ca.crt"), LinkListen: fmt.Sprintf("%s:%d", ip, linkPort),
+		ReleaseKeyFile: filepath.Join("/", r, "etc/vortex/release.pub"), Binary: bin}
 	b, _ := json.Marshal(cfg)
 	if err := os.WriteFile(cfgPath, b, 0o640); err != nil {
 		t.Fatal(err)
