@@ -1,0 +1,12 @@
+# proto → Go（含 gRPC）。生成结果提交在 gen/go（独立模块 vortex/proto/gen/go），CI 重新生成并比对。
+# 生成器版本见 docs/engineering-baseline.md：protoc-gen-go v1.36.6、protoc-gen-go-grpc v1.5.1。
+version: v2
+inputs:
+  - directory: .
+plugins:
+  - local: protoc-gen-go
+    out: gen/go
+    opt: paths=source_relative
+  - local: protoc-gen-go-grpc
+    out: gen/go
+    opt: paths=source_relative

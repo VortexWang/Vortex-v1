@@ -1,7 +1,6 @@
 package session
 
 import (
-	"encoding/json"
 	"sort"
 	"time"
 
@@ -19,8 +18,8 @@ type NodeState struct {
 	AppliedConfigVersion uint64
 	AgentVersion         string
 	LastSeen             time.Time
-	State                json.RawMessage // 最近一次 StateReport
-	Probes               json.RawMessage // 最近一次 ProbeReport
+	State                []byte // 最近一次 StateReport
+	Probes               []byte // 最近一次 ProbeReport
 }
 
 type nodeState struct {

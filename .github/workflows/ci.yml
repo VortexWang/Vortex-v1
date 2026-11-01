@@ -41,7 +41,7 @@ jobs:
       - name: license check (ENGR-002)
         run: |
           go install github.com/google/go-licenses@v1.6.0
-          go-licenses check ./engine/... ./edge-hub/... ./node/... --disallowed_types=forbidden,restricted
+          go-licenses check ./engine/... ./edge-hub/... ./node/... ./proto/gen/go/... --disallowed_types=forbidden,restricted
 
   netns-bench:
     # ENGR-005：网络命名空间拓扑的吞吐冒烟（短时长，按 NFR-001 / NFR-005 阈值判定）。
@@ -122,11 +122,12 @@ jobs:
           go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
           go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.4.1
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-      - name: proto → Go 并编译
+      - name: proto → Go：重新生成并与提交的 proto/gen/go 比对，再编译
         run: |
-          mkdir -p /tmp/gen
-          cd proto && buf generate --template '{"version":"v2","plugins":[{"local":"protoc-gen-go","out":"/tmp/gen","opt":"paths=source_relative"},{"local":"protoc-gen-go-grpc","out":"/tmp/gen","opt":"paths=source_relative"}]}'
-          cd /tmp/gen && go mod init vortex/proto/gen/go && go mod tidy && go vet ./... && go build ./...
+          cd proto && rm -rf gen/go/vortex && buf generate --exclude-path gen
+          git diff --exit-code -- gen/go || { echo "::error::proto/gen/go 与契约不一致：在 proto 目录运行 buf generate 后提交"; exit 1; }
+          test -z "$(git status --porcelain -- gen/go)" || { git status --porcelain -- gen/go; echo "::error::proto/gen/go 有未提交的生成文件"; exit 1; }
+          cd gen/go && go vet ./... && go build ./...
       - name: OpenAPI → Gin 服务端接口并编译
         run: |
           mkdir -p /tmp/oapi && cd /tmp/oapi && go mod init vortex/api/gen

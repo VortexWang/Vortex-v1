@@ -118,11 +118,11 @@ type nodeOpts struct {
 	applied func(*types.RuntimeConfig)
 }
 
-func startNode(t *testing.T, l logs, d Dialer, hubs []control.Endpoint) *nodeProc {
+func startNode(t *testing.T, l logs, d control.Dialer, hubs []control.Endpoint) *nodeProc {
 	return startNodeOpt(t, l, d, hubs, nodeOpts{})
 }
 
-func startNodeOpt(t *testing.T, l logs, d Dialer, hubs []control.Endpoint, o nodeOpts) *nodeProc {
+func startNodeOpt(t *testing.T, l logs, d control.Dialer, hubs []control.Endpoint, o nodeOpts) *nodeProc {
 	rt := engine.New(engine.Options{Healthy: o.healthy})
 	a, err := agent.New(context.Background(), agent.Options{Node: nodeID, AgentVersion: "e2e", Engine: rt,
 		BootLog: l.boot, UsageLog: l.usage, ConfigLog: l.config, RenewEvery: o.renew, OnApplied: o.applied})

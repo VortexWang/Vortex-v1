@@ -4,5 +4,6 @@ use (
 	./engine
 	./edge-hub
 	./node
+	./proto/gen/go
 	./test/e2e
 )

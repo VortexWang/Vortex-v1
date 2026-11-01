@@ -90,7 +90,7 @@ type Down interface{ down() }
 type Desired struct {
 	Node    model.UUID
 	Version uint64
-	Config  json.RawMessage
+	Config  []byte
 }
 
 type Command struct {
@@ -106,7 +106,7 @@ type Restrictions struct {
 
 type Revocations struct {
 	Serial  uint64
-	Payload json.RawMessage
+	Payload []byte
 }
 
 type Budget struct {
@@ -137,7 +137,7 @@ type Reconcile struct {
 
 type Drain struct {
 	Node    model.UUID
-	Payload json.RawMessage
+	Payload []byte
 }
 
 func (Desired) down()         {}
@@ -164,7 +164,7 @@ type Link struct {
 	started     bool     // 对账已开始（可以上报账本）
 	waiters     map[uint64][]func()
 	revSerial   uint64
-	revocations json.RawMessage
+	revocations []byte
 }
 
 // New 创建链路并登记为 Hub 的上游。
@@ -468,7 +468,7 @@ func (l *Link) Tick() error {
 }
 
 // Revocations 返回最新的吊销列表（供 mTLS 终结检查，SEC-002）。
-func (l *Link) Revocations() (uint64, json.RawMessage) {
+func (l *Link) Revocations() (uint64, []byte) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.revSerial, l.revocations

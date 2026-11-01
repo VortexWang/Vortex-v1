@@ -5,125 +5,60 @@ package e2e
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"sync"
-	"time"
 
 	"vortex/edgehub/issuer"
 	"vortex/edgehub/model"
 	"vortex/edgehub/session"
 	"vortex/edgehub/upstream"
+	hubwire "vortex/edgehub/wire"
 	"vortex/engine/types"
 	"vortex/node/agent"
 	"vortex/node/agent/control"
-	"vortex/node/agent/grants"
-	"vortex/node/agent/reconcile"
+	nodewire "vortex/node/agent/wire"
+	edgehubv1 "vortex/proto/gen/go/vortex/edgehub/v1"
+
+	"google.golang.org/protobuf/proto"
 )
 
 func toModel(u types.UUID) model.UUID { return model.UUID(u) }
 func toTypes(u model.UUID) types.UUID { return types.UUID(u) }
 
-// toHub 把 Agent 消息转为 Edge Hub 会话消息；不归会话处理的返回 nil。
+// toHub / toAgent 走与 gRPC 相同的转换：Agent 类型 → 契约消息 → 线上字节 → 契约消息 → 会话类型（反之亦然），
+// 所以内存连接的端到端测试同样覆盖了两侧的 wire 包。
 func toHub(m agent.Out) session.AgentMsg {
-	switch m := m.(type) {
-	case agent.Hello:
-		return session.Hello{Node: toModel(m.Node), Boot: toModel(m.Boot), PreviousBoot: toModel(m.PreviousBoot), AgentVersion: m.AgentVersion,
-			AppliedConfigVersion: m.AppliedConfigVersion, UnackedUsageFromSeq: m.UnackedUsageFromSeq}
-	case agent.GrantRequest:
-		return session.GrantRequest{ID: m.ID, Sync: m.Sync, Kind: model.GrantKind(m.Kind), Tenant: toModel(m.Tenant),
-			Rule: toModel(m.Rule), CurrentGrant: toModel(m.CurrentGrant), RateBps60s: m.RateBps60s}
-	case agent.UsageBatch:
-		b := session.UsageBatch{Boot: toModel(m.Boot), Seq: m.Seq}
-		for _, c := range m.Snapshot.Consumptions {
-			b.Consumptions = append(b.Consumptions, session.Consumption{Grant: toModel(c.GrantID), Used: c.UsedRawBytes, Final: c.Final})
-		}
-		for _, d := range m.Snapshot.Demands {
-			b.Demands = append(b.Demands, session.Demand{Tenant: toModel(d.TenantID), Bytes60s: d.Bytes60s, StarvedPermille: d.StarvedPermille})
-		}
-		b.Snapshot, _ = json.Marshal(m.Snapshot)
-		return b
-	case agent.PrepareReport:
-		payload, _ := json.Marshal(m)
-		ok := m.Err == "" && m.Result != nil && len(m.Result.Errors) == 0
-		return session.PrepareReport{Version: m.Version, OK: ok, Payload: payload}
-	case agent.ApplyReport:
-		payload, _ := json.Marshal(m)
-		return session.ApplyReport{Version: m.Version, Committed: m.Action == reconcile.ActionCommit && m.Err == "" && m.Result != nil, Payload: payload}
-	case agent.EngineEvent:
-		payload, _ := json.Marshal(m)
-		return session.Passthrough{Kind: "event", Payload: payload}
-	case agent.ProbeReport:
-		payload, _ := json.Marshal(m)
-		return session.Passthrough{Kind: "probes", Payload: payload}
-	case agent.StateReport:
-		payload, _ := json.Marshal(m)
-		return session.Passthrough{Kind: "state", Payload: payload}
-	case agent.HeldGrants:
-		var hs session.HeldGrants
-		for _, g := range m.Grants {
-			hs.Grants = append(hs.Grants, session.HeldGrant{HeldGrant: issuer.HeldGrant{ID: toModel(g.ID), IssuerHub: toModel(g.Issuer),
-				Kind: model.GrantKind(g.Kind), Tenant: toModel(g.Tenant), Rule: toModel(g.Rule), Amount: g.Amount, Used: g.Used},
-				Remaining: g.RemainingTTL})
-		}
-		return hs
+	pm, err := nodewire.AgentMessage(m)
+	if err != nil || pm == nil {
+		return nil
 	}
-	return nil
+	b, _ := proto.Marshal(pm)
+	var back edgehubv1.AgentMessage
+	if err := proto.Unmarshal(b, &back); err != nil {
+		return nil
+	}
+	am, err := hubwire.FromAgent(&back)
+	if err != nil {
+		return nil
+	}
+	return am
 }
 
-func meta(hub model.UUID, id, boot model.UUID, gen uint64, ttl time.Duration) types.GrantMeta {
-	return types.GrantMeta{GrantID: toTypes(id), IssuerHub: toTypes(hub), BootID: toTypes(boot), Generation: gen, TTL: ttl}
-}
-
-// toAgent 把 Edge Hub 会话消息转为 Agent 消息。
 func toAgent(hub model.UUID, m session.HubMsg) agent.In {
-	switch m := m.(type) {
-	case session.HubHello:
-		return agent.HubHello{Hub: toTypes(m.Hub), Mode: agent.Mode(m.Mode)}
-	case session.ModeChange:
-		return agent.ModeChange{Mode: agent.Mode(m.Mode)}
-	case session.UsageAck:
-		return agent.UsageAck{Boot: toTypes(m.Boot), Through: m.Through}
-	case session.DesiredConfig:
-		var cfg types.RuntimeConfig
-		if err := json.Unmarshal(m.Payload, &cfg); err != nil {
-			return nil
-		}
-		return agent.DesiredConfig{Config: &cfg}
-	case session.ApplyCommand:
-		a := reconcile.ActionAbort
-		if m.Commit {
-			a = reconcile.ActionCommit
-		}
-		return agent.ApplyCommand{Version: m.Version, Action: a}
-	case session.DrainCommand:
-		return agent.DrainCommand{}
-	case session.GrantResponse:
-		r := grants.Response{RequestID: m.RequestID, Error: m.Error}
-		for _, g := range m.Run {
-			rg := types.RunGrant{Meta: meta(hub, g.ID, g.Boot, g.Generation, g.TTL)}
-			for _, id := range g.Rules {
-				rg.RuleIDs = append(rg.RuleIDs, toTypes(id))
-			}
-			r.Set.Run = append(r.Set.Run, rg)
-		}
-		for _, g := range m.Billing {
-			r.Set.Billing = append(r.Set.Billing, types.BillingGrant{Meta: meta(hub, g.ID, g.Boot, g.Generation, g.TTL),
-				RuleID: toTypes(g.Rule), BillingVersion: g.BillingVersion, RawBytes: g.RawBytes})
-		}
-		for _, l := range m.Shares {
-			k := types.ShareRate
-			if l.Kind == model.GrantShareConn {
-				k = types.ShareConn
-			}
-			r.Set.Shares = append(r.Set.Shares, types.ShareLease{Meta: meta(hub, l.ID, l.Boot, 0, l.TTL), TenantID: toTypes(l.Tenant), Kind: k, Amount: l.Amount})
-		}
-		for _, id := range m.Revoked {
-			r.Revoked = append(r.Revoked, toTypes(id))
-		}
-		return agent.GrantResponse{Response: r}
+	pm, err := hubwire.ToAgent(hub, "e2e", m)
+	if err != nil {
+		return nil
 	}
-	return nil
+	b, _ := proto.Marshal(pm)
+	var back edgehubv1.HubMessage
+	if err := proto.Unmarshal(b, &back); err != nil {
+		return nil
+	}
+	in, err := nodewire.HubMessage(&back)
+	if err != nil {
+		return nil
+	}
+	return in
 }
 
 // Hub 是测试中的一个 Edge Hub 实例与其后端链路。

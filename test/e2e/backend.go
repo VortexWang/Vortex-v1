@@ -1,9 +1,11 @@
 package e2e
 
 import (
-	"encoding/json"
+	"google.golang.org/protobuf/proto"
+
 	"sync"
 	"time"
+	nodewire "vortex/node/agent/wire"
 
 	"vortex/edgehub/leases"
 	"vortex/edgehub/model"
@@ -46,7 +48,7 @@ func (b *Backend) Close() { close(b.stop) }
 
 // SendDesired 下发节点的期望配置。
 func (b *Backend) SendDesired(node types.UUID, cfg *types.RuntimeConfig) error {
-	raw, err := json.Marshal(cfg)
+	raw, err := proto.Marshal(nodewire.Config(cfg))
 	if err != nil {
 		return err
 	}

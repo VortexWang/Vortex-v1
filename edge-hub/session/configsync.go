@@ -1,7 +1,6 @@
 package session
 
 import (
-	"encoding/json"
 	"errors"
 
 	"vortex/edgehub/leases"
@@ -39,7 +38,7 @@ func (h *Hub) cfgLocked(node model.UUID) *nodeConfig {
 }
 
 // SetDesired 接收后端的期望配置（NodeDesiredConfig）。
-func (h *Hub) SetDesired(node model.UUID, version uint64, payload json.RawMessage) {
+func (h *Hub) SetDesired(node model.UUID, version uint64, payload []byte) {
 	h.mu.Lock()
 	c := h.cfgLocked(node)
 	if c.desired != nil && version <= c.desired.Version {
@@ -140,7 +139,7 @@ func (h *Hub) ReleaseConfig() {
 func (h *Hub) AcceptsEnrollment() bool { return h.Mode.AcceptsConfigChanges() }
 
 // SendDrain 转发后端的排空指令（NodeOperation.drain）。节点不在线时返回 false。
-func (h *Hub) SendDrain(node model.UUID, payload json.RawMessage) bool {
+func (h *Hub) SendDrain(node model.UUID, payload []byte) bool {
 	h.mu.Lock()
 	s := h.sessions[node]
 	h.mu.Unlock()

@@ -69,7 +69,7 @@ type UsageBatch struct {
 	Seq          uint64
 	Consumptions []Consumption
 	Demands      []Demand
-	Snapshot     json.RawMessage // 原样转发给后端
+	Snapshot     []byte // 原样转发给后端
 }
 
 // HeldGrant 是 Agent 报告的一份持有授权；Remaining 为 remaining_ttl。
@@ -84,19 +84,19 @@ type HeldGrants struct{ Grants []HeldGrant }
 type PrepareReport struct {
 	Version uint64
 	OK      bool // 没有资源错误与引擎错误
-	Payload json.RawMessage
+	Payload []byte
 }
 
 type ApplyReport struct {
 	Version   uint64
 	Committed bool // Commit 成功
-	Payload   json.RawMessage
+	Payload   []byte
 }
 
 // Passthrough 是只需转发给后端的节点消息（引擎事件、探测结果、状态）。
 type Passthrough struct {
 	Kind    string // "event" / "probes" / "state"
-	Payload json.RawMessage
+	Payload []byte
 }
 
 func (PrepareReport) agentMsg() {}
@@ -134,7 +134,7 @@ type UsageAck struct {
 // DesiredConfig / ApplyCommand / DrainCommand 是转发给节点的后端指令（载荷不解析）。
 type DesiredConfig struct {
 	Version uint64
-	Payload json.RawMessage
+	Payload []byte
 }
 
 type ApplyCommand struct {
@@ -142,7 +142,7 @@ type ApplyCommand struct {
 	Commit  bool // false = Abort
 }
 
-type DrainCommand struct{ Payload json.RawMessage }
+type DrainCommand struct{ Payload []byte }
 
 func (DesiredConfig) hubMsg() {}
 func (ApplyCommand) hubMsg()  {}
@@ -214,10 +214,10 @@ type usageSeen struct {
 }
 
 type usageRecord struct {
-	Node model.UUID      `json:"node"`
-	Boot model.UUID      `json:"boot"`
-	Seq  uint64          `json:"seq"`
-	Snap json.RawMessage `json:"snap,omitempty"`
+	Node model.UUID `json:"node"`
+	Boot model.UUID `json:"boot"`
+	Seq  uint64     `json:"seq"`
+	Snap []byte     `json:"snap,omitempty"`
 }
 
 // Open 重放账本，组装各模块。
@@ -612,7 +612,7 @@ func (h *Hub) Sessions() int {
 type UsageEntry struct {
 	Node, Boot model.UUID
 	Seq        uint64
-	Snapshot   json.RawMessage
+	Snapshot   []byte
 }
 
 // DecodeUsage 解析 usage.batch 条目。
