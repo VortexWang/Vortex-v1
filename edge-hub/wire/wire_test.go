@@ -17,8 +17,8 @@ import (
 
 var id = model.UUID{7}
 
-func am(b edgehubv1.AgentMessage) session.AgentMsg {
-	m, err := FromAgent(&b)
+func am(b *edgehubv1.AgentMessage) session.AgentMsg {
+	m, err := FromAgent(b)
 	if err != nil {
 		panic(err)
 	}
@@ -26,28 +26,28 @@ func am(b edgehubv1.AgentMessage) session.AgentMsg {
 }
 
 func TestFromAgent(t *testing.T) {
-	ok := am(edgehubv1.AgentMessage{Body: &edgehubv1.AgentMessage_ApplyResult{ApplyResult: &edgehubv1.ApplyReport{
+	ok := am(&edgehubv1.AgentMessage{Body: &edgehubv1.AgentMessage_ApplyResult{ApplyResult: &edgehubv1.ApplyReport{
 		Action: edgehubv1.ApplyAction_APPLY_ACTION_COMMIT, Result: &runtimev1.ApplyResult{Version: 3}}}}).(session.ApplyReport)
 	if !ok.Committed || ok.Version != 3 || len(ok.Payload) == 0 {
 		t.Fatalf("commit %+v", ok)
 	}
-	ab := am(edgehubv1.AgentMessage{Body: &edgehubv1.AgentMessage_ApplyResult{ApplyResult: &edgehubv1.ApplyReport{
+	ab := am(&edgehubv1.AgentMessage{Body: &edgehubv1.AgentMessage_ApplyResult{ApplyResult: &edgehubv1.ApplyReport{
 		Action: edgehubv1.ApplyAction_APPLY_ACTION_ABORT, Result: &runtimev1.ApplyResult{Version: 3}}}}).(session.ApplyReport)
 	if ab.Committed {
 		t.Fatal("abort counted as committed")
 	}
-	fail := am(edgehubv1.AgentMessage{Body: &edgehubv1.AgentMessage_ApplyResult{ApplyResult: &edgehubv1.ApplyReport{
+	fail := am(&edgehubv1.AgentMessage{Body: &edgehubv1.AgentMessage_ApplyResult{ApplyResult: &edgehubv1.ApplyReport{
 		Action: edgehubv1.ApplyAction_APPLY_ACTION_COMMIT, Result: &runtimev1.ApplyResult{Version: 3, Objects: []*runtimev1.ObjectState{
 			{Object: &runtimev1.ObjectRef{}, Status: runtimev1.ObjectStatus_OBJECT_STATUS_FAILED, ErrorCode: "ENGINE_ERROR: x"}}}}}}).(session.ApplyReport)
 	if fail.Committed {
 		t.Fatal("engine error counted as committed")
 	}
-	pr := am(edgehubv1.AgentMessage{Body: &edgehubv1.AgentMessage_PrepareResult{PrepareResult: &edgehubv1.PrepareReport{
+	pr := am(&edgehubv1.AgentMessage{Body: &edgehubv1.AgentMessage_PrepareResult{PrepareResult: &edgehubv1.PrepareReport{
 		Result: &runtimev1.PrepareResult{Version: 4, Errors: []*runtimev1.ResourceError{{Code: "PORT_IN_USE"}}}}}}).(session.PrepareReport)
 	if pr.OK || pr.Version != 4 {
 		t.Fatalf("prepare %+v", pr)
 	}
-	u := am(edgehubv1.AgentMessage{Body: &edgehubv1.AgentMessage_Usage{Usage: &edgehubv1.UsageBatch{BootId: UUID(id), Seq: 2,
+	u := am(&edgehubv1.AgentMessage{Body: &edgehubv1.AgentMessage_Usage{Usage: &edgehubv1.UsageBatch{BootId: UUID(id), Seq: 2,
 		Snapshot: &runtimev1.UsageSnapshot{GrantConsumptions: []*runtimev1.GrantConsumption{{GrantId: UUID(id), UsedRawBytes: 5, Final: true}},
 			Demands: []*runtimev1.TenantDemand{{TenantId: UUID(id), Bytes_60S: 9, StarvedPermille: 3}}}}}}).(session.UsageBatch)
 	if u.Boot != id || u.Seq != 2 || u.Consumptions[0] != (session.Consumption{Grant: id, Used: 5, Final: true}) || u.Demands[0].Bytes60s != 9 {
