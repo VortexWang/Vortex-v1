@@ -408,7 +408,21 @@ func (p *Peers) Healthy(id types.UUID) bool {
 	if p.Probe != nil && !p.Probe(id) {
 		return false
 	}
+	// 最近建链失败或链路失效、且没有可用链路：在后台重新建链成功之前不再选它（NFR-017）。否则每次退避到期，
+	// 新会话都会落到这个成员上同步等待建链：对端进程挂起时 TCP 仍能完成而握手要等到超时，会话因此停顿数秒
+	if ps.failures > 0 && !hasUsableLocked(ps) {
+		return false
+	}
 	return time.Now().After(ps.downUntil)
+}
+
+func hasUsableLocked(ps *peerState) bool {
+	for _, li := range ps.links {
+		if li.l.Usable() {
+			return true
+		}
+	}
+	return false
 }
 
 // peerDraining：对端在某条仍未关闭的链路上发来了 GOAWAY(draining)，在这些链路关闭（例如对端重启）

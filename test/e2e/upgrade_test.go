@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -64,10 +65,15 @@ type service struct {
 	done  chan struct{}
 
 	guardArgs []string
+	prefix    []string
 }
 
 func startService(t *testing.T, bin string, guard []string, args ...string) *service {
-	s := &service{done: make(chan struct{}), guardArgs: guard}
+	return startServicePrefix(t, nil, bin, guard, args...)
+}
+
+func startServicePrefix(t *testing.T, prefix []string, bin string, guard []string, args ...string) *service {
+	s := &service{done: make(chan struct{}), guardArgs: guard, prefix: prefix}
 	go func() {
 		defer close(s.done)
 		for {
@@ -78,12 +84,18 @@ func startService(t *testing.T, bin string, guard []string, args ...string) *ser
 			}
 			if _, err := os.Stat(bin + ".prev"); err == nil && len(s.guardArgs) > 0 {
 				g := exec.Command(bin+".prev", s.guardArgs...)
+				if len(s.prefix) > 0 {
+					g = exec.Command(s.prefix[0], append(append(append([]string(nil), s.prefix[1:]...), bin+".prev"), s.guardArgs...)...)
+				}
 				g.Stderr = &lockedWriter{mu: &s.mu, w: &s.logs}
 				s.mu.Unlock()
 				_ = g.Run()
 				s.mu.Lock()
 			}
 			cmd := exec.Command(bin, args...)
+			if len(s.prefix) > 0 { // 例如 ip netns exec <ns>
+				cmd = exec.Command(s.prefix[0], append(append(append([]string(nil), s.prefix[1:]...), bin), args...)...)
+			}
 			cmd.Stderr = &lockedWriter{mu: &s.mu, w: &s.logs}
 			err := cmd.Start()
 			s.cmd = cmd
@@ -108,6 +120,7 @@ func startService(t *testing.T, bin string, guard []string, args ...string) *ser
 		s.mu.Lock()
 		s.stop = true
 		if s.cmd != nil && s.cmd.Process != nil {
+			_ = s.cmd.Process.Signal(syscall.SIGCONT)
 			_ = s.cmd.Process.Signal(os.Interrupt)
 		}
 		s.mu.Unlock()

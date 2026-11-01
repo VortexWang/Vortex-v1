@@ -1,0 +1,45 @@
+name: acceptance
+
+# M3 验收（NFR-016～018；真实 systemd 下的安装、升级与回退）：test/e2e TestM3Acceptance。
+# 拓扑在网络命名空间中（单台 runner），计时类指标不受共享虚拟机影响；吞吐类指标（13.2 节）在独享环境中执行。
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 18 * * 0" # 每周一 02:17（UTC+8）
+
+permissions:
+  contents: read
+
+jobs:
+  m3:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.24.7" }
+      - name: 预取依赖
+        run: cd test/e2e && go mod download
+      - name: M3 验收（真实 systemd）
+        run: |
+          set -o pipefail
+          sudo env "PATH=$PATH" "HOME=$HOME" "GOMODCACHE=$(go env GOMODCACHE)" "GOCACHE=$(go env GOCACHE)" \
+            VORTEX_ACCEPTANCE=systemd ACCEPTANCE_OUT="$PWD/acceptance-out" \
+            go test -count=1 -v -timeout 35m -run TestM3Acceptance ./test/e2e/ 2>&1 | tee acceptance.log
+      - name: 结果
+        if: always()
+        run: |
+          [ -f acceptance-out/m3-acceptance.md ] && cat acceptance-out/m3-acceptance.md >> "$GITHUB_STEP_SUMMARY"
+          # 结果同时写成注解，便于通过 API 读取
+          if [ -f acceptance-out/m3-acceptance.json ]; then
+            body=$(sed 's/%/%25/g' acceptance-out/m3-acceptance.json | awk '{printf "%s%%0A", $0}')
+            echo "::notice title=m3-acceptance.json::$body"
+          fi
+      - name: 失败注解
+        if: failure()
+        run: |
+          body=$(grep -E -B2 -A40 -e '--- FAIL|panic:|acceptance_test.go:[0-9]+: (timeout|NFR|status|node events)' acceptance.log | head -c 30000 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+          [ -n "$body" ] && echo "::error title=acceptance::$body"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with: { name: m3-acceptance, path: "acceptance-out/m3-acceptance.*", if-no-files-found: ignore }

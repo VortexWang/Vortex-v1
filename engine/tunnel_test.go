@@ -1003,3 +1003,60 @@ func TestCurrentIdentityForOtherNodeIgnored(t *testing.T) {
 		t.Fatal("identity for another node was used")
 	}
 }
+
+// 成员建链失败（对端挂起：TCP 完成而握手不回）之后，新会话不再落到它上面等待握手超时，直接走其他成员；
+// 后台重新建链成功之前它不算可用（NFR-017）。
+func TestFailedMemberSkippedUntilRelinked(t *testing.T) {
+	pki := enginetest.NewPKI()
+	a, c := newNode(t, pki, nodeA), newNode(t, pki, nodeC)
+	target := tagServer(t, 'T')
+	rc := hop(types.RoleExit, 1, false, a)
+	rc.Targets = []types.Target{{Host: target.Addr().String(), Port: target.Port(), Weight: 1}}
+	pol := types.TargetPolicy{SelfHostedNode: true}
+	c.apply(t, &types.RuntimeConfig{Version: 1, Rules: []types.Rule{rc}, Peers: []types.Peer{a.peer(false)}, TargetPolicy: pol})
+	hole, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hole.Close()
+	go func() {
+		var held []net.Conn
+		for {
+			c, err := hole.Accept()
+			if err != nil {
+				for _, c := range held {
+					c.Close()
+				}
+				return
+			}
+			held = append(held, c)
+		}
+	}()
+	deadPort := netip.MustParseAddrPort(hole.Addr().String())
+	ra := hop(types.RoleEntry, 0, true)
+	ra.NextHop = &types.NextHop{MemberSchedule: types.ScheduleWeightedRoundRobin, Dial: types.DialForward,
+		Members: []types.Member{{NodeID: nodeD, Weight: 1}, {NodeID: nodeC, Weight: 1}}}
+	l := tcpL(ruleT)
+	a.apply(t, &types.RuntimeConfig{Version: 1, Listeners: []types.Listener{l}, Rules: []types.Rule{ra}, TargetPolicy: pol,
+		Peers: []types.Peer{{NodeID: nodeD, Address: "127.0.0.1", LinkPort: deadPort.Port(), Outbound: true}, c.peer(true)}})
+	// 等 D 的（后台）建链因握手超时失败一次
+	deadline := time.Now().Add(15 * time.Second)
+	for len(a.ag.Events(types.EventPeerDown)) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("dial to the hung member never failed")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	// 之后 D 的退避到期、后台重试期间，新会话都不等待 D
+	end := time.Now().Add(7 * time.Second)
+	for i := 0; time.Now().Before(end); i++ {
+		start := time.Now()
+		if _, tag := dial(t, a.rt.ListenerAddr(l)); tag != 'T' {
+			t.Fatalf("session %d failed", i)
+		}
+		if d := time.Since(start); d > time.Second {
+			t.Fatalf("session %d waited %v for the failed member", i, d)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}

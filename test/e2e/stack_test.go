@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -46,6 +47,25 @@ type protoBackend struct {
 	out      func(*backendv1.BackendMessage) // 当前流（push 用）
 	version  map[string]string               // 在线节点的程序版本（NodeStatus.agent_version），按 node_id
 	upgrades []*edgehubv1.UpgradeStatus      // Edge Hub 转发的升级进度（AGT-008）
+	events   []string                        // 全部节点事件（调试输出）
+	peerDown []peerDownEvent                 // 节点报告的链路失效（ENG-019），按到达时刻
+}
+
+type peerDownEvent struct {
+	at   time.Time
+	peer string
+}
+
+// peerDownAfter 返回 after 之后第一次报告 peer 链路失效的到达时刻（没有则为零值）。
+func (b *protoBackend) peerDownAfter(peer types.UUID, after time.Time) time.Time {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, e := range b.peerDown {
+		if e.peer == string(peer[:]) && e.at.After(after) {
+			return e.at
+		}
+	}
+	return time.Time{}
 }
 
 // upgraded 报告后端是否收到某版本的某个升级阶段（错误文本包含 errPart）。
@@ -130,6 +150,15 @@ func (b *protoBackend) Connect(s grpc.BidiStreamingServer[backendv1.HubUpMessage
 							{Meta: meta(), TenantId: nodewire.UUID(tenant), Kind: runtimev1.ShareKind_SHARE_KIND_RATE, Amount: 10_000_000_000},
 							{Meta: meta(), TenantId: nodewire.UUID(tenant), Kind: runtimev1.ShareKind_SHARE_KIND_CONN, Amount: 1000}}}}})
 				}
+			}
+		case *backendv1.HubUpMessage_NodeEvent:
+			b.mu.Lock()
+			b.events = append(b.events, fmt.Sprintf("%x %v", x.NodeEvent.GetNodeId().GetValue()[:1], x.NodeEvent.GetEvent()))
+			b.mu.Unlock()
+			if pd := x.NodeEvent.GetEvent().GetPeerDown(); pd != nil {
+				b.mu.Lock()
+				b.peerDown = append(b.peerDown, peerDownEvent{at: time.Now(), peer: string(pd.GetPeerNodeId().GetValue())})
+				b.mu.Unlock()
 			}
 		case *backendv1.HubUpMessage_NodeUpgrade:
 			b.mu.Lock()
