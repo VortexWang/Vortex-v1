@@ -28,7 +28,7 @@ func toTypes(u model.UUID) types.UUID { return types.UUID(u) }
 func toHub(m agent.Out) session.AgentMsg {
 	switch m := m.(type) {
 	case agent.Hello:
-		return session.Hello{Node: toModel(m.Node), Boot: toModel(m.Boot), PreviousBoot: toModel(m.PreviousBoot),
+		return session.Hello{Node: toModel(m.Node), Boot: toModel(m.Boot), PreviousBoot: toModel(m.PreviousBoot), AgentVersion: m.AgentVersion,
 			AppliedConfigVersion: m.AppliedConfigVersion, UnackedUsageFromSeq: m.UnackedUsageFromSeq}
 	case agent.GrantRequest:
 		return session.GrantRequest{ID: m.ID, Sync: m.Sync, Kind: model.GrantKind(m.Kind), Tenant: toModel(m.Tenant),

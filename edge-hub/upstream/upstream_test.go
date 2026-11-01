@@ -155,7 +155,7 @@ func TestReconciliation(t *testing.T) {
 	}
 	ups := f.up.take()
 	r, ok := ups[0].(Register)
-	if !ok || r.Mode != model.ModeReconciling || r.AutonomyStartedAt.IsZero() || r.LedgerLastSeq == 0 || len(ups) != 1 {
+	if !ok || r.Mode != model.ModeReconciling || r.AutonomyStartedAt.IsZero() || r.LedgerLastSeq == 0 || len(entries(ups)) != 0 {
 		t.Fatalf("register %+v (no ledger before STARTED)", ups)
 	}
 	// 对账中收到的配置积压
@@ -321,5 +321,61 @@ func TestLeasesDrainAndTopUp(t *testing.T) {
 	_ = f.l.Handle(Leases{Node: node, Leases: []leases.Lease{{Tenant: tenant, Kind: model.GrantShareRate, Amount: 99999}}})
 	if f.h.Leases.Held(node, leases.Key{Tenant: tenant, Kind: model.GrantShareRate}) != 1000 {
 		t.Fatal("share increased while not online")
+	}
+}
+
+// HUB-004：节点状态缓存与批量上报。接入立即上报；状态与探测随下一次 Tick 上报；断开标记离线；
+// 后端重连时上报全部节点。
+func TestNodeStatus(t *testing.T) {
+	f := setup(t)
+	var first []session.NodeState
+	for _, u := range f.up.take() {
+		if b, ok := u.(NodeStatusBatch); ok {
+			first = b.Nodes
+		}
+	}
+	if len(first) != 1 || !first[0].Connected || first[0].Boot != boot1 {
+		t.Fatalf("status on hello %+v", first)
+	}
+	_ = f.s.Handle(session.Passthrough{Kind: "probes", Payload: json.RawMessage(`{"p":1}`)})
+	_ = f.s.Handle(session.ApplyReport{Version: 4, Committed: true})
+	f.up.take()
+	_ = f.l.Tick()
+	var got []session.NodeState
+	for _, u := range f.up.take() {
+		if b, ok := u.(NodeStatusBatch); ok {
+			got = b.Nodes
+		}
+	}
+	if len(got) != 1 || string(got[0].Probes) != `{"p":1}` || got[0].AppliedConfigVersion != 4 {
+		t.Fatalf("changed status %+v", got)
+	}
+	_ = f.l.Tick()
+	for _, u := range f.up.take() {
+		if _, ok := u.(NodeStatusBatch); ok {
+			t.Fatal("unchanged status re-sent")
+		}
+	}
+	f.s.Close()
+	_ = f.l.Tick()
+	got = nil
+	for _, u := range f.up.take() {
+		if b, ok := u.(NodeStatusBatch); ok {
+			got = b.Nodes
+		}
+	}
+	if len(got) != 1 || got[0].Connected {
+		t.Fatalf("disconnect not reported %+v", got)
+	}
+	f.l.Disconnected()
+	_ = f.l.Connected(f.up.put)
+	got = nil
+	for _, u := range f.up.take() {
+		if b, ok := u.(NodeStatusBatch); ok {
+			got = b.Nodes
+		}
+	}
+	if len(got) != 1 {
+		t.Fatal("full status not sent on backend reconnect")
 	}
 }

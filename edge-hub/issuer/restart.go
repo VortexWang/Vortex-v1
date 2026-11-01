@@ -9,9 +9,15 @@ import (
 )
 
 const (
+	KindBoot     = "grant.boot"
 	KindTransfer = "grant.transfer"
 	KindHeld     = "grant.held"
 )
+
+type bootData struct {
+	Node model.UUID `json:"node"`
+	Boot model.UUID `json:"boot"`
+}
 
 type transferData struct {
 	Node    model.UUID   `json:"node"`
@@ -61,7 +67,10 @@ func (is *Issuer) Connect(node, boot model.UUID) (*Transfer, error) {
 		return nil, ErrStaleBoot
 	}
 	cur, ok := is.boots[node]
-	if !ok {
+	if !ok { // 首次接入：记入账本，重启后仍能识别下一次的新启动（否则 LIM-010 转移会漏掉）
+		if _, err := is.l.Append(KindBoot, bootData{Node: node, Boot: boot}); err != nil {
+			return nil, err
+		}
 		is.boots[node] = boot
 		return nil, nil
 	}

@@ -77,3 +77,34 @@ func TestNonIncreasingSeqRejected(t *testing.T) {
 		t.Fatalf("duplicate seq: %v", err)
 	}
 }
+
+func TestAppendIfAndPrune(t *testing.T) {
+	clk := clock.NewFake(time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC))
+	st := &MemStore{}
+	l, _ := Open(st, clk, nil)
+	for i := 0; i < 5; i++ {
+		_, _ = l.Append("x", i)
+	}
+	if _, err := l.AppendIf(4, "cp", 0); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale expected seq: %v", err)
+	}
+	if seq, err := l.AppendIf(5, "cp", 0); err != nil || seq != 6 {
+		t.Fatalf("append if %d %v", seq, err)
+	}
+	_ = l.Ack(3)            // seq 7
+	_, _ = l.Append("x", 9) // seq 8
+	n, err := l.Prune(func(Entry) bool { return true })
+	// 删 1～3（已确认）；保留 4～6（未确认）、7（最新确认记录）、8（最大序号，且未确认）
+	if err != nil || n != 3 || st.Len() != 5 {
+		t.Fatalf("pruned %d %v, left %d", n, err, st.Len())
+	}
+	_ = l.Ack(8) // seq 9
+	n, _ = l.Prune(func(Entry) bool { return true })
+	if n != 5 || st.Len() != 1 { // 删 4～8，只剩 9：既是最大序号也是最新确认记录
+		t.Fatalf("pruned %d, left %d", n, st.Len())
+	}
+	l2, err := Open(st, clk, nil)
+	if err != nil || l2.LastSeq() != 9 || l2.Acked() != 8 {
+		t.Fatalf("reopen last %d acked %d %v", l2.LastSeq(), l2.Acked(), err)
+	}
+}

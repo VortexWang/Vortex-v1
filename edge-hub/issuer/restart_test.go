@@ -168,3 +168,14 @@ func TestBudgetRevoked(t *testing.T) {
 		t.Fatalf("after reconciliation: %v", err)
 	}
 }
+
+// 首次接入后、尚未签发任何授权就重启 Edge Hub：仍能识别节点的下一次新启动并转移。
+func TestFirstBootSurvivesHubRestart(t *testing.T) {
+	h := newHub(t)
+	_, _ = h.is.Connect(node, boot)
+	h2 := open(t, h.clk, h.st)
+	tr, err := h2.is.Connect(node, boot2)
+	if err != nil || tr == nil || tr.OldBoot != boot {
+		t.Fatalf("restart of a node not recognised after hub restart: %+v %v", tr, err)
+	}
+}

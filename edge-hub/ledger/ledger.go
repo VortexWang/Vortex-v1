@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -31,6 +32,8 @@ type Entry struct {
 type Store interface {
 	Append(es []Entry) error
 	Load(fn func(Entry) error) error
+	// Rewrite 原子地以 es 替换全部条目（保留期清理）：中途崩溃时要么是旧内容，要么是新内容。
+	Rewrite(es []Entry) error
 	Close() error
 }
 
@@ -167,6 +170,20 @@ func (m *MemStore) Load(fn func(Entry) error) error {
 	return nil
 }
 
+func (m *MemStore) Rewrite(es []Entry) error {
+	m.mu.Lock()
+	m.es = append([]Entry(nil), es...)
+	m.mu.Unlock()
+	return nil
+}
+
+// Len 返回条目数（测试用）。
+func (m *MemStore) Len() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.es)
+}
+
 func (m *MemStore) Close() error { return nil }
 
 // ---------------------------------------------------------------- 文件存储
@@ -174,8 +191,9 @@ func (m *MemStore) Close() error { return nil }
 // FileStore：每行一条 JSON，每次追加后 fsync。打开时若最后一行不完整（写入中途断电），截掉该行；
 // 中间行损坏视为账本损坏，拒绝打开。
 type FileStore struct {
-	mu sync.Mutex
-	f  *os.File
+	mu   sync.Mutex
+	path string
+	f    *os.File
 }
 
 func OpenFile(path string) (*FileStore, error) {
@@ -183,7 +201,7 @@ func OpenFile(path string) (*FileStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	fs := &FileStore{f: f}
+	fs := &FileStore{path: path, f: f}
 	if err := fs.repairTail(); err != nil {
 		f.Close()
 		return nil, err
@@ -260,3 +278,85 @@ func (fs *FileStore) Load(fn func(Entry) error) error {
 }
 
 func (fs *FileStore) Close() error { return fs.f.Close() }
+
+func (fs *FileStore) Rewrite(es []Entry) error {
+	var buf bytes.Buffer
+	for _, e := range es {
+		b, err := json.Marshal(e)
+		if err != nil {
+			return err
+		}
+		buf.Write(b)
+		buf.WriteByte('\n')
+	}
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	tmp := fs.path + ".tmp"
+	t, err := os.OpenFile(tmp, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := t.Write(buf.Bytes()); err == nil {
+		err = t.Sync()
+	}
+	if err == nil {
+		err = os.Rename(tmp, fs.path)
+	}
+	if err != nil {
+		t.Close()
+		return err
+	}
+	if d, err := os.Open(filepath.Dir(fs.path)); err == nil {
+		_ = d.Sync()
+		d.Close()
+	}
+	fs.f.Close()
+	fs.f = t
+	_, err = t.Seek(0, io.SeekEnd)
+	return err
+}
+
+// Prune 删除 drop 判定可删的条目（HUB-012 保留期清理）。只删除已被后端确认的条目（seq ≤ acked）。
+// 由此最新的确认记录与最大序号的条目必然保留：确认记录总是在它所确认的序号之后写入，
+// 所以二者的序号都大于 acked——重启后序号不回退，确认位置不丢失。返回删除的条数。
+func (l *Ledger) Prune(drop func(Entry) bool) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var all []Entry
+	if err := l.st.Load(func(e Entry) error { all = append(all, e); return nil }); err != nil {
+		return 0, err
+	}
+	keep := all[:0:0]
+	for _, e := range all {
+		if e.Seq > l.acked || !drop(e) {
+			keep = append(keep, e)
+		}
+	}
+	n := len(all) - len(keep)
+	if n == 0 {
+		return 0, nil
+	}
+	return n, l.st.Rewrite(keep)
+}
+
+// ErrConflict：AppendIf 时账本已有新条目。
+var ErrConflict = errors.New("ledger: appended concurrently")
+
+// AppendIf 只在最大序号仍为 expectedLast 时写入（检查点：快照期间没有其他写入才有效）。
+func (l *Ledger) AppendIf(expectedLast uint64, kind string, v any) (uint64, error) {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return 0, err
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.last != expectedLast {
+		return 0, ErrConflict
+	}
+	e := Entry{Seq: l.last + 1, At: l.clk.Now().UTC(), Kind: kind, Data: data}
+	if err := l.st.Append([]Entry{e}); err != nil {
+		return 0, err
+	}
+	l.last = e.Seq
+	return e.Seq, nil
+}

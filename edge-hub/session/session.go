@@ -38,6 +38,7 @@ type AgentMsg interface{ agentMsg() }
 
 type Hello struct {
 	Node, Boot, PreviousBoot model.UUID
+	AgentVersion             string
 	AppliedConfigVersion     uint64
 	UnackedUsageFromSeq      uint64
 }
@@ -194,15 +195,21 @@ type Hub struct {
 	opt          Options
 	mu           sync.Mutex
 	sessions     map[model.UUID]*Session // 按节点
-	usage        map[usageKey]uint64     // 已收到的批次（幂等键）→ 账本序号
+	usage        map[usageKey]usageSeen  // 已收到的批次（幂等键）→ 账本序号与时刻
 	up           Upstream
 	configs      map[model.UUID]*nodeConfig // 配置分发（HUB-T04）
 	lastDeclared model.Mode
+	states       map[model.UUID]*nodeState // 节点状态缓存（HUB-004）
 }
 
 type usageKey struct {
 	node, boot model.UUID
 	seq        uint64
+}
+
+type usageSeen struct {
+	seq uint64 // 账本序号
+	at  time.Time
 }
 
 type usageRecord struct {
@@ -218,13 +225,16 @@ func Open(opt Options) (*Hub, error) {
 		opt.Clock = clock.System{}
 	}
 	h := &Hub{ID: opt.HubID, Clk: opt.Clock, opt: opt, sessions: map[model.UUID]*Session{},
-		usage: map[usageKey]uint64{}, up: opt.Upstream, configs: map[model.UUID]*nodeConfig{}}
+		usage: map[usageKey]usageSeen{}, up: opt.Upstream, configs: map[model.UUID]*nodeConfig{}, states: map[model.UUID]*nodeState{}}
 	h.Mode = mode.New(opt.Clock)
 	h.Quota = quota.New(nil)
 	h.Issuer = issuer.New(opt.Clock, h.Quota, h.Mode.CanRenewRun)
 	h.Issuer.HubID = opt.HubID
 	h.Leases = leases.New(opt.Clock)
 	l, err := ledger.Open(opt.Store, opt.Clock, func(e ledger.Entry) error {
+		if e.Kind == KindCheckpoint {
+			return h.restore(e.Data)
+		}
 		if _, err := h.Mode.Replay(e); err != nil {
 			return err
 		}
@@ -242,7 +252,7 @@ func Open(opt Options) (*Hub, error) {
 			if err := json.Unmarshal(e.Data, &r); err != nil {
 				return err
 			}
-			h.usage[usageKey{r.Node, r.Boot, r.Seq}] = e.Seq
+			h.usage[usageKey{r.Node, r.Boot, r.Seq}] = usageSeen{e.Seq, e.At}
 		}
 		return nil
 	})
@@ -358,10 +368,14 @@ func (s *Session) Close() {
 	s.mu.Unlock()
 	h := s.hub
 	h.mu.Lock()
-	if h.sessions[s.cert] == s {
+	current := h.sessions[s.cert] == s
+	if current {
 		delete(h.sessions, s.cert)
 	}
 	h.mu.Unlock()
+	if current {
+		h.touch(s.cert, func(st *NodeState) { st.Connected = false })
+	}
 }
 
 func (h *Hub) relative(g issuer.Grant) issuer.Grant {
@@ -391,6 +405,7 @@ func (s *Session) Handle(m AgentMsg) error {
 		}
 		return s.onHello(hm)
 	}
+	h.touch(hello.Node, nil)
 	switch m := m.(type) {
 	case Hello:
 		return ErrNoHello // 每条流只有一个 Hello
@@ -417,10 +432,19 @@ func (s *Session) Handle(m AgentMsg) error {
 		}
 	case ApplyReport:
 		h.onApplied(hello.Node, m)
+		if m.Committed {
+			h.touch(hello.Node, func(st *NodeState) { st.AppliedConfigVersion = max(st.AppliedConfigVersion, m.Version) })
+		}
 		if up := h.upstream(); up != nil {
 			up.Node(hello.Node, m)
 		}
 	case Passthrough:
+		switch m.Kind {
+		case "state":
+			h.touch(hello.Node, func(st *NodeState) { st.State = m.Payload })
+		case "probes":
+			h.touch(hello.Node, func(st *NodeState) { st.Probes = m.Payload })
+		}
 		if up := h.upstream(); up != nil {
 			up.Node(hello.Node, m)
 		}
@@ -465,6 +489,9 @@ func (s *Session) onHello(m Hello) error {
 		s.send(*push)
 	}
 	h.deliverConfig(m.Node, m.AppliedConfigVersion)
+	h.touch(m.Node, func(st *NodeState) {
+		st.Boot, st.Connected, st.AppliedConfigVersion, st.AgentVersion = m.Boot, true, m.AppliedConfigVersion, m.AgentVersion
+	})
 	if up := h.upstream(); up != nil {
 		up.Node(m.Node, m) // 节点接入（HUB-004 状态；后端据此为新启动生成份额）
 	}
@@ -532,19 +559,22 @@ func (s *Session) onUsage(hello Hello, b UsageBatch) error {
 	h := s.hub
 	k := usageKey{hello.Node, b.Boot, b.Seq}
 	h.mu.Lock()
-	seq, seen := h.usage[k]
+	u, seen := h.usage[k]
+	seq := u.seq
 	h.mu.Unlock()
 	if seen { // 重发：只需再确认
 		s.ackUsage(seq, b)
 		return nil
 	}
+	h.mu.Lock() // 写账本与记录幂等键在同一把锁内（检查点一致性）
 	seq, err := h.Ledger.Append(KindUsage, usageRecord{Node: hello.Node, Boot: b.Boot, Seq: b.Seq, Snap: b.Snapshot})
+	if err == nil {
+		h.usage[k] = usageSeen{seq, h.Clk.Now().UTC()}
+	}
+	h.mu.Unlock()
 	if err != nil {
 		return err
 	}
-	h.mu.Lock()
-	h.usage[k] = seq
-	h.mu.Unlock()
 	for _, c := range b.Consumptions {
 		if _, err := h.Issuer.ReportConsumption(c.Grant, c.Used, c.Final); err != nil {
 			return err

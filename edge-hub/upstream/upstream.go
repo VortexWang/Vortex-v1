@@ -72,21 +72,16 @@ type NodeForward struct {
 
 type BudgetRequest struct{ Tenant model.UUID }
 
-// NodeStatus 是节点在线状态（NodeStatusBatch 的一项，HUB-004）。
-type NodeStatus struct {
-	Node, Boot           model.UUID
-	Connected            bool
-	AppliedConfigVersion uint64
-	At                   time.Time
-}
+// NodeStatusBatch 是变化的节点状态（HUB-004）。
+type NodeStatusBatch struct{ Nodes []session.NodeState }
 
-func (Register) up()      {}
-func (LedgerEntries) up() {}
-func (ApplyProgress) up() {}
-func (ForeignGrants) up() {}
-func (NodeForward) up()   {}
-func (BudgetRequest) up() {}
-func (NodeStatus) up()    {}
+func (Register) up()        {}
+func (LedgerEntries) up()   {}
+func (ApplyProgress) up()   {}
+func (ForeignGrants) up()   {}
+func (NodeForward) up()     {}
+func (BudgetRequest) up()   {}
+func (NodeStatusBatch) up() {}
 
 // ---------------------------------------------------------------- 后端 → Edge Hub
 
@@ -201,6 +196,10 @@ func (l *Link) Connected(send func(Up)) error {
 	}
 	send(Register{Mode: h.Mode.Mode(), LedgerLastSeq: h.Ledger.LastSeq(), AutonomyStartedAt: h.Mode.AutonomyStartedAt(),
 		BudgetVersions: h.Quota.Versions()})
+	h.TakeChangedStates() // 新连接：上报全部节点的当前状态
+	if ns := h.NodeStates(); len(ns) > 0 {
+		send(NodeStatusBatch{ns})
+	}
 	return l.Flush()
 }
 
@@ -356,8 +355,10 @@ func (l *Link) Node(node model.UUID, m session.AgentMsg) {
 		l.sendUp(ForeignGrants{Node: node, Grants: gs})
 	case session.Passthrough:
 		l.sendUp(NodeForward{Node: node, Msg: m})
-	case session.Hello:
-		l.sendUp(NodeStatus{Node: node, Boot: m.Boot, Connected: true, AppliedConfigVersion: m.AppliedConfigVersion, At: l.hub.Clk.Now()})
+	case session.Hello: // 节点接入：立即上报变化的状态
+		if ns := l.hub.TakeChangedStates(); len(ns) > 0 {
+			l.sendUp(NodeStatusBatch{ns})
+		}
 	}
 }
 
@@ -446,6 +447,14 @@ func (l *Link) fireWaiters(through uint64) {
 func (l *Link) Tick() error {
 	if err := l.Flush(); err != nil {
 		return err
+	}
+	l.mu.Lock()
+	connected := l.send != nil
+	l.mu.Unlock()
+	if connected {
+		if ns := l.hub.TakeChangedStates(); len(ns) > 0 {
+			l.sendUp(NodeStatusBatch{ns})
+		}
 	}
 	if l.hub.Mode.Mode() != model.ModeOnline {
 		return nil

@@ -118,14 +118,19 @@ func (b *Backend) handle(m upstream.Up) {
 		if reconc {
 			_ = b.link.Handle(upstream.Reconcile{Phase: upstream.ReconcileCompleted})
 		}
-	case upstream.NodeStatus:
-		k := [2]model.UUID{m.Node, m.Boot}
-		b.mu.Lock()
-		first := !b.pushed[k]
-		b.pushed[k] = true
-		b.mu.Unlock()
-		if first {
-			_ = b.link.Handle(upstream.Leases{Node: m.Node, Leases: b.shares})
+	case upstream.NodeStatusBatch:
+		for _, n := range m.Nodes {
+			if !n.Connected {
+				continue
+			}
+			k := [2]model.UUID{n.Node, n.Boot}
+			b.mu.Lock()
+			first := !b.pushed[k]
+			b.pushed[k] = true
+			b.mu.Unlock()
+			if first {
+				_ = b.link.Handle(upstream.Leases{Node: n.Node, Leases: b.shares})
+			}
 		}
 	case upstream.ForeignGrants:
 		b.mu.Lock()

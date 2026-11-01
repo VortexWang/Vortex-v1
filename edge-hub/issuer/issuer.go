@@ -142,6 +142,14 @@ func (is *Issuer) Replay(e ledger.Entry) (bool, error) {
 		}
 		is.grants[g.ID] = &g
 		is.noteBootLocked(g.Node, g.Boot)
+	case KindBoot:
+		var d bootData
+		if err := json.Unmarshal(e.Data, &d); err != nil {
+			return true, err
+		}
+		if !is.dead[d.Node][d.Boot] {
+			is.boots[d.Node] = d.Boot
+		}
 	case KindTransfer:
 		var d transferData
 		if err := json.Unmarshal(e.Data, &d); err != nil {
@@ -389,15 +397,13 @@ func (is *Issuer) ReportConsumption(grant model.UUID, usedRaw uint64, final bool
 		is.mu.Unlock()
 		return 0, nil
 	}
-	tenant := g.Tenant
-	is.mu.Unlock()
-	s, err := is.q.Settle(tenant, grant, usedRaw)
+	// 结算与移除授权在同一把锁内完成（锁顺序 is.mu → q.mu，与签发相同），检查点看到的两者状态一致
+	defer is.mu.Unlock()
+	s, err := is.q.Settle(g.Tenant, grant, usedRaw)
 	if err != nil {
 		return 0, err
 	}
-	is.mu.Lock()
 	delete(is.grants, grant)
-	is.mu.Unlock()
 	return s, nil
 }
 

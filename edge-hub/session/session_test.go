@@ -68,7 +68,7 @@ func rules(model.UUID) []issuer.RuleState {
 	return []issuer.RuleState{{RuleID: ruleA, TenantID: tenant, EnforcementPoint: true, PathCoefMilli: 1000}}
 }
 
-func open(t *testing.T, clk *clock.Fake, st *ledger.MemStore, up Upstream) *Hub {
+func open(t *testing.T, clk *clock.Fake, st ledger.Store, up Upstream) *Hub {
 	h, err := Open(Options{HubID: hubID, Clock: clk, Store: st, Rules: RulesFunc(rules), Upstream: up})
 	if err != nil {
 		t.Fatal(err)
