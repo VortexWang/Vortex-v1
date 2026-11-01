@@ -41,6 +41,8 @@ type Options struct {
 	Disk         *report.DiskGuard // nil = 不检查
 	// OnApplied 在配置生效（Commit 成功，含启动恢复）后调用，例如更新探测对象。在 Agent 的锁内调用，不得回调 Agent。
 	OnApplied func(*types.RuntimeConfig)
+	// RenewEvery 是运行授权与份额的续期周期；0 = 60 秒（测试用较短的值配合较短的授权有效期）。
+	RenewEvery time.Duration
 }
 
 type Agent struct {
@@ -73,7 +75,9 @@ func New(ctx context.Context, opt Options) (*Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	a := &Agent{opt: opt, clk: clk, eng: opt.Engine, boot: b, rep: rep, gr: grants.New(clk, b.Current),
+	gr := grants.New(clk, b.Current)
+	gr.RenewAfter = opt.RenewEvery
+	a := &Agent{opt: opt, clk: clk, eng: opt.Engine, boot: b, rep: rep, gr: gr,
 		rec: reconcile.New(opt.Engine, opt.ConfigLog), rates: newRateWindow(60)}
 	if _, err := a.rec.Recover(ctx); err != nil {
 		return nil, err

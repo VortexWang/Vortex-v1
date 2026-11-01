@@ -132,8 +132,28 @@ type Hub struct {
 	Link *upstream.Link
 	B    *Backend
 
-	mu   sync.Mutex
-	Down bool
+	mu    sync.Mutex
+	Down  bool
+	conns []*conn
+}
+
+// Kill 模拟实例宕机：断开全部 Agent 流，之后的连接被拒绝。
+func (h *Hub) Kill() {
+	h.mu.Lock()
+	h.Down = true
+	cs := h.conns
+	h.conns = nil
+	h.mu.Unlock()
+	for _, c := range cs {
+		c.Close()
+	}
+}
+
+// Revive 让实例重新接受连接。
+func (h *Hub) Revive() {
+	h.mu.Lock()
+	h.Down = false
+	h.mu.Unlock()
 }
 
 // Dialer 按 Endpoint.ID 找到 Hub，建立内存流。
@@ -161,6 +181,9 @@ func (d Dialer) Dial(_ context.Context, ep control.Endpoint) (control.Conn, erro
 		return nil, errors.New("connection refused")
 	}
 	c := &conn{hub: h, in: make(chan agent.In, 4096), done: make(chan struct{})}
+	h.mu.Lock()
+	h.conns = append(h.conns, c)
+	h.mu.Unlock()
 	c.s = h.NewSession(toModel(d.Node), func(m session.HubMsg) {
 		if a := toAgent(h.ID, m); a != nil {
 			c.push(a)

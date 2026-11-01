@@ -203,3 +203,10 @@ func DecodeTransfer(data []byte) (TransferRecord, error) {
 	err := json.Unmarshal(data, &d)
 	return TransferRecord{d.Node, d.OldBoot, d.NewBoot, d.Revoked, d.Settle}, err
 }
+
+// RestrictionVersion 返回已应用的限制快照版本（0 表示尚未收到）。
+func (is *Issuer) RestrictionVersion() uint64 {
+	is.mu.Lock()
+	defer is.mu.Unlock()
+	return is.rver
+}

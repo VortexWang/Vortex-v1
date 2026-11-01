@@ -68,8 +68,20 @@ func config(t *testing.T) *types.RuntimeConfig {
 		TargetPolicy: types.TargetPolicy{SelfHostedNode: true}}
 }
 
+type hubOpts struct {
+	runTTL    time.Duration
+	delegated uint64 // 0 = 1 GiB
+}
+
 func newHub(t *testing.T, id types.UUID, clk *clock.Fake, cfg *types.RuntimeConfig) *Hub {
-	sh, err := session.Open(session.Options{HubID: toModel(id), Clock: clk, Store: &ledger.MemStore{}, Rules: RulesOf(cfg)})
+	return newHubOpt(t, id, clk, cfg, hubOpts{})
+}
+
+func newHubOpt(t *testing.T, id types.UUID, clk *clock.Fake, cfg *types.RuntimeConfig, o hubOpts) *Hub {
+	if o.delegated == 0 {
+		o.delegated = 1 << 30
+	}
+	sh, err := session.Open(session.Options{HubID: toModel(id), Clock: clk, Store: &ledger.MemStore{}, Rules: RulesOf(cfg), RunTTL: o.runTTL})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +93,7 @@ func newHub(t *testing.T, id types.UUID, clk *clock.Fake, cfg *types.RuntimeConf
 	if err := b.Connect(); err != nil {
 		t.Fatal(err)
 	}
-	_ = link.Handle(upstream.Budget{Tenant: toModel(tenant), Version: 1, Delegated: 1 << 30}) // 委托 1 GiB 计费字节
+	_ = link.Handle(upstream.Budget{Tenant: toModel(tenant), Version: 1, Delegated: o.delegated}) // 委托的计费字节
 	_ = link.Handle(upstream.BillingVersions{Versions: []issuer.BillingVersion{{Version: 1, EffectiveAt: clk.Now().Add(-time.Hour)}}})
 	if err := b.SendDesired(nodeID, cfg); err != nil {
 		t.Fatal(err)
@@ -100,10 +112,20 @@ type nodeProc struct {
 	done   chan struct{}
 }
 
+type nodeOpts struct {
+	renew   time.Duration
+	healthy func(string) bool
+	applied func(*types.RuntimeConfig)
+}
+
 func startNode(t *testing.T, l logs, d Dialer, hubs []control.Endpoint) *nodeProc {
-	rt := engine.New(engine.Options{})
+	return startNodeOpt(t, l, d, hubs, nodeOpts{})
+}
+
+func startNodeOpt(t *testing.T, l logs, d Dialer, hubs []control.Endpoint, o nodeOpts) *nodeProc {
+	rt := engine.New(engine.Options{Healthy: o.healthy})
 	a, err := agent.New(context.Background(), agent.Options{Node: nodeID, AgentVersion: "e2e", Engine: rt,
-		BootLog: l.boot, UsageLog: l.usage, ConfigLog: l.config})
+		BootLog: l.boot, UsageLog: l.usage, ConfigLog: l.config, RenewEvery: o.renew, OnApplied: o.applied})
 	if err != nil {
 		t.Fatal(err)
 	}

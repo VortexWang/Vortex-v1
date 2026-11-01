@@ -103,8 +103,9 @@ type Grant struct {
 
 // Issuer 签发运行授权与计费授权。
 type Issuer struct {
-	HubID      model.UUID
-	Generation uint64
+	HubID       model.UUID
+	Generation  uint64
+	RunGrantTTL time.Duration // 0 = RunTTL；测试用较短的值验证到期行为
 
 	mu       sync.Mutex
 	clk      clock.Clock
@@ -283,7 +284,7 @@ func (is *Issuer) IssueRun(node, boot model.UUID, rules []RuleState) (*Grant, ma
 		return nil, nil, ErrStaleBoot
 	}
 	is.pruneRunLocked(now)
-	g := &Grant{ID: model.NewUUID(), Kind: model.GrantRun, Node: node, Boot: boot, Generation: is.Generation, IssuedAt: now, TTL: RunTTL}
+	g := &Grant{ID: model.NewUUID(), Kind: model.GrantRun, Node: node, Boot: boot, Generation: is.Generation, IssuedAt: now, TTL: is.runTTL()}
 	for _, r := range rules {
 		if err := is.checkLocked(r.TenantID, r.RuleID, now); err != nil {
 			refused[r.RuleID] = err
@@ -455,4 +456,11 @@ func (is *Issuer) SetBudgetRevoked(ids []model.UUID) error {
 	}
 	is.applyRevokedLocked(ids)
 	return nil
+}
+
+func (is *Issuer) runTTL() time.Duration {
+	if is.RunGrantTTL > 0 {
+		return is.RunGrantTTL
+	}
+	return RunTTL
 }

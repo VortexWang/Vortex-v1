@@ -97,6 +97,8 @@ type Manager struct {
 	pending   map[uint64]*Request
 	lastError map[types.UUID]string // 按规则（计费）或租户（份额）记录最近的拒绝原因
 	answered  bool                  // 签发方已对启动申请（Bootstrap）作答
+
+	RenewAfter time.Duration // 续期周期；0 = RenewEvery（测试用较短的值）
 }
 
 func New(clk clock.Clock, boot types.UUID) *Manager {
@@ -310,7 +312,11 @@ func (m *Manager) Due() []Request {
 	}
 	var out []Request
 	for _, g := range latest {
-		if now.Sub(g.received) < RenewEvery {
+		renew := m.RenewAfter
+		if renew == 0 {
+			renew = RenewEvery
+		}
+		if now.Sub(g.received) < renew {
 			continue
 		}
 		id := g.meta.GrantID

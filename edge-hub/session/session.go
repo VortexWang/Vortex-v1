@@ -179,7 +179,8 @@ type Options struct {
 	Clock    clock.Clock
 	Store    ledger.Store
 	Rules    Rules
-	Upstream Upstream // nil：本地落盘即确认；也可在 Open 之后用 SetUpstream 设置
+	Upstream Upstream      // nil：本地落盘即确认；也可在 Open 之后用 SetUpstream 设置
+	RunTTL   time.Duration // 运行授权有效期；0 = 5 分钟（测试用）
 }
 
 // Hub 是一个 Edge Hub 实例。
@@ -230,6 +231,7 @@ func Open(opt Options) (*Hub, error) {
 	h.Quota = quota.New(nil)
 	h.Issuer = issuer.New(opt.Clock, h.Quota, h.Mode.CanRenewRun)
 	h.Issuer.HubID = opt.HubID
+	h.Issuer.RunGrantTTL = opt.RunTTL
 	h.Leases = leases.New(opt.Clock)
 	l, err := ledger.Open(opt.Store, opt.Clock, func(e ledger.Entry) error {
 		if e.Kind == KindCheckpoint {
