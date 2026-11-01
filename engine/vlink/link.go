@@ -890,6 +890,11 @@ func (l *Link) onOpen(id uint32, p []byte) error {
 	s := l.newStream(id, false)
 	s.open = o
 	l.mu.Lock()
+	if l.isClosed() { // 链路已关闭并清空了流表（fail 先关闭 done、再在 l.mu 下清空）：不再登记
+		l.mu.Unlock()
+		s.terminate(ErrLinkClosed, false)
+		return nil
+	}
 	l.streams[id] = s
 	l.mu.Unlock()
 	select {
