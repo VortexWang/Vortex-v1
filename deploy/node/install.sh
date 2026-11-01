@@ -11,7 +11,7 @@ set -eu
 
 ROOT=${ROOT:-/}
 ROOT=${ROOT%/}
-binary= ca= relkey= hub= link= start=1
+binary='' ca='' relkey='' hub='' link='' start=1
 token=${VORTEX_ENROLL_TOKEN:-}
 
 die() { echo "install.sh: $*" >&2; exit 1; }
@@ -29,9 +29,9 @@ while [ $# -gt 0 ]; do
 	esac
 done
 
-[ -n "$binary" ] && [ -f "$binary" ] || die "--binary <path to vortex-node> is required"
-[ -n "$ca" ] && [ -f "$ca" ] || die "--ca <platform CA PEM> is required"
-[ -n "$relkey" ] && [ -f "$relkey" ] || die "--release-key <platform release public key PEM> is required"
+if [ -z "$binary" ] || [ ! -f "$binary" ]; then die "--binary <path to vortex-node> is required"; fi
+if [ -z "$ca" ] || [ ! -f "$ca" ]; then die "--ca <platform CA PEM> is required"; fi
+if [ -z "$relkey" ] || [ ! -f "$relkey" ]; then die "--release-key <platform release public key PEM> is required"; fi
 
 real=0
 if [ -z "$ROOT" ]; then
@@ -66,10 +66,10 @@ install -m 0644 "$here/vortex-node.service" "$unit/vortex-node.service"
 if [ -f "$config" ]; then
 	echo "already enrolled ($config exists): program, CA, release key and unit updated"
 else
-	[ -n "$token" ] && [ -n "$hub" ] || die "--token and --hub are required for the first installation"
+	if [ -z "$token" ] || [ -z "$hub" ]; then die "--token and --hub are required for the first installation"; fi
 	set -- enroll -token "$token" -hub "$hub" -ca "$etc/ca.crt" -data-dir "$data" -config "$config" \
 		-socket "$run/node.sock" -release-key "$etc/release.pub" -binary "$bindir/vortex-node"
-	[ -n "$link" ] && set -- "$@" -link-listen "$link"
+	if [ -n "$link" ]; then set -- "$@" -link-listen "$link"; fi
 	"$bindir/vortex-node" "$@"
 fi
 

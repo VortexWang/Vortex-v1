@@ -10,7 +10,7 @@ set -eu
 
 ROOT=${ROOT:-/}
 ROOT=${ROOT%/}
-binary= ca= backend= region= listen=:7400 start=1
+binary='' ca='' backend='' region='' listen=:7400 start=1
 token=${VORTEX_BOOTSTRAP_TOKEN:-}
 
 die() { echo "install.sh: $*" >&2; exit 1; }
@@ -28,8 +28,8 @@ while [ $# -gt 0 ]; do
 	esac
 done
 
-[ -n "$binary" ] && [ -f "$binary" ] || die "--binary <path to edge-hub> is required"
-[ -n "$ca" ] && [ -f "$ca" ] || die "--ca <platform CA PEM> is required"
+if [ -z "$binary" ] || [ ! -f "$binary" ]; then die "--binary <path to edge-hub> is required"; fi
+if [ -z "$ca" ] || [ ! -f "$ca" ]; then die "--ca <platform CA PEM> is required"; fi
 
 real=0
 if [ -z "$ROOT" ]; then
@@ -60,7 +60,9 @@ install -m 0644 "$here/edge-hub.service" "$unit/edge-hub.service"
 if [ -f "$config" ]; then
 	echo "already enrolled ($config exists): program, CA and unit updated"
 else
-	[ -n "$token" ] && [ -n "$backend" ] && [ -n "$region" ] || die "--token, --backend and --region are required for the first installation"
+	if [ -z "$token" ] || [ -z "$backend" ] || [ -z "$region" ]; then
+		die "--token, --backend and --region are required for the first installation"
+	fi
 	"$bindir/edge-hub" enroll -token "$token" -backend "$backend" -region "$region" -listen "$listen" \
 		-ca "$etc/ca.crt" -data-dir "$data" -config "$config"
 fi
