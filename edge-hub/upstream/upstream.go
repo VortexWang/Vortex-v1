@@ -141,6 +141,12 @@ type Drain struct {
 	Payload []byte
 }
 
+// Upgrade 是后端下发给某节点的升级指令（edgehub.v1.UpgradeCommand 的字节，原样转发）。
+type Upgrade struct {
+	Node    model.UUID
+	Payload []byte
+}
+
 func (Desired) down()         {}
 func (Command) down()         {}
 func (Restrictions) down()    {}
@@ -151,6 +157,7 @@ func (LedgerAck) down()       {}
 func (BillingVersions) down() {}
 func (Reconcile) down()       {}
 func (Drain) down()           {}
+func (Upgrade) down()         {}
 
 // ---------------------------------------------------------------- Link
 
@@ -428,6 +435,8 @@ func (l *Link) Handle(m Down) error {
 		}
 	case Drain:
 		h.SendDrain(m.Node, m.Payload)
+	case Upgrade:
+		h.SendUpgrade(m.Node, m.Payload)
 	}
 	return nil
 }

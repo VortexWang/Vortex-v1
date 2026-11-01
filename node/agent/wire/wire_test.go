@@ -14,6 +14,7 @@ import (
 	"vortex/node/agent/grants"
 	"vortex/node/agent/probe"
 	"vortex/node/agent/reconcile"
+	"vortex/node/agent/upgrade"
 	commonv1 "vortex/proto/gen/go/vortex/common/v1"
 	edgehubv1 "vortex/proto/gen/go/vortex/edgehub/v1"
 	runtimev1 "vortex/proto/gen/go/vortex/runtime/v1"
@@ -180,6 +181,10 @@ func TestAgentMessages(t *testing.T) {
 	if m.GetEvent().GetGrantLow().GetRemainingRawBytes() != 1234 {
 		t.Fatal("grant low remaining")
 	}
+	m, _ = AgentMessage(agent.UpgradeStatus{Status: upgrade.Status{Target: "2.0.0", Phase: upgrade.PhaseRolledBack, Error: "x"}})
+	if u := m.GetUpgrade(); u.GetTargetVersion() != "2.0.0" || u.GetPhase() != edgehubv1.UpgradePhase_UPGRADE_PHASE_ROLLED_BACK || u.GetError() != "x" {
+		t.Fatalf("upgrade status %+v", u)
+	}
 	m, _ = AgentMessage(agent.ProbeReport{Results: []probe.Result{{Subject: probe.Subject{Target: "a:1"}}}})
 	if m.GetProbes().GetResults()[0].Rtt != nil {
 		t.Fatal("unmeasured RTT must be unset (FE-006)")
@@ -208,6 +213,9 @@ func TestHubMessages(t *testing.T) {
 		{&edgehubv1.HubMessage{Body: &edgehubv1.HubMessage_Grants{Grants: &edgehubv1.GrantResponse{RequestId: 2, ErrorCode: "QUOTA_EXHAUSTED",
 			RevokedGrantIds: uuids([]types.UUID{hub})}}},
 			agent.GrantResponse{Response: grants.Response{RequestID: 2, Error: "QUOTA_EXHAUSTED", Revoked: []types.UUID{hub}}}},
+		{&edgehubv1.HubMessage{Body: &edgehubv1.HubMessage_Upgrade{Upgrade: &edgehubv1.UpgradeCommand{Version: "2.0.0", DownloadUrl: "https://r/2",
+			Sha256: []byte{1, 2}, Signature: []byte{3}, IrreversibleMigration: true}}},
+			agent.UpgradeCommand{Command: upgrade.Command{Version: "2.0.0", URL: "https://r/2", SHA256: []byte{1, 2}, Signature: []byte{3}, Irreversible: true}}},
 	}
 	for _, c := range cases {
 		b, _ := proto.Marshal(c.in)
@@ -217,6 +225,9 @@ func TestHubMessages(t *testing.T) {
 		if err != nil || !reflect.DeepEqual(got, c.want) {
 			t.Fatalf("%T:\n got %+v (%v)\nwant %+v", c.want, got, err, c.want)
 		}
+	}
+	if _, err := HubMessage(&edgehubv1.HubMessage{Body: &edgehubv1.HubMessage_Upgrade{Upgrade: &edgehubv1.UpgradeCommand{}}}); err == nil {
+		t.Fatal("upgrade without version accepted")
 	}
 	if _, err := HubMessage(&edgehubv1.HubMessage{}); err == nil {
 		t.Fatal("empty message accepted")

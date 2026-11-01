@@ -42,10 +42,39 @@ type protoBackend struct {
 	usage   int
 	applied []uint64
 	pushed  map[string]bool
+	out     func(*backendv1.BackendMessage) // 当前流（push 用）
+	version map[string]string               // 在线节点的程序版本（NodeStatus.agent_version），按 node_id
+}
+
+// push 经当前流下发一条消息。
+func (b *protoBackend) push(m *backendv1.BackendMessage) bool {
+	b.mu.Lock()
+	out := b.out
+	b.mu.Unlock()
+	if out == nil {
+		return false
+	}
+	out(m)
+	return true
+}
+
+// versions 返回各在线节点的程序版本。
+func (b *protoBackend) versions() map[string]string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := map[string]string{}
+	for k, v := range b.version {
+		out[k] = v
+	}
+	return out
 }
 
 func (b *protoBackend) Connect(s grpc.BidiStreamingServer[backendv1.HubUpMessage, backendv1.BackendMessage]) error {
-	send := func(m *backendv1.BackendMessage) { _ = s.Send(m) }
+	var smu sync.Mutex
+	send := func(m *backendv1.BackendMessage) { smu.Lock(); _ = s.Send(m); smu.Unlock() }
+	b.mu.Lock()
+	b.out = send
+	b.mu.Unlock()
 	for {
 		m, err := s.Recv()
 		if err != nil {
@@ -67,6 +96,14 @@ func (b *protoBackend) Connect(s grpc.BidiStreamingServer[backendv1.HubUpMessage
 			for _, n := range x.NodeStatus.Nodes {
 				key := string(n.GetBootId().GetValue())
 				b.mu.Lock()
+				if b.version == nil {
+					b.version = map[string]string{}
+				}
+				if nk := string(n.GetNodeId().GetValue()); n.Connected {
+					b.version[nk] = n.AgentVersion
+				} else {
+					delete(b.version, nk)
+				}
 				first := n.Connected && !b.pushed[key]
 				b.pushed[key] = true
 				b.mu.Unlock()

@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -17,6 +18,16 @@ type SQLite struct {
 }
 
 // OpenSQLite 打开 path 处数据库中的 table（不存在则创建）。
+// 本地数据格式（PRAGMA user_version，AGT-008 的兼容矩阵）：本版本写入 Schema，能读取 [SchemaMin, SchemaMax]。
+// 打开更新格式的数据库（例如不可逆升级后又手动换回旧程序）时拒绝，而不是误读。
+const (
+	Schema    = 1
+	SchemaMin = 1
+	SchemaMax = 1
+)
+
+var ErrSchema = errors.New("store: unsupported store schema")
+
 func OpenSQLite(path, table string) (*SQLite, error) {
 	for _, c := range table {
 		if !(c == '_' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9') {
@@ -28,6 +39,20 @@ func OpenSQLite(path, table string) (*SQLite, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
+	var v int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if v == 0 { // 新数据库，或本字段出现之前的格式 1
+		if _, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, Schema)); err != nil {
+			db.Close()
+			return nil, err
+		}
+	} else if v < SchemaMin || v > SchemaMax {
+		db.Close()
+		return nil, fmt.Errorf("%w: %d (supported %d..%d)", ErrSchema, v, SchemaMin, SchemaMax)
+	}
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS ` + table + ` (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, data BLOB NOT NULL)`); err != nil {
 		db.Close()
 		return nil, err

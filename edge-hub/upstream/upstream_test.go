@@ -300,6 +300,10 @@ func TestLeasesDrainAndTopUp(t *testing.T) {
 	if ms := f.agent.take(); len(ms) != 1 {
 		t.Fatal("drain not forwarded")
 	}
+	_ = f.l.Handle(Upgrade{Node: node, Payload: []byte{1}})
+	if ms := f.agent.take(); len(ms) != 1 || string(ms[0].(session.UpgradeCommand).Payload) != "\x01" {
+		t.Fatalf("upgrade not forwarded: %+v", ms)
+	}
 	f.up.take()
 	_ = f.l.Handle(Budget{Tenant: tenant, Version: 2, Delegated: 10 << 20})
 	_ = f.s.Handle(session.GrantRequest{ID: 1, Kind: model.GrantBilling, Rule: ruleA}) // 8 MiB：剩余 < 30%

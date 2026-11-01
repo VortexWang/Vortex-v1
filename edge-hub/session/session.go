@@ -95,7 +95,7 @@ type ApplyReport struct {
 
 // Passthrough 是只需转发给后端的节点消息（引擎事件、探测结果、状态）。
 type Passthrough struct {
-	Kind    string // "event" / "probes" / "state"
+	Kind    string // "event" / "probes" / "state" / "upgrade"
 	Payload []byte
 }
 
@@ -144,13 +144,17 @@ type ApplyCommand struct {
 
 type DrainCommand struct{ Payload []byte }
 
-func (DesiredConfig) hubMsg() {}
-func (ApplyCommand) hubMsg()  {}
-func (DrainCommand) hubMsg()  {}
-func (HubHello) hubMsg()      {}
-func (ModeChange) hubMsg()    {}
-func (GrantResponse) hubMsg() {}
-func (UsageAck) hubMsg()      {}
+// UpgradeCommand 是转发给节点的升级指令（NodeOperation.upgrade，AGT-008；载荷不解析）。
+type UpgradeCommand struct{ Payload []byte }
+
+func (DesiredConfig) hubMsg()  {}
+func (ApplyCommand) hubMsg()   {}
+func (DrainCommand) hubMsg()   {}
+func (UpgradeCommand) hubMsg() {}
+func (HubHello) hubMsg()       {}
+func (ModeChange) hubMsg()     {}
+func (GrantResponse) hubMsg()  {}
+func (UsageAck) hubMsg()       {}
 
 // ---------------------------------------------------------------- 依赖
 

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 )
@@ -67,5 +68,25 @@ func TestLogsConform(t *testing.T) {
 	}
 	if _, err := OpenSQLite(filepath.Join(dir, "c.db"), "bad;name"); err == nil {
 		t.Fatal("bad table name accepted")
+	}
+}
+
+// 数据格式：新库写入 Schema；格式超出可读范围时拒绝打开（AGT-008 兼容矩阵）。
+func TestSQLiteSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "a.db")
+	s, err := OpenSQLite(path, "usage")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != Schema {
+		t.Fatalf("user_version %d %v", v, err)
+	}
+	if _, err := s.db.Exec(`PRAGMA user_version = 99`); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	if _, err := OpenSQLite(path, "usage"); !errors.Is(err, ErrSchema) {
+		t.Fatalf("newer schema opened: %v", err)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"vortex/node/agent"
 	"vortex/node/agent/grants"
 	"vortex/node/agent/reconcile"
+	"vortex/node/agent/upgrade"
 	commonv1 "vortex/proto/gen/go/vortex/common/v1"
 	edgehubv1 "vortex/proto/gen/go/vortex/edgehub/v1"
 	runtimev1 "vortex/proto/gen/go/vortex/runtime/v1"
@@ -87,6 +88,9 @@ func AgentMessage(m agent.Out) (*edgehubv1.AgentMessage, error) {
 			r.Results = append(r.Results, pr)
 		}
 		return &edgehubv1.AgentMessage{Body: &edgehubv1.AgentMessage_Probes{Probes: r}}, nil
+	case agent.UpgradeStatus:
+		return &edgehubv1.AgentMessage{Body: &edgehubv1.AgentMessage_Upgrade{Upgrade: &edgehubv1.UpgradeStatus{
+			TargetVersion: m.Target, Phase: edgehubv1.UpgradePhase(m.Phase), Error: m.Error}}}, nil
 	}
 	return nil, fmt.Errorf("%w: unknown agent message %T", ErrInvalid, m)
 }
@@ -151,7 +155,12 @@ func HubMessage(p *edgehubv1.HubMessage) (agent.In, error) {
 		}
 		return agent.DrainCommand{Timeout: fromDur(b.Drain.GetTimeout()), Rules: rules}, nil
 	case *edgehubv1.HubMessage_Upgrade:
-		return nil, nil // AGT-T13 尚未实现
+		u := b.Upgrade
+		if u.GetVersion() == "" {
+			return nil, fmt.Errorf("%w: upgrade without version", ErrInvalid)
+		}
+		return agent.UpgradeCommand{Command: upgrade.Command{Version: u.GetVersion(), URL: u.GetDownloadUrl(), SHA256: u.GetSha256(),
+			Signature: u.GetSignature(), Irreversible: u.GetIrreversibleMigration()}}, nil
 	}
 	return nil, fmt.Errorf("%w: empty hub message", ErrInvalid)
 }

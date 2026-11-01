@@ -97,6 +97,14 @@ func TestCommands(t *testing.T) {
 	if run([]string{"version"}, &out, &errb) != 0 || strings.TrimSpace(out.String()) != app.Version {
 		t.Fatal("version")
 	}
+	out.Reset()
+	var man struct {
+		Version     string `json:"version"`
+		StoreSchema int    `json:"store_schema"`
+	}
+	if run([]string{"version", "-json"}, &out, &errb) != 0 || json.Unmarshal(out.Bytes(), &man) != nil || man.Version != app.Version || man.StoreSchema == 0 {
+		t.Fatalf("version -json: %q", out.String())
+	}
 	if run([]string{"status", "-socket", filepath.Join(t.TempDir(), "none.sock")}, &out, &errb) != 1 {
 		t.Fatal("status without a running node")
 	}

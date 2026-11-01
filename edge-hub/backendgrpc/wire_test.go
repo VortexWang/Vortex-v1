@@ -60,6 +60,13 @@ func TestDown(t *testing.T) {
 				r := d.(upstream.Reconcile)
 				return r.Phase == upstream.ReconcileStarted && r.NewGeneration == 3 && r.RevokedTenants[0] == n
 			}},
+		{&backendv1.BackendMessage{Body: &backendv1.BackendMessage_NodeOperation{NodeOperation: &backendv1.NodeOperation{NodeId: wire.UUID(n),
+			Op: &backendv1.NodeOperation_Upgrade{Upgrade: &edgehubv1.UpgradeCommand{Version: "1.2.0", Sha256: []byte{1}, IrreversibleMigration: true}}}}},
+			func(d upstream.Down) bool {
+				u := d.(upstream.Upgrade)
+				var c edgehubv1.UpgradeCommand
+				return u.Node == n && proto.Unmarshal(u.Payload, &c) == nil && c.Version == "1.2.0" && c.IrreversibleMigration
+			}},
 	}
 	for i, c := range cases {
 		d, err := Down(c.in)

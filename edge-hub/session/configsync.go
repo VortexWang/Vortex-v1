@@ -220,6 +220,18 @@ func (h *Hub) SendDrain(node model.UUID, payload []byte) bool {
 	return true
 }
 
+// SendUpgrade 转发后端的升级指令（NodeOperation.upgrade）。节点不在线时返回 false（后端据节点状态重发）。
+func (h *Hub) SendUpgrade(node model.UUID, payload []byte) bool {
+	h.mu.Lock()
+	s := h.sessions[node]
+	h.mu.Unlock()
+	if s == nil {
+		return false
+	}
+	s.send(UpgradeCommand{Payload: payload})
+	return true
+}
+
 var ErrUnknownNode = errors.New("session: node has not connected to this hub")
 
 // PushShares 转发后端为节点当前启动生成的份额租约（在线时，LIM-004）：记录并推送给节点。

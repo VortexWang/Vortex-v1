@@ -128,7 +128,9 @@ func Up(m upstream.Up, region, version string, now time.Time) (*backendv1.HubUpM
 			}
 			return &backendv1.HubUpMessage{Body: &backendv1.HubUpMessage_Probes{Probes: &backendv1.ProbeSummary{NodeId: wire.UUID(m.Node), Report: &pr}}}, nil
 		}
-		return nil, nil // 实际状态随 NodeStatusBatch 上报
+		// 实际状态随 NodeStatusBatch 上报；升级进度（UpgradeStatus）在 HubUpMessage 中没有对应字段（契约缺口），
+		// 后端以 NodeStatus 的 agent_version 与 boot_id 判断升级结果
+		return nil, nil
 	}
 	return nil, fmt.Errorf("%w: unknown up message %T", wire.ErrInvalid, m)
 }
@@ -271,7 +273,14 @@ func Down(p *backendv1.BackendMessage) (upstream.Down, error) {
 			}
 			return upstream.Drain{Node: n, Payload: raw}, nil
 		}
-		return nil, nil // 升级指令：AGT-T13
+		if u := b.NodeOperation.GetUpgrade(); u != nil {
+			raw, err := proto.Marshal(u)
+			if err != nil {
+				return nil, err
+			}
+			return upstream.Upgrade{Node: n, Payload: raw}, nil
+		}
+		return nil, nil
 	}
 	return nil, fmt.Errorf("%w: empty backend message", wire.ErrInvalid)
 }

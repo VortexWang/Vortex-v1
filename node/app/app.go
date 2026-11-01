@@ -4,9 +4,11 @@ package app
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -26,8 +28,10 @@ import (
 	"vortex/node/agent/grpcconn"
 	"vortex/node/agent/localapi"
 	"vortex/node/agent/probe"
+	"vortex/node/agent/reconcile"
 	"vortex/node/agent/report"
 	"vortex/node/agent/store"
+	"vortex/node/agent/upgrade"
 	"vortex/node/agent/wire"
 	"vortex/node/internal/supervisor"
 	edgehubv1 "vortex/proto/gen/go/vortex/edgehub/v1"
@@ -53,6 +57,10 @@ type Config struct {
 	// LinkListen 是节点间链路（VLink）的监听地址，例如 "0.0.0.0:7443"。为空时本节点不接受入站链路
 	// （仍可作为入口或反向建链方主动建链）；节点间链路需要节点证书（cert_file/key_file/ca_file）。
 	LinkListen string `json:"link_listen"`
+	// 升级（AGT-008）：平台发布公钥（Ed25519，PEM PUBLIC KEY，随安装包分发）。未设置时拒绝一切升级指令。
+	ReleaseKeyFile string `json:"release_key_file"`
+	// Binary 是 systemd 启动的程序路径，升级时原子替换它；为空时取当前程序（os.Executable）。
+	Binary string `json:"binary"`
 
 	renewEvery time.Duration // 证书检查周期（测试用；默认 1 小时）
 }
@@ -157,8 +165,48 @@ func tunnelOptions(cfg *Config, node, bootID types.UUID, dialer control.Dialer, 
 	return t, nil
 }
 
-// Run 组装并运行节点，直至 ctx 结束。dialer 为 nil 时不建立控制连接。
-func Run(ctx context.Context, cfg *Config, dialer control.Dialer, log *slog.Logger) error {
+// faultCrashAfterUpgradeCheck 非空时，进程在升级启动检查之后崩溃（故障注入，只用于测试构建：
+// -ldflags "-X vortex/node/app.faultCrashAfterUpgradeCheck=1"），用于验证启动后崩溃的版本被回退。
+var faultCrashAfterUpgradeCheck string
+
+// ErrRestart：Run 因升级或回退而结束，进程应退出并由 systemd 重新启动（AGT-008）。
+var ErrRestart = errors.New("restart requested (upgrade)")
+
+// Manifest 是本程序的版本与本地数据格式（`vortex-node version -json`，升级时的兼容矩阵）。
+func Manifest() upgrade.Manifest {
+	return upgrade.Manifest{Version: Version, StoreSchema: store.Schema, StoreMin: store.SchemaMin, StoreMax: store.SchemaMax}
+}
+
+// LoadReleaseKey 读取平台发布公钥。
+func LoadReleaseKey(path string) (ed25519.PublicKey, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	blk, _ := pem.Decode(b)
+	if blk == nil || blk.Type != "PUBLIC KEY" {
+		return nil, fmt.Errorf("%s: no PEM PUBLIC KEY", path)
+	}
+	k, err := x509.ParsePKIXPublicKey(blk.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	pub, ok := k.(ed25519.PublicKey)
+	if !ok {
+		return nil, fmt.Errorf("%s: not an Ed25519 key", path)
+	}
+	return pub, nil
+}
+
+// healthy：升级后的新版本已连接 Edge Hub，且配置已生效或没有配置（AGT-008 的健康判定）。
+func healthy(s agent.Status) bool {
+	return s.Connected && (s.Phase == reconcile.PhaseApplied || s.Phase == reconcile.PhaseIdle)
+}
+
+// Run 组装并运行节点，直至 ctx 结束；因升级或回退需要重启时返回 ErrRestart。dialer 为 nil 时不建立控制连接。
+func Run(parent context.Context, cfg *Config, dialer control.Dialer, log *slog.Logger) error {
+	ctx, stopRun := context.WithCancelCause(parent)
+	defer stopRun(nil)
 	node, err := ParseUUID(cfg.NodeID)
 	if err != nil {
 		return err
@@ -168,6 +216,22 @@ func Run(ctx context.Context, cfg *Config, dialer control.Dialer, log *slog.Logg
 	}
 	if err := os.MkdirAll(filepath.Dir(cfg.Socket), 0o755); err != nil {
 		return err
+	}
+	// 升级后的首次启动：先计数（启动后崩溃也算），超过上限即回退并重启，不打开本地数据（AGT-008）
+	var a *agent.Agent
+	disk := &report.DiskGuard{Path: cfg.DataDir, Low: cfg.DiskLowBytes, High: cfg.DiskHighBytes,
+		OnLow: func(free uint64) { log.Warn("disk low: new sessions should stop (AGT-006)", "free", free) },
+		OnOK:  func(free uint64) { log.Info("disk recovered", "free", free) }}
+	up, err := upgradeManager(cfg, func() *agent.Agent { return a }, disk, log, func() { stopRun(ErrRestart) })
+	if err != nil {
+		return err
+	}
+	if up.Begin() {
+		log.Warn("upgraded version failed to start repeatedly: rolled back, restarting")
+		return ErrRestart
+	}
+	if faultCrashAfterUpgradeCheck != "" {
+		panic("fault injection: crash after the upgrade start check") // 仅测试构建（-ldflags -X）
 	}
 	// 本地存储：一个 SQLite（WAL）数据库，启动标识、计量、最后生效配置各一张表（AGT-003）
 	var logs []*store.SQLite
@@ -212,12 +276,15 @@ func Run(ctx context.Context, cfg *Config, dialer control.Dialer, log *slog.Logg
 		log.Info("link listener", "addr", tun.LinkListener.Addr().String())
 	}
 	eng := engine.New(engine.Options{Healthy: prober.TargetHealthy, Tunnel: tun})
-	disk := &report.DiskGuard{Path: cfg.DataDir, Low: cfg.DiskLowBytes, High: cfg.DiskHighBytes,
-		OnLow: func(free uint64) { log.Warn("disk low: new sessions should stop (AGT-006)", "free", free) },
-		OnOK:  func(free uint64) { log.Info("disk recovered", "free", free) }}
-	a, err := agent.New(ctx, agent.Options{Node: node, AgentVersion: Version, Engine: eng,
+	a, err = agent.New(ctx, agent.Options{Node: node, AgentVersion: Version, Engine: eng,
 		BootLog: bootLog, Boot: &b, UsageLog: usageLog, ConfigLog: configLog, Disk: disk,
 		OnApplied: func(c *types.RuntimeConfig) { prober.SetSubjects(probe.Subjects(c)) },
+		OnUpgrade: func(c upgrade.Command) {
+			log.Info("upgrade command", "version", c.Version, "irreversible", c.Irreversible)
+			if err := up.Start(ctx, c); err != nil {
+				log.Warn("upgrade ignored", "version", c.Version, "err", err)
+			}
+		},
 		OnClockSkew: func(hub types.UUID, off, unc time.Duration, alert bool) {
 			if alert {
 				log.Warn("clock skew with Edge Hub exceeds 5s; grants are unaffected, timestamps in logs and usage may be off (AGT-005)",
@@ -257,6 +324,11 @@ func Run(ctx context.Context, cfg *Config, dialer control.Dialer, log *slog.Logg
 		log.Error("module exited", "module", e.Module, "err", e.Err, "restart_in", e.Restart)
 	}}
 	sup.Go(ctx, "agent", func(ctx context.Context) error { a.Run(ctx); return nil })
+	go func() {
+		if up.Await(ctx) {
+			log.Warn("upgraded version unhealthy: rolled back, restarting")
+		}
+	}()
 	sup.Go(ctx, "probe", func(ctx context.Context) error { prober.Run(ctx, probe.Interval, a.ReportProbes); return nil })
 	if dialer != nil && len(cfg.EdgeHubs) > 0 {
 		var eps []control.Endpoint
@@ -290,7 +362,55 @@ func Run(ctx context.Context, cfg *Config, dialer control.Dialer, log *slog.Logg
 	log.Info("vortex-node started", "node", cfg.NodeID, "boot", FormatUUID(a.Status().Boot), "version", Version)
 	<-ctx.Done()
 	sup.Wait()
-	return a.Shutdown(eng.Close)
+	if err := a.Shutdown(eng.Close); err != nil {
+		return err
+	}
+	if errors.Is(context.Cause(ctx), ErrRestart) && parent.Err() == nil {
+		return ErrRestart
+	}
+	return nil
+}
+
+func upgradeManager(cfg *Config, agentOf func() *agent.Agent, disk *report.DiskGuard, log *slog.Logger, restart func()) (*upgrade.Manager, error) {
+	bin := cfg.Binary
+	if bin == "" {
+		exe, err := os.Executable()
+		if err != nil {
+			return nil, err
+		}
+		if bin, err = filepath.EvalSymlinks(exe); err != nil {
+			return nil, err
+		}
+	}
+	m := &upgrade.Manager{Self: Manifest(), Binary: bin, Dir: filepath.Join(cfg.DataDir, "upgrade"),
+		Drain:   func(ctx context.Context) error { return agentOf().Drain(ctx, nil) },
+		Restart: restart,
+		Report: func(s upgrade.Status) {
+			log.Info("upgrade", "target", s.Target, "phase", s.Phase.String(), "err", s.Error)
+			agentOf().ReportUpgrade(s)
+		},
+		Healthy: func() bool { return healthy(agentOf().Status()) },
+	}
+	if cfg.ReleaseKeyFile != "" {
+		k, err := LoadReleaseKey(cfg.ReleaseKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("release_key_file: %w", err)
+		}
+		m.ReleaseKey = k
+	}
+	if disk != nil {
+		inner := m.Free
+		m.Free = func(p string) (uint64, error) {
+			if disk.Low > 0 && disk.Last() > 0 && disk.Last() < disk.Low {
+				return 0, nil // 数据盘已在低水位（AGT-006）：不升级
+			}
+			if inner == nil {
+				return upgrade.Free(p)
+			}
+			return inner(p)
+		}
+	}
+	return m, nil
 }
 
 func StatusView(s agent.Status, disk *report.DiskGuard) localapi.Status {

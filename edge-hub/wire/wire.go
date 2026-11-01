@@ -171,7 +171,7 @@ func FromAgent(p *edgehubv1.AgentMessage) (session.AgentMsg, error) {
 	case *edgehubv1.AgentMessage_Probes:
 		return session.Passthrough{Kind: "probes", Payload: marshal(b.Probes)}, nil
 	case *edgehubv1.AgentMessage_Upgrade:
-		return nil, nil
+		return session.Passthrough{Kind: "upgrade", Payload: marshal(b.Upgrade)}, nil
 	}
 	return nil, fmt.Errorf("%w: empty agent message", ErrInvalid)
 }
@@ -230,6 +230,12 @@ func ToAgent(hub model.UUID, region string, m session.HubMsg) (*edgehubv1.HubMes
 			return nil, fmt.Errorf("%w: drain: %v", ErrInvalid, err)
 		}
 		return &edgehubv1.HubMessage{Body: &edgehubv1.HubMessage_Drain{Drain: &d}}, nil
+	case session.UpgradeCommand:
+		var u edgehubv1.UpgradeCommand
+		if err := proto.Unmarshal(m.Payload, &u); err != nil {
+			return nil, fmt.Errorf("%w: upgrade: %v", ErrInvalid, err)
+		}
+		return &edgehubv1.HubMessage{Body: &edgehubv1.HubMessage_Upgrade{Upgrade: &u}}, nil
 	}
 	return nil, fmt.Errorf("%w: unknown hub message %T", ErrInvalid, m)
 }

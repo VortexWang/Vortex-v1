@@ -24,6 +24,7 @@ import (
 	"vortex/node/agent/reconcile"
 	"vortex/node/agent/report"
 	"vortex/node/agent/store"
+	"vortex/node/agent/upgrade"
 	"vortex/node/internal/clock"
 )
 
@@ -46,6 +47,8 @@ type Options struct {
 	// OnClockSkew 在每次与所连 Edge Hub 做墙钟比对后调用（AGT-005）：alert 表示扣除不确定度后偏差仍超过 5 秒。
 	// 只用于告警，不影响授权。不在 Agent 的锁内调用。
 	OnClockSkew func(hub types.UUID, offset, uncertainty time.Duration, alert bool)
+	// OnUpgrade 收到升级指令时调用（AGT-008），在 Agent 的锁内调用，不得同步回调 Agent（应异步执行升级）。
+	OnUpgrade func(upgrade.Command)
 	// RenewEvery 是运行授权与份额的续期周期；0 = 60 秒（测试用较短的值配合较短的授权有效期）。
 	RenewEvery time.Duration
 }
@@ -65,6 +68,15 @@ type Agent struct {
 	rates *rateWindow
 	low   bool // 磁盘低水位
 	skew  *ClockSkew
+	upg   *upgrade.Status // 最近的升级进度：每次连接建立后重发，直到进程退出
+}
+
+// ReportUpgrade 上报升级进度（AGT-008）。未连接时在下次连接建立后发送。
+func (a *Agent) ReportUpgrade(s upgrade.Status) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.upg = &s
+	a.sendLocked(UpgradeStatus{s})
 }
 
 // ClockSkew 是最近一次墙钟比对的结果：Offset 为 Edge Hub 相对本地的偏差（正值表示 Edge Hub 快）。
@@ -174,6 +186,9 @@ func (a *Agent) HandleHub(ctx context.Context, m In) {
 		if r := a.gr.Bootstrap(); r != nil {
 			a.sendLocked(GrantRequest{*r})
 		}
+		if a.upg != nil {
+			a.sendLocked(UpgradeStatus{*a.upg})
+		}
 	case ModeChange:
 		a.mode = m.Mode
 	case DesiredConfig:
@@ -208,6 +223,10 @@ func (a *Agent) HandleHub(ctx context.Context, m In) {
 			defer cancel()
 			_ = a.Drain(dctx, m.Rules)
 		}()
+	case UpgradeCommand:
+		if a.opt.OnUpgrade != nil {
+			a.opt.OnUpgrade(m.Command)
+		}
 	}
 }
 

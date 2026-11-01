@@ -57,6 +57,12 @@ func TestFromAgent(t *testing.T) {
 	if err := proto.Unmarshal(u.Snapshot, &snap); err != nil || len(snap.GrantConsumptions) != 1 {
 		t.Fatal("snapshot not forwarded intact")
 	}
+	up := am(&edgehubv1.AgentMessage{Body: &edgehubv1.AgentMessage_Upgrade{Upgrade: &edgehubv1.UpgradeStatus{TargetVersion: "1.2.0",
+		Phase: edgehubv1.UpgradePhase_UPGRADE_PHASE_HEALTHY}}}).(session.Passthrough)
+	var us edgehubv1.UpgradeStatus
+	if up.Kind != "upgrade" || proto.Unmarshal(up.Payload, &us) != nil || us.TargetVersion != "1.2.0" {
+		t.Fatalf("upgrade status %+v", up)
+	}
 	for _, bad := range []*edgehubv1.AgentMessage{
 		{},
 		{Body: &edgehubv1.AgentMessage_Hello{Hello: &edgehubv1.AgentHello{NodeId: UUID(id)}}}, // 无 boot_id
@@ -85,6 +91,13 @@ func TestToAgent(t *testing.T) {
 	}
 	if _, err := ToAgent(id, "r", session.DesiredConfig{Version: 1, Payload: []byte{0xff, 0xff}}); err == nil {
 		t.Fatal("corrupt config payload accepted")
+	}
+	raw, _ := proto.Marshal(&edgehubv1.UpgradeCommand{Version: "1.2.0", DownloadUrl: "https://x/y"})
+	if u, err := ToAgent(id, "r", session.UpgradeCommand{Payload: raw}); err != nil || u.GetUpgrade().GetVersion() != "1.2.0" {
+		t.Fatalf("upgrade %v %v", u, err)
+	}
+	if _, err := ToAgent(id, "r", session.UpgradeCommand{Payload: []byte{0xff, 0xff}}); err == nil {
+		t.Fatal("corrupt upgrade payload accepted")
 	}
 	h, _ := ToAgent(id, "r", session.HubHello{Hub: id, Mode: model.ModeAutonomous})
 	if h.GetHello().GetMode() != commonv1.HubMode_HUB_MODE_AUTONOMOUS || h.GetHello().GetRegion() != "r" {

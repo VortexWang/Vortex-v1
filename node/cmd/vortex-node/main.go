@@ -4,7 +4,7 @@
 //	vortex-node status [-socket /run/vortex/node.sock]
 //	vortex-node drain  [-socket ...] [-timeout 300s] [-rules id,id]
 //	vortex-node enroll -token T -hub host:port [-ca /etc/vortex/ca.crt] [-data-dir ...] [-config ...]
-//	vortex-node version
+//	vortex-node version [-json]
 //
 // run 的组装见 node/app：supervisor 下运行 Agent 事件循环、探测、本地运维接口与控制连接（配置了证书时
 // 经 gRPC + mTLS 连接 Edge Hub；未配置时不连接，恢复最后生效配置后保持“授权待确认”）。
@@ -13,6 +13,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -28,6 +29,9 @@ import (
 	"vortex/node/app"
 )
 
+// ExitRestart 是升级或回退后请求 systemd 重启的退出码（单元配置 Restart=always）。
+const ExitRestart = 75
+
 func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 
 func run(args []string, stdout, stderr io.Writer) int {
@@ -37,6 +41,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	switch args[0] {
 	case "version":
+		if len(args) > 1 && args[1] == "-json" { // 升级时由旧版本执行，读取兼容信息（AGT-008）
+			b, _ := json.Marshal(app.Manifest())
+			fmt.Fprintln(stdout, string(b))
+			return 0
+		}
 		fmt.Fprintln(stdout, app.Version)
 		return 0
 	case "run":
@@ -59,7 +68,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
-		if err := app.Run(ctx, cfg, dialer, log); err != nil {
+		if err := app.Run(ctx, cfg, dialer, log); errors.Is(err, app.ErrRestart) {
+			log.Info("exiting for restart (upgrade)")
+			return ExitRestart
+		} else if err != nil {
 			log.Error("run", "err", err)
 			return 1
 		}

@@ -16,6 +16,7 @@ import (
 	"vortex/node/agent/probe"
 	"vortex/node/agent/reconcile"
 	"vortex/node/agent/store"
+	"vortex/node/agent/upgrade"
 	"vortex/node/internal/clock"
 )
 
@@ -528,5 +529,53 @@ func TestObserveClock(t *testing.T) {
 	}
 	if len(calls) != 2 || !calls[0] || calls[1] {
 		t.Fatalf("callbacks %v", calls)
+	}
+}
+
+type recSession struct {
+	mu  sync.Mutex
+	out []Out
+}
+
+func (s *recSession) Send(m Out) error {
+	s.mu.Lock()
+	s.out = append(s.out, m)
+	s.mu.Unlock()
+	return nil
+}
+
+// 升级指令交给 OnUpgrade；升级进度在每次连接建立（HubHello）后重发（AGT-008：新版本启动时可能尚未连接）。
+func TestUpgradeCommandAndStatusResent(t *testing.T) {
+	l := newLogs()
+	var cmds []upgrade.Command
+	a, err := New(context.Background(), Options{Node: nodeID, Engine: &closingEngine{}, BootLog: l.boot, UsageLog: l.usage, ConfigLog: l.config,
+		OnUpgrade: func(c upgrade.Command) { cmds = append(cmds, c) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.ReportUpgrade(upgrade.Status{Target: "2.0.0", Phase: upgrade.PhaseHealthy}) // 未连接
+	statuses := func(s *recSession) int {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		n := 0
+		for _, m := range s.out {
+			if u, ok := m.(UpgradeStatus); ok && u.Target == "2.0.0" && u.Phase == upgrade.PhaseHealthy {
+				n++
+			}
+		}
+		return n
+	}
+	for i := 0; i < 2; i++ {
+		s := &recSession{}
+		a.Connected(s)
+		a.HandleHub(context.Background(), HubHello{Hub: hubID, Mode: ModeOnline})
+		if statuses(s) != 1 {
+			t.Fatalf("connection %d: status sent %d times", i, statuses(s))
+		}
+		a.Disconnected()
+	}
+	a.HandleHub(context.Background(), UpgradeCommand{upgrade.Command{Version: "3.0.0"}})
+	if len(cmds) != 1 || cmds[0].Version != "3.0.0" {
+		t.Fatalf("commands %+v", cmds)
 	}
 }

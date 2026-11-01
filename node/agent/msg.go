@@ -8,6 +8,7 @@ import (
 	"vortex/node/agent/probe"
 	"vortex/node/agent/reconcile"
 	"vortex/node/agent/report"
+	"vortex/node/agent/upgrade"
 )
 
 // 控制流消息（契约 C2 NodeControl.Connect 的 AgentMessage / HubMessage）。gRPC 接入后由适配层与生成代码互转。
@@ -56,6 +57,9 @@ type StateReport struct{ State types.RuntimeState }
 
 type ProbeReport struct{ Results []probe.Result }
 
+// UpgradeStatus：升级进度（AGT-008）。
+type UpgradeStatus struct{ upgrade.Status }
+
 func (Hello) out()         {}
 func (HeldGrants) out()    {}
 func (PrepareReport) out() {}
@@ -65,6 +69,7 @@ func (UsageBatch) out()    {}
 func (EngineEvent) out()   {}
 func (StateReport) out()   {}
 func (ProbeReport) out()   {}
+func (UpgradeStatus) out() {}
 
 // In 是 Edge Hub → Agent 的消息。
 type In interface{ in() }
@@ -97,13 +102,17 @@ type DrainCommand struct {
 	Rules   []types.UUID
 }
 
-func (DrainCommand) in()  {}
-func (HubHello) in()      {}
-func (ModeChange) in()    {}
-func (DesiredConfig) in() {}
-func (ApplyCommand) in()  {}
-func (GrantResponse) in() {}
-func (UsageAck) in()      {}
+// UpgradeCommand：升级指令（AGT-008）。
+type UpgradeCommand struct{ upgrade.Command }
+
+func (UpgradeCommand) in() {}
+func (DrainCommand) in()   {}
+func (HubHello) in()       {}
+func (ModeChange) in()     {}
+func (DesiredConfig) in()  {}
+func (ApplyCommand) in()   {}
+func (GrantResponse) in()  {}
+func (UsageAck) in()       {}
 
 // Session 是一条控制连接的发送端。Send 不得长时间阻塞（实现应带缓冲或超时，失败即视为连接断开）。
 type Session interface {
