@@ -91,3 +91,14 @@ func TestToAgent(t *testing.T) {
 		t.Fatal("hello")
 	}
 }
+
+func TestRulesFromConfig(t *testing.T) {
+	b, _ := proto.Marshal(&runtimev1.RuntimeConfig{Rules: []*runtimev1.Rule{{RuleId: UUID(id), TenantId: UUID(model.UUID{8}), EnforcementPoint: true, PathCoefficientMilli: 1500}}})
+	rs, err := RulesFromConfig(b)
+	if err != nil || len(rs) != 1 || rs[0] != (issuer.RuleState{RuleID: id, TenantID: model.UUID{8}, EnforcementPoint: true, PathCoefMilli: 1500}) {
+		t.Fatalf("%+v %v", rs, err)
+	}
+	if _, err := RulesFromConfig([]byte{0xff}); err == nil {
+		t.Fatal("corrupt payload")
+	}
+}

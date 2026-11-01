@@ -52,12 +52,12 @@ func newPKI(t *testing.T) *pki {
 	return &pki{ca: ca, key: key, roots: roots, n: 1}
 }
 
-func (p *pki) issue(t *testing.T, uri string, usage x509.ExtKeyUsage) tls.Certificate {
+func (p *pki) issue(t *testing.T, uri string, usage ...x509.ExtKeyUsage) tls.Certificate {
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	p.n++
 	u, _ := url.Parse(uri)
 	tpl := &x509.Certificate{SerialNumber: big.NewInt(p.n), NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
-		URIs: []*url.URL{u}, ExtKeyUsage: []x509.ExtKeyUsage{usage}, KeyUsage: x509.KeyUsageDigitalSignature}
+		URIs: []*url.URL{u}, ExtKeyUsage: usage, KeyUsage: x509.KeyUsageDigitalSignature}
 	der, err := x509.CreateCertificate(rand.Reader, tpl, p.ca, &key.PublicKey, p.key)
 	if err != nil {
 		t.Fatal(err)
@@ -71,7 +71,8 @@ func (p *pki) node(t *testing.T, id types.UUID) tls.Certificate {
 }
 
 func (p *pki) hub(t *testing.T, id types.UUID) tls.Certificate {
-	return p.issue(t, grpcconn.HubURI(id), x509.ExtKeyUsageServerAuth)
+	// Edge Hub 既是 Agent 的服务端，也是后端的客户端
+	return p.issue(t, grpcconn.HubURI(id), x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth)
 }
 
 // grpcHub 在本机端口上提供某个 Edge Hub 的 NodeControl 服务。

@@ -210,3 +210,12 @@ func (is *Issuer) RestrictionVersion() uint64 {
 	defer is.mu.Unlock()
 	return is.rver
 }
+
+// SetGeneration 设置之后签发的授权代次（12.4 恢复流程提升代次，只增不减）。
+func (is *Issuer) SetGeneration(g uint64) {
+	is.mu.Lock()
+	defer is.mu.Unlock()
+	if g > is.Generation {
+		is.Generation = g
+	}
+}

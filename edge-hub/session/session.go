@@ -181,6 +181,9 @@ type Options struct {
 	Rules    Rules
 	Upstream Upstream      // nil：本地落盘即确认；也可在 Open 之后用 SetUpstream 设置
 	RunTTL   time.Duration // 运行授权有效期；0 = 5 分钟（测试用）
+	// ParseRules 从期望配置（protobuf 字节）取出签发所需的规则信息；Rules 为 nil 时据此得到各节点的规则
+	// （写账本，重启后恢复）。生产部署使用 wire.RulesFromConfig。
+	ParseRules func(payload []byte) ([]issuer.RuleState, error)
 }
 
 // Hub 是一个 Edge Hub 实例。
@@ -201,6 +204,7 @@ type Hub struct {
 	configs      map[model.UUID]*nodeConfig // 配置分发（HUB-T04）
 	lastDeclared model.Mode
 	states       map[model.UUID]*nodeState // 节点状态缓存（HUB-004）
+	rules        map[model.UUID]*nodeRules // 期望配置中的规则信息
 }
 
 type usageKey struct {
@@ -226,7 +230,7 @@ func Open(opt Options) (*Hub, error) {
 		opt.Clock = clock.System{}
 	}
 	h := &Hub{ID: opt.HubID, Clk: opt.Clock, opt: opt, sessions: map[model.UUID]*Session{},
-		usage: map[usageKey]usageSeen{}, up: opt.Upstream, configs: map[model.UUID]*nodeConfig{}, states: map[model.UUID]*nodeState{}}
+		usage: map[usageKey]usageSeen{}, up: opt.Upstream, configs: map[model.UUID]*nodeConfig{}, states: map[model.UUID]*nodeState{}, rules: map[model.UUID]*nodeRules{}}
 	h.Mode = mode.New(opt.Clock)
 	h.Quota = quota.New(nil)
 	h.Issuer = issuer.New(opt.Clock, h.Quota, h.Mode.CanRenewRun)
@@ -248,6 +252,13 @@ func Open(opt Options) (*Hub, error) {
 		}
 		if _, err := h.Leases.Replay(e); err != nil {
 			return err
+		}
+		if e.Kind == KindRules {
+			var r rulesRecord
+			if err := json.Unmarshal(e.Data, &r); err != nil {
+				return err
+			}
+			h.applyRulesLocked(r)
 		}
 		if e.Kind == KindUsage {
 			var r usageRecord
@@ -503,7 +514,12 @@ func (s *Session) onHello(m Hello) error {
 func (s *Session) onGrant(hello Hello, r GrantRequest) GrantResponse {
 	h := s.hub
 	resp := GrantResponse{RequestID: r.ID}
-	rules := h.opt.Rules.Rules(hello.Node)
+	var rules []issuer.RuleState
+	if h.opt.Rules != nil {
+		rules = h.opt.Rules.Rules(hello.Node)
+	} else {
+		rules = h.configRules(hello.Node)
+	}
 	switch r.Kind {
 	case model.GrantRun:
 		g, refused, err := h.Issuer.IssueRun(hello.Node, hello.Boot, rules)

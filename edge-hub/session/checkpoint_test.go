@@ -30,9 +30,36 @@ func state(t *testing.T, h *Hub) []byte {
 // 时间推进数天）后重开账本：状态与运行中的实例完全相同；清理不删除未确认条目，序号不回退。
 func TestCheckpointReplayRandom(t *testing.T) {
 	for seed := int64(0); seed < 60; seed++ {
+		checkpointRandom(t, seed, func() ledger.Store { return &ledger.MemStore{} }, nil)
+	}
+}
+
+// 同一随机过程在 SQLite 存储上：每次比对都关闭并重新打开数据库文件。
+func TestCheckpointReplayRandomSQLite(t *testing.T) {
+	for seed := int64(100); seed < 108; seed++ {
+		path := filepath.Join(t.TempDir(), "ledger.db")
+		var cur *ledger.SQLiteStore
+		mk := func() ledger.Store {
+			s, err := ledger.OpenSQLite(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cur = s
+			return s
+		}
+		checkpointRandom(t, seed, mk, func() ledger.Store { // 重开：关闭当前连接后打开同一文件
+			cur.Close()
+			return mk()
+		})
+		cur.Close()
+	}
+}
+
+func checkpointRandom(t *testing.T, seed int64, mk func() ledger.Store, reopen func() ledger.Store) {
+	{
 		rng := rand.New(rand.NewSource(seed))
 		clk := clock.NewFake(time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC))
-		st := &ledger.MemStore{}
+		st := mk()
 		h := open(t, clk, st, nil)
 		_ = h.Issuer.SetBillingVersions([]issuer.BillingVersion{{Version: 1, EffectiveAt: clk.Now().Add(-time.Hour)}})
 		_, _ = h.Quota.ApplyBudget(tenant, 1, 1<<34, 0)
@@ -116,7 +143,19 @@ func TestCheckpointReplayRandom(t *testing.T) {
 				want := state(t, h)
 				last, acked := h.Ledger.LastSeq(), h.Ledger.Acked()
 				unacked, _ := h.Ledger.Unacked()
-				h2 := open(t, clk, st, nil)
+				st2 := st
+				if reopen != nil {
+					st2 = reopen()
+					st = st2
+				}
+				h2 := open(t, clk, st2, nil)
+				if reopen != nil { // 运行中的实例改用新连接继续（同一文件）
+					h = open(t, clk, st2, nil)
+					s.Close()
+					s = h.NewSession(node, in.send)
+					_ = s.Handle(Hello{Node: node, Boot: boots[len(boots)-1]})
+					in.take()
+				}
 				if got := state(t, h2); !bytes.Equal(got, want) {
 					t.Fatalf("seed %d op %d: state after reopen differs\n got %s\nwant %s", seed, op, got, want)
 				}

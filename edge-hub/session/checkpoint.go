@@ -5,6 +5,7 @@ import (
 	"sort"
 	"time"
 
+	"vortex/edgehub/issuer"
 	"vortex/edgehub/ledger"
 	"vortex/edgehub/model"
 )
@@ -26,6 +27,14 @@ type checkpoint struct {
 	Issuer json.RawMessage `json:"issuer"`
 	Leases json.RawMessage `json:"leases"`
 	Usage  []usageSnap     `json:"usage,omitempty"`
+	Rules  []rulesSnap     `json:"rules,omitempty"`
+}
+
+type rulesSnap struct {
+	Node    model.UUID         `json:"node"`
+	Version uint64             `json:"version"`
+	Cur     []issuer.RuleState `json:"cur"`
+	Prev    []issuer.RuleState `json:"prev,omitempty"`
 }
 
 type usageSnap struct {
@@ -52,6 +61,10 @@ func (h *Hub) restore(data json.RawMessage) error {
 	}
 	if err := h.Leases.Restore(c.Leases); err != nil {
 		return err
+	}
+	h.rules = map[model.UUID]*nodeRules{}
+	for _, r := range c.Rules {
+		h.rules[r.Node] = &nodeRules{version: r.Version, cur: r.Cur, prev: r.Prev}
 	}
 	h.usage = map[usageKey]usageSeen{}
 	for _, u := range c.Usage {
@@ -102,8 +115,12 @@ func (h *Hub) snapshot() (checkpoint, error) {
 			c.Usage = append(c.Usage, usageSnap{k.node, k.boot, k.seq, u.seq, u.at})
 		}
 	}
+	for n, r := range h.rules {
+		c.Rules = append(c.Rules, rulesSnap{n, r.version, r.cur, r.prev})
+	}
 	h.mu.Unlock()
 	sort.Slice(c.Usage, func(i, j int) bool { return c.Usage[i].Ledger < c.Usage[j].Ledger })
+	sort.Slice(c.Rules, func(i, j int) bool { return string(c.Rules[i].Node[:]) < string(c.Rules[j].Node[:]) })
 	return c, nil
 }
 

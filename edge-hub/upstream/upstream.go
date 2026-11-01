@@ -132,6 +132,7 @@ const (
 
 type Reconcile struct {
 	Phase          ReconcilePhase
+	NewGeneration  uint64 // 12.4 恢复流程提升的授权代次；0 表示不变
 	RevokedTenants []model.UUID
 }
 
@@ -402,6 +403,9 @@ func (l *Link) Handle(m Down) error {
 	case Reconcile:
 		switch m.Phase {
 		case ReconcileStarted:
+			if m.NewGeneration > 0 {
+				h.Issuer.SetGeneration(m.NewGeneration)
+			}
 			if err := h.Issuer.SetBudgetRevoked(m.RevokedTenants); err != nil {
 				return err
 			}

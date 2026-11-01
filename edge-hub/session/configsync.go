@@ -3,6 +3,7 @@ package session
 import (
 	"errors"
 
+	"vortex/edgehub/issuer"
 	"vortex/edgehub/leases"
 	"vortex/edgehub/model"
 )
@@ -48,7 +49,76 @@ func (h *Hub) SetDesired(node model.UUID, version uint64, payload []byte) {
 	c.desired = &DesiredConfig{Version: version, Payload: payload}
 	c.command, c.delivered = nil, false
 	h.mu.Unlock()
+	if h.opt.ParseRules != nil {
+		if rules, err := h.opt.ParseRules(payload); err == nil {
+			_ = h.recordRules(node, version, rules)
+		}
+	}
 	h.flushConfig(node)
+}
+
+// ---------------------------------------------------------------- 签发所需的规则信息
+
+// KindRules 记录节点期望配置中的规则信息（签发运行授权与计费授权的依据），重启（包括自治中）后可恢复。
+const KindRules = "config.rules"
+
+type rulesRecord struct {
+	Node    model.UUID         `json:"node"`
+	Version uint64             `json:"version"`
+	Rules   []issuer.RuleState `json:"rules"`
+}
+
+type nodeRules struct {
+	version   uint64
+	cur, prev []issuer.RuleState
+}
+
+func (h *Hub) applyRulesLocked(r rulesRecord) {
+	nr := h.rules[r.Node]
+	if nr == nil {
+		nr = &nodeRules{}
+		h.rules[r.Node] = nr
+	}
+	if r.Version <= nr.version {
+		return
+	}
+	nr.version, nr.prev, nr.cur = r.Version, nr.cur, r.Rules
+}
+
+func (h *Hub) recordRules(node model.UUID, version uint64, rules []issuer.RuleState) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if nr := h.rules[node]; nr != nil && version <= nr.version {
+		return nil
+	}
+	r := rulesRecord{Node: node, Version: version, Rules: rules}
+	if _, err := h.Ledger.Append(KindRules, r); err != nil {
+		return err
+	}
+	h.applyRulesLocked(r)
+	return nil
+}
+
+// configRules 返回节点最新与上一个期望配置中规则的并集：新版本 Commit 之前节点仍在运行旧版本的规则，
+// 两者都要能续期（被删除的规则在 Commit 后不再出现在下一次期望配置中，随之停止续期）。
+func (h *Hub) configRules(node model.UUID) []issuer.RuleState {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	nr := h.rules[node]
+	if nr == nil {
+		return nil
+	}
+	seen := map[model.UUID]bool{}
+	var out []issuer.RuleState
+	for _, set := range [][]issuer.RuleState{nr.cur, nr.prev} {
+		for _, r := range set {
+			if !seen[r.RuleID] {
+				seen[r.RuleID] = true
+				out = append(out, r)
+			}
+		}
+	}
+	return out
 }
 
 // SetCommand 接收后端的两阶段指令（NodeApplyCommand）。

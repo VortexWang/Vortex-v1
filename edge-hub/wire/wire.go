@@ -240,3 +240,24 @@ func shareKind(k model.GrantKind) runtimev1.ShareKind {
 	}
 	return runtimev1.ShareKind_SHARE_KIND_RATE
 }
+
+// RulesFromConfig 从期望配置取出签发所需的规则信息（session.Options.ParseRules）。只读，不改动配置。
+func RulesFromConfig(payload []byte) ([]issuer.RuleState, error) {
+	var cfg runtimev1.RuntimeConfig
+	if err := proto.Unmarshal(payload, &cfg); err != nil {
+		return nil, fmt.Errorf("%w: desired config: %v", ErrInvalid, err)
+	}
+	var out []issuer.RuleState
+	for _, r := range cfg.GetRules() {
+		id, err := FromUUID(r.GetRuleId())
+		if err != nil {
+			return nil, err
+		}
+		t, err := FromUUID(r.GetTenantId())
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, issuer.RuleState{RuleID: id, TenantID: t, EnforcementPoint: r.GetEnforcementPoint(), PathCoefMilli: r.GetPathCoefficientMilli()})
+	}
+	return out, nil
+}
