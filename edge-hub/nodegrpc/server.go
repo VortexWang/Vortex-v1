@@ -14,12 +14,15 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 
@@ -76,6 +79,9 @@ func ServerTLS(cert tls.Certificate, roots *x509.CertPool) *tls.Config {
 }
 
 // Server 实现 NodeControl。
+// HubTimeHeader 是 Connect 响应头中 Edge Hub 墙钟（Unix 纳秒，十进制）的键（契约补充 L6）。
+const HubTimeHeader = "vortex-hub-time-unix-nano"
+
 type Server struct {
 	edgehubv1.UnimplementedNodeControlServer
 	Hub    *session.Hub
@@ -84,6 +90,8 @@ type Server struct {
 	Revoked func(node model.UUID, serial []byte) bool
 	// Backend 转发注册与续签；nil 时这两个 RPC 返回 Unimplemented。
 	Backend Backend
+	// Now 是写入 HubTimeHeader 的墙钟；nil = time.Now。
+	Now func() time.Time
 
 	mu      sync.Mutex
 	streams int
@@ -123,6 +131,14 @@ func (s *Server) Connect(stream grpc.BidiStreamingServer[edgehubv1.AgentMessage,
 	}
 	if s.Revoked != nil && s.Revoked(node, cert.SerialNumber.Bytes()) {
 		return status.Error(codes.PermissionDenied, "certificate or node revoked")
+	}
+	// 本实例墙钟，供节点检测时钟偏差（AGT-005；契约补充 L6）。在任何消息之前发出。
+	now := time.Now
+	if s.Now != nil {
+		now = s.Now
+	}
+	if err := stream.SendHeader(metadata.Pairs(HubTimeHeader, strconv.FormatInt(now().UnixNano(), 10))); err != nil {
+		return err
 	}
 	s.mu.Lock()
 	s.streams++

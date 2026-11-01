@@ -9,6 +9,7 @@ import (
 
 	"vortex/engine/types"
 	"vortex/node/agent"
+	"vortex/node/internal/clock"
 )
 
 var (
@@ -280,4 +281,43 @@ func TestBackoffGrowsAndJitters(t *testing.T) {
 			t.Fatalf("jitter %v outside ±20%%", d)
 		}
 	}
+}
+
+// 内存连接给出的墙钟样本：Remote 为本地时刻加上实例的偏差（按实例 ID 首字节，秒）。
+func (c *memConn) ClockSample(context.Context) (clock.Sample, bool) {
+	now := time.Now()
+	return clock.Sample{Sent: now, Received: now, Remote: now.Add(time.Duration(c.hub.id[0]) * time.Second)}, true
+}
+
+type clockAgent struct {
+	*fakeAgent
+	mu  sync.Mutex
+	obs map[types.UUID]clock.Sample
+}
+
+func (a *clockAgent) ObserveClock(hub types.UUID, s clock.Sample) {
+	a.mu.Lock()
+	a.obs[hub] = s
+	a.mu.Unlock()
+}
+
+// 连接建立（收到 HubHello）时做墙钟比对，包括转正的探测流（AGT-005）。
+func TestClockObservedOnEachEstablishedConnection(t *testing.T) {
+	c, hubs, fa := setup(map[types.UUID]agent.Mode{hA: agent.ModeOnline, hC: agent.ModeOnline})
+	ca := &clockAgent{fakeAgent: fa, obs: map[types.UUID]clock.Sample{}}
+	c.Agent = ca
+	stop := run(c)
+	defer stop()
+	seen := func(h types.UUID) func() bool {
+		return func() bool {
+			ca.mu.Lock()
+			defer ca.mu.Unlock()
+			s, ok := ca.obs[h]
+			off, _ := s.Skew()
+			return ok && off == time.Duration(h[0])*time.Second
+		}
+	}
+	waitFor(t, "clock observed on A", seen(hA))
+	hubs[hA].setMode(agent.ModeAutonomous)
+	waitFor(t, "clock observed on the adopted stream to C", seen(hC))
 }

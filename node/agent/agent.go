@@ -43,6 +43,9 @@ type Options struct {
 	Disk      *report.DiskGuard // nil = 不检查
 	// OnApplied 在配置生效（Commit 成功，含启动恢复）后调用，例如更新探测对象。在 Agent 的锁内调用，不得回调 Agent。
 	OnApplied func(*types.RuntimeConfig)
+	// OnClockSkew 在每次与所连 Edge Hub 做墙钟比对后调用（AGT-005）：alert 表示扣除不确定度后偏差仍超过 5 秒。
+	// 只用于告警，不影响授权。不在 Agent 的锁内调用。
+	OnClockSkew func(hub types.UUID, offset, uncertainty time.Duration, alert bool)
 	// RenewEvery 是运行授权与份额的续期周期；0 = 60 秒（测试用较短的值配合较短的授权有效期）。
 	RenewEvery time.Duration
 }
@@ -61,6 +64,27 @@ type Agent struct {
 	mode  Mode
 	rates *rateWindow
 	low   bool // 磁盘低水位
+	skew  *ClockSkew
+}
+
+// ClockSkew 是最近一次墙钟比对的结果：Offset 为 Edge Hub 相对本地的偏差（正值表示 Edge Hub 快）。
+type ClockSkew struct {
+	Hub         types.UUID
+	Offset      time.Duration
+	Uncertainty time.Duration
+	Alert       bool
+}
+
+// ObserveClock 记录一次墙钟比对（control.ClockObserver）。偏差只告警，授权按相对时长与单调时钟计算，不受影响。
+func (a *Agent) ObserveClock(hub types.UUID, s clock.Sample) {
+	off, unc := s.Skew()
+	cs := &ClockSkew{Hub: hub, Offset: off, Uncertainty: unc, Alert: clock.Exceeds(off, unc, clock.SkewLimit)}
+	a.mu.Lock()
+	a.skew = cs
+	a.mu.Unlock()
+	if a.opt.OnClockSkew != nil {
+		a.opt.OnClockSkew(hub, off, unc, cs.Alert)
+	}
 }
 
 // New 开始一次启动：生成 boot_id、打开计量（上次启动未封的部分封为其最后一批）、恢复最后生效配置并 Prepare。
@@ -333,6 +357,7 @@ type Status struct {
 	RunRemaining             map[types.UUID]time.Duration
 	PendingBatches           int
 	DiskLow                  bool
+	ClockSkew                *ClockSkew // nil = 尚未比对
 }
 
 func (a *Agent) Status() Status {
@@ -341,7 +366,15 @@ func (a *Agent) Status() Status {
 	return Status{Node: a.opt.Node, Boot: a.boot.Current, PreviousBoot: a.boot.Previous, Hub: a.hub, Mode: a.mode,
 		Connected: a.sess != nil, Phase: a.rec.Phase(), AppliedVersion: a.rec.AppliedVersion(),
 		ActualVersion: a.eng.State().ActualVersion, RunRemaining: a.gr.RunRemaining(),
-		PendingBatches: a.rep.Stats().Pending, DiskLow: a.low}
+		PendingBatches: a.rep.Stats().Pending, DiskLow: a.low, ClockSkew: a.clockSkewLocked()}
+}
+
+func (a *Agent) clockSkewLocked() *ClockSkew {
+	if a.skew == nil {
+		return nil
+	}
+	c := *a.skew
+	return &c
 }
 
 // ---------------------------------------------------------------- 速率窗口

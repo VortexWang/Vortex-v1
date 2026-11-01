@@ -18,6 +18,7 @@ import (
 
 	"vortex/engine/types"
 	"vortex/node/agent"
+	"vortex/node/internal/clock"
 )
 
 // Endpoint 是一个 Edge Hub 实例（EnrollResponse.edge_hubs）。
@@ -31,6 +32,16 @@ type Conn interface {
 	Send(agent.Out) error
 	Recv(ctx context.Context) (agent.In, error)
 	Close() error
+}
+
+// ClockSampler 由能给出对端墙钟的连接实现（gRPC 连接取自 Connect 响应头，契约补充 L6）。
+type ClockSampler interface {
+	ClockSample(ctx context.Context) (clock.Sample, bool)
+}
+
+// ClockObserver 由需要墙钟比对的 Handler 实现（*agent.Agent 满足，AGT-005）。
+type ClockObserver interface {
+	ObserveClock(hub types.UUID, s clock.Sample)
 }
 
 type Dialer interface {
@@ -150,6 +161,20 @@ type recvResult struct {
 	err error
 }
 
+// observeClock 在连接建立时做一次墙钟比对（不阻塞控制流）。
+func (c *Controller) observeClock(ctx context.Context, conn Conn, hub types.UUID) {
+	cs, ok1 := conn.(ClockSampler)
+	ob, ok2 := c.Agent.(ClockObserver)
+	if !ok1 || !ok2 {
+		return
+	}
+	go func() {
+		if s, ok := cs.ClockSample(ctx); ok {
+			ob.ObserveClock(hub, s)
+		}
+	}()
+}
+
 // serve 运行一条连接。first 非空表示探测流转正（Hello 已发送、HubHello 已读出）。
 // 返回要转正的探测流（切换时）以及这条连接是否曾建立（收到 HubHello）。
 func (c *Controller) serve(ctx context.Context, conn Conn, first agent.In) (Conn, agent.In, bool) {
@@ -184,6 +209,7 @@ func (c *Controller) serve(ctx context.Context, conn Conn, first agent.In) (Conn
 			c.mu.Lock()
 			c.current, c.mode = m.Hub, m.Mode
 			c.mu.Unlock()
+			c.observeClock(cctx, conn, m.Hub)
 		case agent.ModeChange:
 			c.mu.Lock()
 			c.mode = m.Mode

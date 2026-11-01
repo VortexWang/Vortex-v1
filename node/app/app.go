@@ -217,7 +217,13 @@ func Run(ctx context.Context, cfg *Config, dialer control.Dialer, log *slog.Logg
 		OnOK:  func(free uint64) { log.Info("disk recovered", "free", free) }}
 	a, err := agent.New(ctx, agent.Options{Node: node, AgentVersion: Version, Engine: eng,
 		BootLog: bootLog, Boot: &b, UsageLog: usageLog, ConfigLog: configLog, Disk: disk,
-		OnApplied: func(c *types.RuntimeConfig) { prober.SetSubjects(probe.Subjects(c)) }})
+		OnApplied: func(c *types.RuntimeConfig) { prober.SetSubjects(probe.Subjects(c)) },
+		OnClockSkew: func(hub types.UUID, off, unc time.Duration, alert bool) {
+			if alert {
+				log.Warn("clock skew with Edge Hub exceeds 5s; grants are unaffected, timestamps in logs and usage may be off (AGT-005)",
+					"hub", FormatUUID(hub), "offset", off, "uncertainty", unc)
+			}
+		}})
 	if err != nil {
 		eng.Close()
 		return err
@@ -297,6 +303,10 @@ func StatusView(s agent.Status, disk *report.DiskGuard) localapi.Status {
 	}
 	if disk != nil {
 		v.DiskFreeBytes = disk.Last()
+	}
+	if c := s.ClockSkew; c != nil {
+		ms := c.Offset.Milliseconds()
+		v.ClockSkewMs, v.ClockSkewAlert = &ms, c.Alert
 	}
 	return v
 }

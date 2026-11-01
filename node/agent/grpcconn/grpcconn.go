@@ -11,6 +11,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +26,7 @@ import (
 	"vortex/node/agent/certs"
 	"vortex/node/agent/control"
 	"vortex/node/agent/wire"
+	"vortex/node/internal/clock"
 	edgehubv1 "vortex/proto/gen/go/vortex/edgehub/v1"
 )
 
@@ -99,6 +101,43 @@ type conn struct {
 	cancel context.CancelFunc
 	smu    sync.Mutex
 	once   sync.Once
+
+	sent   time.Time     // Connect 返回（请求头已发出）的本地时刻
+	header chan struct{} // 收到响应头（或流结束）后关闭
+	sample clock.Sample
+	hasT   bool
+}
+
+// HubTimeHeader 是 Edge Hub 在 Connect 响应头中写入其墙钟的键（契约补充 L6）。
+const HubTimeHeader = "vortex-hub-time-unix-nano"
+
+// watchHeader 等待响应头并记录墙钟比对样本。响应头早于任何消息到达，不阻塞收发。
+func (c *conn) watchHeader() {
+	defer close(c.header)
+	md, err := c.stream.Header()
+	recv := time.Now()
+	if err != nil {
+		return
+	}
+	v := md.Get(HubTimeHeader)
+	if len(v) != 1 {
+		return
+	}
+	ns, err := strconv.ParseInt(v[0], 10, 64)
+	if err != nil {
+		return
+	}
+	c.sample, c.hasT = clock.Sample{Sent: c.sent, Received: recv, Remote: time.Unix(0, ns)}, true
+}
+
+// ClockSample 返回本连接的墙钟比对样本（control.ClockSampler）；Edge Hub 未提供时 ok 为 false。
+func (c *conn) ClockSample(ctx context.Context) (clock.Sample, bool) {
+	select {
+	case <-c.header:
+		return c.sample, c.hasT
+	case <-ctx.Done():
+		return clock.Sample{}, false
+	}
 }
 
 func (d Dialer) Dial(ctx context.Context, ep control.Endpoint) (control.Conn, error) {
@@ -132,7 +171,9 @@ func (d Dialer) Dial(ctx context.Context, ep control.Endpoint) (control.Conn, er
 			cc.Close()
 			return nil, r.err
 		}
-		return &conn{cc: cc, stream: r.s, cancel: cancel}, nil
+		c := &conn{cc: cc, stream: r.s, cancel: cancel, sent: time.Now(), header: make(chan struct{})}
+		go c.watchHeader()
+		return c, nil
 	case <-dctx.Done():
 		cancel()
 		cc.Close()

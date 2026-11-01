@@ -84,12 +84,17 @@ type grpcHub struct {
 }
 
 func serveHub(t *testing.T, h *Hub, cert tls.Certificate, roots *x509.CertPool) *grpcHub {
+	return serveHubNow(t, h, cert, roots, nil)
+}
+
+// serveHubNow 同 serveHub，now 为实例写入响应头的墙钟（nil = 系统时钟）。
+func serveHubNow(t *testing.T, h *Hub, cert tls.Certificate, roots *x509.CertPool, now func() time.Time) *grpcHub {
 	ln, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	srv := grpc.NewServer(grpc.Creds(credentials.NewTLS(nodegrpc.ServerTLS(cert, roots))))
-	ns := &nodegrpc.Server{Hub: h.Hub, Region: "test"}
+	ns := &nodegrpc.Server{Hub: h.Hub, Region: "test", Now: now}
 	edgehubv1.RegisterNodeControlServer(srv, ns)
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(srv.Stop)

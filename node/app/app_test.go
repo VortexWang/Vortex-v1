@@ -3,9 +3,11 @@ package app
 import (
 	"crypto/tls"
 	"testing"
+	"time"
 
 	"vortex/engine/enginetest"
 	"vortex/engine/types"
+	"vortex/node/agent"
 	"vortex/node/agent/certs"
 	"vortex/node/agent/grpcconn"
 	"vortex/node/agent/probe"
@@ -57,5 +59,15 @@ func TestTunnelOptionsRejectsMismatchAndMissingCertificate(t *testing.T) {
 	}
 	if _, err := tunnelOptions(&Config{LinkListen: "127.0.0.1:0"}, self, types.UUID{}, nil, probe.New()); err == nil {
 		t.Fatal("link_listen without a certificate accepted")
+	}
+}
+
+func TestStatusViewClockSkew(t *testing.T) {
+	if v := StatusView(agent.Status{}, nil); v.ClockSkewMs != nil || v.ClockSkewAlert {
+		t.Fatalf("no sample yet: %+v", v)
+	}
+	v := StatusView(agent.Status{ClockSkew: &agent.ClockSkew{Offset: -7500 * time.Millisecond, Alert: true}}, nil)
+	if v.ClockSkewMs == nil || *v.ClockSkewMs != -7500 || !v.ClockSkewAlert {
+		t.Fatalf("status %+v", v)
 	}
 }

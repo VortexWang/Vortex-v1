@@ -16,6 +16,7 @@ import (
 	"vortex/node/agent/probe"
 	"vortex/node/agent/reconcile"
 	"vortex/node/agent/store"
+	"vortex/node/internal/clock"
 )
 
 var (
@@ -500,5 +501,32 @@ func TestPreStartedBoot(t *testing.T) {
 	next, _ := boot.Start(l.boot)
 	if next.Previous != b.Current {
 		t.Fatalf("an extra boot was recorded: previous %x, want %x", next.Previous, b.Current)
+	}
+}
+
+// 墙钟比对只记录与告警（AGT-005）。
+func TestObserveClock(t *testing.T) {
+	l := newLogs()
+	var calls []bool
+	a, err := New(context.Background(), Options{Node: nodeID, Engine: &closingEngine{}, BootLog: l.boot, UsageLog: l.usage, ConfigLog: l.config,
+		OnClockSkew: func(hub types.UUID, off, unc time.Duration, alert bool) { calls = append(calls, alert) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.clockSkewLocked() != nil {
+		t.Fatal("skew before any sample")
+	}
+	now := time.Now()
+	a.ObserveClock(hubID, clock.Sample{Sent: now, Received: now.Add(2 * time.Second), Remote: now.Add(8 * time.Second)})
+	s := a.clockSkewLocked()
+	if s == nil || s.Hub != hubID || s.Offset != 7*time.Second || s.Uncertainty != time.Second || !s.Alert {
+		t.Fatalf("skew %+v", s)
+	}
+	a.ObserveClock(hubID, clock.Sample{Sent: now, Received: now, Remote: now.Add(-3 * time.Second)})
+	if s := a.clockSkewLocked(); s.Offset != -3*time.Second || s.Alert {
+		t.Fatalf("skew %+v", s)
+	}
+	if len(calls) != 2 || !calls[0] || calls[1] {
+		t.Fatalf("callbacks %v", calls)
 	}
 }

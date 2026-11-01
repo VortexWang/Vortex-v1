@@ -33,6 +33,9 @@ type Status struct {
 	PendingBatches  int              `json:"pending_usage_batches"`
 	DiskFreeBytes   uint64           `json:"disk_free_bytes"`
 	DiskLow         bool             `json:"disk_low"`
+	// 与所连 Edge Hub 的墙钟偏差（正值表示 Edge Hub 快）；尚未比对时省略。超过 5 秒只告警（AGT-005）。
+	ClockSkewMs    *int64 `json:"clock_skew_ms,omitempty"`
+	ClockSkewAlert bool   `json:"clock_skew_alert"`
 }
 
 type DrainRequest struct {
