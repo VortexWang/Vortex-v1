@@ -2,7 +2,7 @@
 # VORTEX Edge Hub 安装（HUB-T17）：安装程序、平台 CA 与 systemd 单元，用一次性引导令牌向后端换取实例身份并启动。
 #
 #   sudo ./install.sh --binary ./edge-hub --ca ./ca.crt --token <引导令牌> --backend <后端地址:端口> \
-#        --region <区域> [--listen :7400] [--no-start]
+#        --region <区域> --advertise <节点连接本实例的地址:端口> [--listen :7400] [--no-start]
 #
 # 令牌也可经环境变量 VORTEX_BOOTSTRAP_TOKEN 传入。令牌只用于引导，不写入任何文件。
 # 已引导（配置文件存在）时只更新程序、CA 与单元。ROOT=<目录> 时安装到该目录下（测试与打包用）。
@@ -10,7 +10,7 @@ set -eu
 
 ROOT=${ROOT:-/}
 ROOT=${ROOT%/}
-binary='' ca='' backend='' region='' listen=:7400 start=1
+binary='' ca='' backend='' region='' listen=:7400 advertise='' start=1
 token=${VORTEX_BOOTSTRAP_TOKEN:-}
 
 die() { echo "install.sh: $*" >&2; exit 1; }
@@ -23,6 +23,7 @@ while [ $# -gt 0 ]; do
 	--backend) backend=$2; shift 2 ;;
 	--region) region=$2; shift 2 ;;
 	--listen) listen=$2; shift 2 ;;
+	--advertise) advertise=$2; shift 2 ;;
 	--no-start) start=0; shift ;;
 	*) die "unknown option $1" ;;
 	esac
@@ -63,8 +64,10 @@ else
 	if [ -z "$token" ] || [ -z "$backend" ] || [ -z "$region" ]; then
 		die "--token, --backend and --region are required for the first installation"
 	fi
-	"$bindir/edge-hub" enroll -token "$token" -backend "$backend" -region "$region" -listen "$listen" \
+	set -- enroll -token "$token" -backend "$backend" -region "$region" -listen "$listen" \
 		-ca "$etc/ca.crt" -data-dir "$data" -config "$config"
+	if [ -n "$advertise" ]; then set -- "$@" -advertise "$advertise"; fi
+	"$bindir/edge-hub" "$@"
 fi
 
 if [ $real = 1 ]; then

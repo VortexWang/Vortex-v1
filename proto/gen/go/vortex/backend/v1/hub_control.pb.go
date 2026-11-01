@@ -137,8 +137,10 @@ type EnrollHubRequest struct {
 	CsrDer         []byte                 `protobuf:"bytes,2,opt,name=csr_der,json=csrDer,proto3" json:"csr_der,omitempty"`
 	Region         string                 `protobuf:"bytes,3,opt,name=region,proto3" json:"region,omitempty"`
 	HubVersion     string                 `protobuf:"bytes,4,opt,name=hub_version,json=hubVersion,proto3" json:"hub_version,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// 节点连接本实例 NodeControl 的地址（host:port），写入节点注册响应的实例列表（C2 变更 CC-03）
+	AdvertiseAddress string `protobuf:"bytes,5,opt,name=advertise_address,json=advertiseAddress,proto3" json:"advertise_address,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *EnrollHubRequest) Reset() {
@@ -195,6 +197,13 @@ func (x *EnrollHubRequest) GetRegion() string {
 func (x *EnrollHubRequest) GetHubVersion() string {
 	if x != nil {
 		return x.HubVersion
+	}
+	return ""
+}
+
+func (x *EnrollHubRequest) GetAdvertiseAddress() string {
+	if x != nil {
+		return x.AdvertiseAddress
 	}
 	return ""
 }
@@ -2605,13 +2614,14 @@ var File_vortex_backend_v1_hub_control_proto protoreflect.FileDescriptor
 
 const file_vortex_backend_v1_hub_control_proto_rawDesc = "" +
 	"\n" +
-	"#vortex/backend/v1/hub_control.proto\x12\x11vortex.backend.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1dvortex/common/v1/common.proto\x1a$vortex/edgehub/v1/node_control.proto\x1a\x1fvortex/runtime/v1/runtime.proto\"\x8d\x01\n" +
+	"#vortex/backend/v1/hub_control.proto\x12\x11vortex.backend.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1dvortex/common/v1/common.proto\x1a$vortex/edgehub/v1/node_control.proto\x1a\x1fvortex/runtime/v1/runtime.proto\"\xba\x01\n" +
 	"\x10EnrollHubRequest\x12'\n" +
 	"\x0fbootstrap_token\x18\x01 \x01(\tR\x0ebootstrapToken\x12\x17\n" +
 	"\acsr_der\x18\x02 \x01(\fR\x06csrDer\x12\x16\n" +
 	"\x06region\x18\x03 \x01(\tR\x06region\x12\x1f\n" +
 	"\vhub_version\x18\x04 \x01(\tR\n" +
-	"hubVersion\"\x9a\x01\n" +
+	"hubVersion\x12+\n" +
+	"\x11advertise_address\x18\x05 \x01(\tR\x10advertiseAddress\"\x9a\x01\n" +
 	"\x11EnrollHubResponse\x12-\n" +
 	"\x06hub_id\x18\x01 \x01(\v2\x16.vortex.common.v1.UuidR\x05hubId\x122\n" +
 	"\x15certificate_chain_der\x18\x02 \x03(\fR\x13certificateChainDer\x12\"\n" +

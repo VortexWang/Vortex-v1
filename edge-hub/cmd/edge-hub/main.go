@@ -59,6 +59,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		ca := fs.String("ca", "/etc/vortex/ca.crt", "platform CA (PEM), shipped with the installer")
 		region := fs.String("region", "", "region of this instance")
 		listen := fs.String("listen", ":7400", "NodeControl listen address to write into the config")
+		advertise := fs.String("advertise", "", "address nodes use to reach this hub (host:port); default: -listen if it has a host")
 		dataDir := fs.String("data-dir", "/var/lib/vortex-edge-hub", "data directory")
 		cfgPath := fs.String("config", "/etc/vortex/edge-hub.json", "config file to write")
 		if fs.Parse(args[1:]) != nil || *token == "" || *backend == "" || *region == "" {
@@ -67,7 +68,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		cfg, err := app.Enroll(ctx, app.EnrollParams{Token: *token, Backend: *backend, CAFile: *ca, Region: *region, Listen: *listen,
+		cfg, err := app.Enroll(ctx, app.EnrollParams{Token: *token, Backend: *backend, CAFile: *ca, Region: *region, Listen: *listen, Advertise: *advertise,
 			DataDir: *dataDir, ConfigPath: *cfgPath})
 		if err != nil {
 			fmt.Fprintln(stderr, err)

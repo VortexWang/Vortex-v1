@@ -12,17 +12,26 @@ permissions:
 jobs:
   go:
     runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_USER: vortex, POSTGRES_PASSWORD: ci, POSTGRES_DB: vortex }
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U vortex" --health-interval 2s --health-retries 30
+    env:
+      # 后端集成测试：每个测试新建一个数据库（backend/apptest）
+      VORTEX_TEST_DATABASE_URL: postgres://vortex:ci@localhost:5432/vortex?sslmode=disable
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with: { go-version: "1.24.7" }
       - name: gofmt
-        run: test -z "$(gofmt -l engine edge-hub node test/e2e)"
+        run: test -z "$(gofmt -l engine edge-hub node backend test/e2e)"
       - name: vet
-        run: go vet ./engine/... ./edge-hub/... ./node/... ./test/e2e/...
+        run: go vet ./engine/... ./edge-hub/... ./node/... ./backend/... ./test/e2e/...
       # 失败时把失败测试的输出写成注解：日志下载在部分环境中不可用，注解可经 API 读取
       - name: test (race)
-        run: set -o pipefail; go test -race -count=1 ./engine/... ./edge-hub/... ./node/... ./test/e2e/... 2>&1 | tee /tmp/race.log
+        run: set -o pipefail; go test -race -count=1 ./engine/... ./edge-hub/... ./node/... ./backend/... ./test/e2e/... 2>&1 | tee /tmp/race.log
       - name: leak and splice tests as root (需要 /proc 与真实 TCP)
         run: set -o pipefail; sudo env "PATH=$PATH" go test -count=1 -run 'Leak|Splice' ./engine/... 2>&1 | tee /tmp/root.log
       - name: 模糊测试（帧解析与链路帧处理，ENG-T37）
@@ -41,7 +50,7 @@ jobs:
       - name: license check (ENGR-002)
         run: |
           go install github.com/google/go-licenses@v1.6.0
-          go-licenses check ./engine/... ./edge-hub/... ./node/... ./proto/gen/go/... --disallowed_types=forbidden,restricted
+          go-licenses check ./engine/... ./edge-hub/... ./node/... ./backend/... ./proto/gen/go/... --disallowed_types=forbidden,restricted
 
   netns-bench:
     # ENGR-005：网络命名空间拓扑的吞吐冒烟（短时长，按 NFR-001 / NFR-005 阈值判定）。
@@ -128,6 +137,12 @@ jobs:
           git diff --exit-code -- gen/go || { echo "::error::proto/gen/go 与契约不一致：在 proto 目录运行 buf generate 后提交"; exit 1; }
           test -z "$(git status --porcelain -- gen/go)" || { git status --porcelain -- gen/go; echo "::error::proto/gen/go 有未提交的生成文件"; exit 1; }
           cd gen/go && go vet ./... && go build ./...
+      - name: sqlc：重新生成并与提交的 backend/internal/db 比对
+        run: |
+          go install github.com/sqlc-dev/sqlc/cmd/sqlc@v1.27.0
+          cd backend && sqlc generate
+          git diff --exit-code -- internal/db || { echo "::error::backend/internal/db 与 queries 不一致：在 backend 目录运行 sqlc generate 后提交"; exit 1; }
+          test -z "$(git status --porcelain -- internal/db)" || { echo "::error::backend/internal/db 有未提交的生成文件"; exit 1; }
       - name: OpenAPI → Gin 服务端接口并编译
         run: |
           mkdir -p /tmp/oapi && cd /tmp/oapi && go mod init vortex/api/gen

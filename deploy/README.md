@@ -17,7 +17,8 @@ Edge Hub 与节点端以二进制 + systemd 部署，另提供容器镜像（需
 
 ```sh
 sudo VORTEX_BOOTSTRAP_TOKEN=<引导令牌> deploy/edge-hub/install.sh \
-     --binary ./edge-hub --ca ./ca.crt --backend <后端地址:端口> --region <区域> [--listen :7400]
+     --binary ./edge-hub --ca ./ca.crt --backend <后端地址:端口> --region <区域> \
+     --advertise <节点连接本实例的地址:端口> [--listen :7400]
 ```
 
 脚本创建系统用户 `vortex-hub`，安装 `/opt/vortex/edge-hub/edge-hub`、`/etc/vortex/ca.crt` 与 `edge-hub.service`，用引导令牌向后端换取 `hub_id` 与实例证书（私钥在本机生成，0600），写入 `/etc/vortex/edge-hub.json`，然后启动服务。数据（SQLite 账本、证书）在 `/var/lib/vortex-edge-hub`（0700）。

@@ -225,11 +225,13 @@ func Run(ctx context.Context, cfg *Config, log *slog.Logger, opt Options) error 
 
 // EnrollParams 是 edge-hub enroll 的参数。
 type EnrollParams struct {
-	Token      string // 一次性引导令牌
-	Backend    string // 后端 HubControl 地址
-	CAFile     string // 平台 CA（随安装包分发）
-	Region     string
-	Listen     string
+	Token   string // 一次性引导令牌
+	Backend string // 后端 HubControl 地址
+	CAFile  string // 平台 CA（随安装包分发）
+	Region  string
+	Listen  string
+	// Advertise 是节点连接本实例的地址（host:port，CC-03）；为空时取 Listen（须带主机部分）
+	Advertise  string
 	DataDir    string
 	ConfigPath string
 }
@@ -259,7 +261,17 @@ func Enroll(ctx context.Context, p EnrollParams) (*Config, error) {
 		return nil, err
 	}
 	defer cc.Close()
-	resp, err := backendv1.NewHubControlClient(cc).EnrollHub(ctx, &backendv1.EnrollHubRequest{BootstrapToken: p.Token, CsrDer: csr, Region: p.Region, HubVersion: Version})
+	adv := p.Advertise
+	if adv == "" {
+		if h, _, err := net.SplitHostPort(p.Listen); err == nil && h != "" {
+			adv = p.Listen
+		}
+	}
+	if adv == "" {
+		return nil, errors.New("advertise address (host:port that nodes use to reach this hub) is required")
+	}
+	resp, err := backendv1.NewHubControlClient(cc).EnrollHub(ctx, &backendv1.EnrollHubRequest{BootstrapToken: p.Token, CsrDer: csr, Region: p.Region,
+		HubVersion: Version, AdvertiseAddress: adv})
 	if err != nil {
 		return nil, fmt.Errorf("enroll hub: %w", err)
 	}

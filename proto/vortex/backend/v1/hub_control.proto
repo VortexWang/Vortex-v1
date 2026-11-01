@@ -32,6 +32,8 @@ message EnrollHubRequest {
   bytes csr_der = 2;
   string region = 3;
   string hub_version = 4;
+  // 节点连接本实例 NodeControl 的地址（host:port），写入节点注册响应的实例列表（C2 变更 CC-03）
+  string advertise_address = 5;
 }
 
 message EnrollHubResponse {

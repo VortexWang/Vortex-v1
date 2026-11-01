@@ -1,8 +1,9 @@
 go 1.24.7
 
 use (
-	./engine
+	./backend
 	./edge-hub
+	./engine
 	./node
 	./proto/gen/go
 	./test/e2e

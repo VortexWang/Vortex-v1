@@ -20,7 +20,9 @@
 | protoc | 35.1（grpcio-tools 1.85.0 内置） | 已验证：编译全部 proto |
 | buf | 1.47.2 | 已验证：CI 与本地（经 npm 包 `@bufbuild/buf`）lint、build 通过；排除的 4 条规则见 `proto/buf.yaml` |
 | protoc-gen-go / protoc-gen-go-grpc | v1.36.6 / v1.5.1 | 已验证：CI 生成全部 proto 的 Go 代码并编译通过 |
-| Goose | v3.24.1 | 已验证：CI 执行 up / status / reset / up，约束测试通过 |
+| Goose | v3.24.1 | 已验证：CI 执行 up / status / reset / up，约束测试通过；后端以库方式嵌入迁移（`backend/migrations/embed.go`） |
+| sqlc | v1.27.0 | 已验证：生成 `backend/internal/db`（pgx/v5），CI 重新生成并比对 |
+| pgx | v5.7.2 | 已验证：后端集成测试（PostgreSQL 16）；v5.8 起要求 Go 1.25，不升级 |
 | oapi-codegen | v2.4.1 | 已验证：CI 生成 Gin 服务端接口并编译通过（要求 OpenAPI 3.0，见 `api/README.md`） |
 | @redocly/cli | 1.34.0 | 已验证：0 错误 0 警告 |
 | openapi-typescript | 7.4.4（必须加 `--default-non-nullable false`） | 已验证 |
