@@ -2782,13 +2782,14 @@ const file_vortex_backend_v1_hub_control_proto_rawDesc = "" +
 	"\x0eReconcilePhase\x12\x1f\n" +
 	"\x1bRECONCILE_PHASE_UNSPECIFIED\x10\x00\x12\x1b\n" +
 	"\x17RECONCILE_PHASE_STARTED\x10\x01\x12\x1d\n" +
-	"\x19RECONCILE_PHASE_COMPLETED\x10\x022\xee\x02\n" +
+	"\x19RECONCILE_PHASE_COMPLETED\x10\x022\xc9\x03\n" +
 	"\n" +
 	"HubControl\x12V\n" +
 	"\tEnrollHub\x12#.vortex.backend.v1.EnrollHubRequest\x1a$.vortex.backend.v1.EnrollHubResponse\x12U\n" +
 	"\n" +
 	"EnrollNode\x12$.vortex.backend.v1.EnrollNodeRequest\x1a!.vortex.edgehub.v1.EnrollResponse\x12^\n" +
-	"\rRenewNodeCert\x12'.vortex.backend.v1.RenewNodeCertRequest\x1a$.vortex.edgehub.v1.RenewCertResponse\x12Q\n" +
+	"\rRenewNodeCert\x12'.vortex.backend.v1.RenewNodeCertRequest\x1a$.vortex.edgehub.v1.RenewCertResponse\x12Y\n" +
+	"\fRenewHubCert\x12#.vortex.edgehub.v1.RenewCertRequest\x1a$.vortex.edgehub.v1.RenewCertResponse\x12Q\n" +
 	"\aConnect\x12\x1f.vortex.backend.v1.HubUpMessage\x1a!.vortex.backend.v1.BackendMessage(\x010\x01B1Z/vortex/proto/gen/go/vortex/backend/v1;backendv1b\x06proto3"
 
 var (
@@ -2861,8 +2862,9 @@ var file_vortex_backend_v1_hub_control_proto_goTypes = []any{
 	(*v12.ShareLease)(nil),        // 52: vortex.runtime.v1.ShareLease
 	(*v11.DrainCommand)(nil),      // 53: vortex.edgehub.v1.DrainCommand
 	(*v11.UpgradeCommand)(nil),    // 54: vortex.edgehub.v1.UpgradeCommand
-	(*v11.EnrollResponse)(nil),    // 55: vortex.edgehub.v1.EnrollResponse
-	(*v11.RenewCertResponse)(nil), // 56: vortex.edgehub.v1.RenewCertResponse
+	(*v11.RenewCertRequest)(nil),  // 55: vortex.edgehub.v1.RenewCertRequest
+	(*v11.EnrollResponse)(nil),    // 56: vortex.edgehub.v1.EnrollResponse
+	(*v11.RenewCertResponse)(nil), // 57: vortex.edgehub.v1.RenewCertResponse
 }
 var file_vortex_backend_v1_hub_control_proto_depIdxs = []int32{
 	36, // 0: vortex.backend.v1.EnrollHubResponse.hub_id:type_name -> vortex.common.v1.Uuid
@@ -2953,13 +2955,15 @@ var file_vortex_backend_v1_hub_control_proto_depIdxs = []int32{
 	2,  // 85: vortex.backend.v1.HubControl.EnrollHub:input_type -> vortex.backend.v1.EnrollHubRequest
 	4,  // 86: vortex.backend.v1.HubControl.EnrollNode:input_type -> vortex.backend.v1.EnrollNodeRequest
 	5,  // 87: vortex.backend.v1.HubControl.RenewNodeCert:input_type -> vortex.backend.v1.RenewNodeCertRequest
-	6,  // 88: vortex.backend.v1.HubControl.Connect:input_type -> vortex.backend.v1.HubUpMessage
-	3,  // 89: vortex.backend.v1.HubControl.EnrollHub:output_type -> vortex.backend.v1.EnrollHubResponse
-	55, // 90: vortex.backend.v1.HubControl.EnrollNode:output_type -> vortex.edgehub.v1.EnrollResponse
-	56, // 91: vortex.backend.v1.HubControl.RenewNodeCert:output_type -> vortex.edgehub.v1.RenewCertResponse
-	23, // 92: vortex.backend.v1.HubControl.Connect:output_type -> vortex.backend.v1.BackendMessage
-	89, // [89:93] is the sub-list for method output_type
-	85, // [85:89] is the sub-list for method input_type
+	55, // 88: vortex.backend.v1.HubControl.RenewHubCert:input_type -> vortex.edgehub.v1.RenewCertRequest
+	6,  // 89: vortex.backend.v1.HubControl.Connect:input_type -> vortex.backend.v1.HubUpMessage
+	3,  // 90: vortex.backend.v1.HubControl.EnrollHub:output_type -> vortex.backend.v1.EnrollHubResponse
+	56, // 91: vortex.backend.v1.HubControl.EnrollNode:output_type -> vortex.edgehub.v1.EnrollResponse
+	57, // 92: vortex.backend.v1.HubControl.RenewNodeCert:output_type -> vortex.edgehub.v1.RenewCertResponse
+	57, // 93: vortex.backend.v1.HubControl.RenewHubCert:output_type -> vortex.edgehub.v1.RenewCertResponse
+	23, // 94: vortex.backend.v1.HubControl.Connect:output_type -> vortex.backend.v1.BackendMessage
+	90, // [90:95] is the sub-list for method output_type
+	85, // [85:90] is the sub-list for method input_type
 	85, // [85:85] is the sub-list for extension type_name
 	85, // [85:85] is the sub-list for extension extendee
 	0,  // [0:85] is the sub-list for field type_name

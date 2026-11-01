@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -55,7 +56,12 @@ type Config struct {
 	CAFile   string `json:"ca_file"`
 	// BackendAddress 是后端 HubControl 地址；为空时不连接后端（始终失联，30 秒后自治）。
 	BackendAddress string `json:"backend_address"`
+
+	renewEvery time.Duration // 实例证书续签的检查周期（测试用；默认 1 小时）
 }
+
+// SetRenewEvery 设置实例证书续签的检查周期（测试用）。
+func (c *Config) SetRenewEvery(d time.Duration) { c.renewEvery = d }
 
 func ParseUUID(s string) (model.UUID, error) {
 	var u model.UUID
@@ -89,7 +95,7 @@ type Options struct {
 }
 
 func loadTLS(cfg *Config) (tls.Certificate, *x509.CertPool, error) {
-	cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
+	cert, err := loadCert(cfg.CertFile, cfg.KeyFile)
 	if err != nil {
 		return tls.Certificate{}, nil, fmt.Errorf("hub certificate: %w", err)
 	}
@@ -164,9 +170,10 @@ func Run(ctx context.Context, cfg *Config, log *slog.Logger, opt Options) error 
 		if err != nil {
 			return err
 		}
+		holder := &certHolder{cert: cert}
 		var bc *backendgrpc.Client
 		if cfg.BackendAddress != "" {
-			bc = &backendgrpc.Client{Link: link, Addr: cfg.BackendAddress, TLS: backendgrpc.ClientTLS(cert, roots), Region: cfg.Region,
+			bc = &backendgrpc.Client{Link: link, Addr: cfg.BackendAddress, TLS: holder.clientTLS(backendgrpc.ClientTLS(cert, roots)), Region: cfg.Region,
 				Version: Version, OnError: func(err error) { log.Warn("backend connection", "err", err) }}
 			defer bc.Close()
 		}
@@ -175,7 +182,7 @@ func Run(ctx context.Context, cfg *Config, log *slog.Logger, opt Options) error 
 			if err != nil {
 				return err
 			}
-			srv = grpc.NewServer(grpc.Creds(credentials.NewTLS(nodegrpc.ServerTLS(cert, roots))))
+			srv = grpc.NewServer(grpc.Creds(credentials.NewTLS(holder.serverTLS(nodegrpc.ServerTLS(cert, roots)))))
 			ns := &nodegrpc.Server{Hub: h, Region: cfg.Region, Revoked: revoked(link)}
 			if bc != nil {
 				ns.Backend = bc // 注册与续签经本实例转发到后端（HUB-T03）
@@ -189,6 +196,15 @@ func Run(ctx context.Context, cfg *Config, log *slog.Logger, opt Options) error 
 		}
 		if bc != nil {
 			go func() { bc.Run(ctx); close(done) }()
+			r := &renewer{hub: id, holder: holder, roots: roots, certFile: cfg.CertFile, keyFile: cfg.KeyFile, submit: bc.RenewHubCert,
+				every: cfg.renewEvery, onEvent: func(renewed bool, err error) {
+					if err != nil {
+						log.Error("hub certificate renewal failed (CC-02)", "err", err)
+					} else if renewed {
+						log.Info("hub certificate renewed")
+					}
+				}}
+			go r.run(ctx)
 		}
 	}
 	if cfg.BackendAddress == "" {

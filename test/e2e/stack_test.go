@@ -40,15 +40,16 @@ type protoBackend struct {
 	cfg  *types.RuntimeConfig
 	more []*types.RuntimeConfig // 其他节点的期望配置（按 NodeID 下发）
 
-	mu       sync.Mutex
-	usage    int
-	applied  []uint64
-	pushed   map[string]bool
-	out      func(*backendv1.BackendMessage) // 当前流（push 用）
-	version  map[string]string               // 在线节点的程序版本（NodeStatus.agent_version），按 node_id
-	upgrades []*edgehubv1.UpgradeStatus      // Edge Hub 转发的升级进度（AGT-008）
-	events   []string                        // 全部节点事件（调试输出）
-	peerDown []peerDownEvent                 // 节点报告的链路失效（ENG-019），按到达时刻
+	mu        sync.Mutex
+	usage     int
+	applied   []uint64
+	pushed    map[string]bool
+	out       func(*backendv1.BackendMessage) // 当前流（push 用）
+	version   map[string]string               // 在线节点的程序版本（NodeStatus.agent_version），按 node_id
+	upgrades  []*edgehubv1.UpgradeStatus      // Edge Hub 转发的升级进度（AGT-008）
+	registers int                             // 收到的 HubRegister 次数
+	events    []string                        // 全部节点事件（调试输出）
+	peerDown  []peerDownEvent                 // 节点报告的链路失效（ENG-019），按到达时刻
 }
 
 type peerDownEvent struct {
@@ -116,6 +117,9 @@ func (b *protoBackend) Connect(s grpc.BidiStreamingServer[backendv1.HubUpMessage
 		}
 		switch x := m.Body.(type) {
 		case *backendv1.HubUpMessage_Register:
+			b.mu.Lock()
+			b.registers++
+			b.mu.Unlock()
 			send(&backendv1.BackendMessage{Body: &backendv1.BackendMessage_Budget{Budget: &backendv1.BudgetUpdate{
 				TenantId: nodewire.UUID(tenant), BudgetVersion: 1, Delegated: 1 << 30}}})
 			send(&backendv1.BackendMessage{Body: &backendv1.BackendMessage_BillingVersions{BillingVersions: &backendv1.BillingVersionSync{

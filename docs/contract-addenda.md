@@ -19,3 +19,4 @@
 | 编号 | 日期 | 契约 | 内容 | 原因 | 兼容性 | 确认 |
 | --- | --- | --- | --- | --- | --- | --- |
 | CC-01 | 2026-11-01 | C2 | `backend.v1.HubUpMessage` 新增 `NodeUpgradeForward node_upgrade = 9`（`node_id`、`vortex.edgehub.v1.UpgradeStatus status`）：Edge Hub 原样转发节点的升级进度 | 原契约中 Agent 上报 `UpgradeStatus`，但 Edge Hub → 后端没有对应字段，后端看不到“已回退”与失败原因（AGT-008） | 新增 oneof 成员与消息，编号未用过；旧后端忽略未知字段；`buf breaking` 相对 main 通过 | 2026-11-01 已确认 |
+| CC-02 | 2026-11-01 | C2 | `backend.v1.HubControl` 新增 `rpc RenewHubCert(vortex.edgehub.v1.RenewCertRequest) returns (vortex.edgehub.v1.RenewCertResponse)`（复用节点续签的请求与响应消息）：Edge Hub 实例证书续签，身份取自当前 mTLS 证书（须有效、未吊销），后端签发同一 `spiffe://vortex/hub/<hub_id>`，扩展用途 serverAuth + clientAuth（L5）；默认有效期 30 天，剩余 1/3 时续签（需求变更 CR-02） | 原契约只有一次性的 `EnrollHub`：实例证书过期后 Edge Hub 连不上后端（自治 12 小时后停签），且节点拒绝过期的服务端证书、运行授权 5 分钟内到期，整个区域停止转发；只能人工重新引导 | 新增 RPC；`buf breaking` 相对 main 通过；旧后端返回 Unimplemented 时 Edge Hub 告警并退避重试 | 2026-11-01 评审批准（复用消息；30 天 / 剩余 1/3） |

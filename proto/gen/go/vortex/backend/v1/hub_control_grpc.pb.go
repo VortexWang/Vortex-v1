@@ -28,6 +28,7 @@ const (
 	HubControl_EnrollHub_FullMethodName     = "/vortex.backend.v1.HubControl/EnrollHub"
 	HubControl_EnrollNode_FullMethodName    = "/vortex.backend.v1.HubControl/EnrollNode"
 	HubControl_RenewNodeCert_FullMethodName = "/vortex.backend.v1.HubControl/RenewNodeCert"
+	HubControl_RenewHubCert_FullMethodName  = "/vortex.backend.v1.HubControl/RenewHubCert"
 	HubControl_Connect_FullMethodName       = "/vortex.backend.v1.HubControl/Connect"
 )
 
@@ -40,6 +41,10 @@ type HubControlClient interface {
 	// 代理节点注册与续签（AGT-001、AGT-012）：Edge Hub 把节点请求转给后端 CA。
 	EnrollNode(ctx context.Context, in *EnrollNodeRequest, opts ...grpc.CallOption) (*v1.EnrollResponse, error)
 	RenewNodeCert(ctx context.Context, in *RenewNodeCertRequest, opts ...grpc.CallOption) (*v1.RenewCertResponse, error)
+	// Edge Hub 实例证书续签（C2 变更 CC-02）：身份取自当前 mTLS 证书（须有效、未吊销），后端签发同一 hub_id 的
+	// 证书（SAN URI spiffe://vortex/hub/<hub_id>，扩展用途 serverAuth + clientAuth，契约补充 L5）。默认有效期 30 天，
+	// 剩余 1/3 时续签。
+	RenewHubCert(ctx context.Context, in *v1.RenewCertRequest, opts ...grpc.CallOption) (*v1.RenewCertResponse, error)
 	// 控制主通道。
 	Connect(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[HubUpMessage, BackendMessage], error)
 }
@@ -82,6 +87,16 @@ func (c *hubControlClient) RenewNodeCert(ctx context.Context, in *RenewNodeCertR
 	return out, nil
 }
 
+func (c *hubControlClient) RenewHubCert(ctx context.Context, in *v1.RenewCertRequest, opts ...grpc.CallOption) (*v1.RenewCertResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(v1.RenewCertResponse)
+	err := c.cc.Invoke(ctx, HubControl_RenewHubCert_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *hubControlClient) Connect(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[HubUpMessage, BackendMessage], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	stream, err := c.cc.NewStream(ctx, &HubControl_ServiceDesc.Streams[0], HubControl_Connect_FullMethodName, cOpts...)
@@ -104,6 +119,10 @@ type HubControlServer interface {
 	// 代理节点注册与续签（AGT-001、AGT-012）：Edge Hub 把节点请求转给后端 CA。
 	EnrollNode(context.Context, *EnrollNodeRequest) (*v1.EnrollResponse, error)
 	RenewNodeCert(context.Context, *RenewNodeCertRequest) (*v1.RenewCertResponse, error)
+	// Edge Hub 实例证书续签（C2 变更 CC-02）：身份取自当前 mTLS 证书（须有效、未吊销），后端签发同一 hub_id 的
+	// 证书（SAN URI spiffe://vortex/hub/<hub_id>，扩展用途 serverAuth + clientAuth，契约补充 L5）。默认有效期 30 天，
+	// 剩余 1/3 时续签。
+	RenewHubCert(context.Context, *v1.RenewCertRequest) (*v1.RenewCertResponse, error)
 	// 控制主通道。
 	Connect(grpc.BidiStreamingServer[HubUpMessage, BackendMessage]) error
 	mustEmbedUnimplementedHubControlServer()
@@ -124,6 +143,9 @@ func (UnimplementedHubControlServer) EnrollNode(context.Context, *EnrollNodeRequ
 }
 func (UnimplementedHubControlServer) RenewNodeCert(context.Context, *RenewNodeCertRequest) (*v1.RenewCertResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method RenewNodeCert not implemented")
+}
+func (UnimplementedHubControlServer) RenewHubCert(context.Context, *v1.RenewCertRequest) (*v1.RenewCertResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RenewHubCert not implemented")
 }
 func (UnimplementedHubControlServer) Connect(grpc.BidiStreamingServer[HubUpMessage, BackendMessage]) error {
 	return status.Errorf(codes.Unimplemented, "method Connect not implemented")
@@ -203,6 +225,24 @@ func _HubControl_RenewNodeCert_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _HubControl_RenewHubCert_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(v1.RenewCertRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HubControlServer).RenewHubCert(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HubControl_RenewHubCert_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HubControlServer).RenewHubCert(ctx, req.(*v1.RenewCertRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _HubControl_Connect_Handler(srv interface{}, stream grpc.ServerStream) error {
 	return srv.(HubControlServer).Connect(&grpc.GenericServerStream[HubUpMessage, BackendMessage]{ServerStream: stream})
 }
@@ -228,6 +268,10 @@ var HubControl_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RenewNodeCert",
 			Handler:    _HubControl_RenewNodeCert_Handler,
+		},
+		{
+			MethodName: "RenewHubCert",
+			Handler:    _HubControl_RenewHubCert_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

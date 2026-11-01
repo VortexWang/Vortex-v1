@@ -225,3 +225,16 @@ func (c *Client) once(ctx context.Context) error {
 	<-werr
 	return rerr
 }
+
+// RenewHubCert 续签本实例证书（C2 变更 CC-02）：身份取自当前 mTLS 证书。
+func (c *Client) RenewHubCert(ctx context.Context, csr []byte) ([][]byte, error) {
+	hc, err := c.unary()
+	if err != nil {
+		return nil, err
+	}
+	resp, err := hc.RenewHubCert(ctx, &edgehubv1.RenewCertRequest{CsrDer: csr})
+	if err != nil {
+		return nil, err
+	}
+	return resp.GetCertificateChainDer(), nil
+}

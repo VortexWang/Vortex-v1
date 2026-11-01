@@ -19,6 +19,10 @@ service HubControl {
   // 代理节点注册与续签（AGT-001、AGT-012）：Edge Hub 把节点请求转给后端 CA。
   rpc EnrollNode(EnrollNodeRequest) returns (vortex.edgehub.v1.EnrollResponse);
   rpc RenewNodeCert(RenewNodeCertRequest) returns (vortex.edgehub.v1.RenewCertResponse);
+  // Edge Hub 实例证书续签（C2 变更 CC-02）：身份取自当前 mTLS 证书（须有效、未吊销），后端签发同一 hub_id 的
+  // 证书（SAN URI spiffe://vortex/hub/<hub_id>，扩展用途 serverAuth + clientAuth，契约补充 L5）。默认有效期 30 天，
+  // 剩余 1/3 时续签。
+  rpc RenewHubCert(vortex.edgehub.v1.RenewCertRequest) returns (vortex.edgehub.v1.RenewCertResponse);
   // 控制主通道。
   rpc Connect(stream HubUpMessage) returns (stream BackendMessage);
 }

@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 
 	hubapp "vortex/edgehub/app"
@@ -43,10 +45,12 @@ type enrollBackend struct {
 	p        *pki
 	hubAddr  string
 	nodeLife time.Duration // 首次签发的节点证书有效期（短，用于触发续签）
+	hubLife  time.Duration // 实例证书有效期（0 = 1 小时）
 
-	mu       sync.Mutex
-	renewals int
-	remotes  []string
+	mu          sync.Mutex
+	renewals    int
+	hubRenewals int
+	remotes     []string
 }
 
 func (b *enrollBackend) sign(t *testing.T, csrDER []byte, uri string, life time.Duration, usage ...x509.ExtKeyUsage) ([]byte, error) {
@@ -67,7 +71,7 @@ func (b *enrollBackend) EnrollHub(_ context.Context, r *backendv1.EnrollHubReque
 	if r.BootstrapToken != "hub-token" {
 		return nil, status.Error(codes.PermissionDenied, "bad bootstrap token")
 	}
-	der, err := b.sign(testT, r.CsrDer, grpcconn.HubURI(hubA), time.Hour, x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth)
+	der, err := b.sign(testT, r.CsrDer, grpcconn.HubURI(hubA), b.hubLifetime(), x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth)
 	if err != nil {
 		return nil, err
 	}
@@ -104,6 +108,37 @@ func (b *enrollBackend) RenewNodeCert(_ context.Context, r *backendv1.RenewNodeC
 	}
 	b.mu.Lock()
 	b.renewals++
+	b.mu.Unlock()
+	return &edgehubv1.RenewCertResponse{CertificateChainDer: [][]byte{der}}, nil
+}
+
+func (b *enrollBackend) hubLifetime() time.Duration {
+	if b.hubLife == 0 {
+		return time.Hour
+	}
+	return b.hubLife
+}
+
+// RenewHubCert（CC-02）：身份取自 mTLS 客户端证书（须为平台 CA 签发的有效实例证书），签发同一 hub_id。
+func (b *enrollBackend) RenewHubCert(ctx context.Context, r *edgehubv1.RenewCertRequest) (*edgehubv1.RenewCertResponse, error) {
+	pr, ok := peer.FromContext(ctx)
+	if !ok {
+		return nil, status.Error(codes.Unauthenticated, "no peer")
+	}
+	ti, ok := pr.AuthInfo.(credentials.TLSInfo)
+	if !ok || len(ti.State.VerifiedChains) == 0 {
+		return nil, status.Error(codes.Unauthenticated, "no verified client certificate")
+	}
+	leaf := ti.State.VerifiedChains[0][0]
+	if len(leaf.URIs) != 1 || !strings.HasPrefix(leaf.URIs[0].String(), "spiffe://vortex/hub/") {
+		return nil, status.Error(codes.PermissionDenied, "not a hub certificate")
+	}
+	der, err := b.sign(testT, r.CsrDer, leaf.URIs[0].String(), b.hubLifetime(), x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth)
+	if err != nil {
+		return nil, err
+	}
+	b.mu.Lock()
+	b.hubRenewals++
 	b.mu.Unlock()
 	return &edgehubv1.RenewCertResponse{CertificateChainDer: [][]byte{der}}, nil
 }
@@ -276,4 +311,110 @@ func containsToken(b []byte) bool {
 		}
 	}
 	return false
+}
+
+// 实例证书续签（C2 变更 CC-02）：实例证书有效期 4 秒，剩余 1/3 时经 RenewHubCert 续签（新私钥、hub_id 不变、
+// 文件原子替换）；原证书过期后，节点仍能与 Edge Hub 建立新的控制连接（服务端证书热更新），后端重启后
+// Edge Hub 以新证书重新连接（客户端证书热更新），节点照常转发。
+func TestHubCertRenewal(t *testing.T) {
+	testT = t
+	p := newPKI(t)
+	dir := t.TempDir()
+	caFile := filepath.Join(dir, "ca.crt")
+	_ = os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: p.ca.Raw}), 0o600)
+	cfg := config(t)
+	addr := cfg.Listeners[0].Bind
+	be := &enrollBackend{protoBackend: &protoBackend{cfg: cfg, pushed: map[string]bool{}}, p: p, nodeLife: time.Hour, hubLife: 4 * time.Second}
+	backendTLS := credentials.NewTLS(&tls.Config{Certificates: []tls.Certificate{p.issue(t, backendgrpc.BackendURI, x509.ExtKeyUsageServerAuth)},
+		ClientCAs: p.roots, ClientAuth: tls.VerifyClientCertIfGiven, MinVersion: tls.VersionTLS13})
+	bln, _ := net.Listen("tcp4", "127.0.0.1:0")
+	baddr := bln.Addr().String()
+	bsrv := grpc.NewServer(grpc.Creds(backendTLS))
+	backendv1.RegisterHubControlServer(bsrv, be)
+	go func() { _ = bsrv.Serve(bln) }()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	hp := hubapp.EnrollParams{Token: "hub-token", Backend: baddr, CAFile: caFile, Region: "test", Listen: "127.0.0.1:0",
+		DataDir: filepath.Join(dir, "hub"), ConfigPath: filepath.Join(dir, "hub.json")}
+	hubCfg, err := hubapp.Enroll(ctx, hp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := serial(t, hubCfg.CertFile)
+	hubCfg.SetRenewEvery(200 * time.Millisecond)
+	listen := make(chan string, 1)
+	hubDone := make(chan error, 1)
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	go func() {
+		hubDone <- hubapp.Run(ctx, hubCfg, quiet, hubapp.Options{OnListen: func(a string) { listen <- a }})
+	}()
+	hubAddr := <-listen
+	start := time.Now()
+
+	d := grpcconn.Dialer{Cert: p.node(t, nodeID), Roots: p.roots, DialTimeout: 2 * time.Second}
+	n := startNodeGRPC(t, newLogs(), d, []control.Endpoint{{ID: hubA, Address: hubAddr}})
+	online(t, n)
+	eventually(t, "hub certificate renewed", func() bool { return serial(t, hubCfg.CertFile).Cmp(first) != 0 })
+	if _, err := os.Stat(hubCfg.KeyFile + ".prev"); err != nil {
+		t.Fatal("previous hub key not kept")
+	}
+	// 原证书过期之后
+	time.Sleep(time.Until(start.Add(5 * time.Second)))
+	// 另一个节点身份新建连接（不取代正在转发的节点的会话）
+	probeD := grpcconn.Dialer{Cert: p.node(t, nodeX1), Roots: p.roots, DialTimeout: 2 * time.Second}
+	conn, err := probeD.Dial(ctx, control.Endpoint{ID: hubA, Address: hubAddr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.Send(agent.Hello{Node: nodeX1, Boot: types.UUID{0x5f}}); err != nil {
+		t.Fatal(err)
+	}
+	rctx, rcancel := context.WithTimeout(ctx, 5*time.Second)
+	defer rcancel()
+	if m, err := conn.Recv(rctx); err != nil {
+		t.Fatalf("new control connection after the original hub certificate expired: %v", err)
+	} else if _, ok := m.(agent.HubHello); !ok {
+		t.Fatalf("first message %T", m)
+	}
+	conn.Close()
+	eventually(t, "forwarding after the original hub certificate expired", func() bool { return ok(addr) })
+	// 后端重启：Edge Hub 以续签后的客户端证书重新连接并注册
+	bsrv.Stop()
+	be.protoBackend.mu.Lock()
+	regs := be.registers
+	be.protoBackend.mu.Unlock()
+	bln2, err := net.Listen("tcp4", baddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bsrv2 := grpc.NewServer(grpc.Creds(backendTLS))
+	backendv1.RegisterHubControlServer(bsrv2, be)
+	go func() { _ = bsrv2.Serve(bln2) }()
+	defer bsrv2.Stop()
+	eventually30s(t, "hub reconnected to the backend with the renewed certificate", func() bool {
+		be.protoBackend.mu.Lock()
+		defer be.protoBackend.mu.Unlock()
+		return be.registers > regs
+	})
+	be.mu.Lock()
+	renewals := be.hubRenewals
+	be.mu.Unlock()
+	if renewals == 0 {
+		t.Fatal("no RenewHubCert call")
+	}
+	eventually(t, "forwarding", func() bool { return ok(addr) })
+	cancel()
+	<-hubDone
+}
+
+func eventually30s(t *testing.T, what string, f func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for !f() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timeout: %s", what)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
