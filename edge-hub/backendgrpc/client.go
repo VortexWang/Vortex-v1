@@ -7,14 +7,18 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
 
+	"vortex/edgehub/model"
 	"vortex/edgehub/upstream"
+	"vortex/edgehub/wire"
 	backendv1 "vortex/proto/gen/go/vortex/backend/v1"
+	edgehubv1 "vortex/proto/gen/go/vortex/edgehub/v1"
 )
 
 // BackendURI 是后端证书的 SAN URI（契约补充 L5）。
@@ -71,6 +75,50 @@ type Client struct {
 
 	BackoffMin, BackoffMax time.Duration // 默认 1 秒、30 秒（±20% 抖动）
 	OnError                func(error)
+
+	umu sync.Mutex
+	ucc *grpc.ClientConn // 一元调用（注册与续签代理）共用的连接
+}
+
+func (c *Client) unary() (backendv1.HubControlClient, error) {
+	c.umu.Lock()
+	defer c.umu.Unlock()
+	if c.ucc == nil {
+		cc, err := grpc.NewClient(c.Addr, grpc.WithTransportCredentials(credentials.NewTLS(c.TLS)))
+		if err != nil {
+			return nil, err
+		}
+		c.ucc = cc
+	}
+	return backendv1.NewHubControlClient(c.ucc), nil
+}
+
+// EnrollNode 代理节点注册（HUB-T03）。
+func (c *Client) EnrollNode(ctx context.Context, req *edgehubv1.EnrollRequest, remote string) (*edgehubv1.EnrollResponse, error) {
+	hc, err := c.unary()
+	if err != nil {
+		return nil, err
+	}
+	return hc.EnrollNode(ctx, &backendv1.EnrollNodeRequest{Request: req, ObservedRemoteAddress: remote})
+}
+
+// RenewNodeCert 代理节点证书续签（node_id 取自节点的 mTLS 证书，由 Edge Hub 填写）。
+func (c *Client) RenewNodeCert(ctx context.Context, node model.UUID, csr []byte) (*edgehubv1.RenewCertResponse, error) {
+	hc, err := c.unary()
+	if err != nil {
+		return nil, err
+	}
+	return hc.RenewNodeCert(ctx, &backendv1.RenewNodeCertRequest{NodeId: wire.UUID(node), CsrDer: csr})
+}
+
+// Close 关闭一元调用的连接。
+func (c *Client) Close() {
+	c.umu.Lock()
+	defer c.umu.Unlock()
+	if c.ucc != nil {
+		c.ucc.Close()
+		c.ucc = nil
+	}
 }
 
 // Run 连接并在断线后退避重连，直至 ctx 结束。失联判定（30 秒进入自治）由模式状态机按最后一次通信计算。

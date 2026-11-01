@@ -6,10 +6,14 @@ package app
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -30,6 +34,7 @@ import (
 	"vortex/edgehub/session"
 	"vortex/edgehub/upstream"
 	"vortex/edgehub/wire"
+	backendv1 "vortex/proto/gen/go/vortex/backend/v1"
 	edgehubv1 "vortex/proto/gen/go/vortex/edgehub/v1"
 	runtimev1 "vortex/proto/gen/go/vortex/runtime/v1"
 )
@@ -159,23 +164,31 @@ func Run(ctx context.Context, cfg *Config, log *slog.Logger, opt Options) error 
 		if err != nil {
 			return err
 		}
+		var bc *backendgrpc.Client
+		if cfg.BackendAddress != "" {
+			bc = &backendgrpc.Client{Link: link, Addr: cfg.BackendAddress, TLS: backendgrpc.ClientTLS(cert, roots), Region: cfg.Region,
+				Version: Version, OnError: func(err error) { log.Warn("backend connection", "err", err) }}
+			defer bc.Close()
+		}
 		if cfg.Listen != "" {
 			ln, err := net.Listen("tcp", cfg.Listen)
 			if err != nil {
 				return err
 			}
 			srv = grpc.NewServer(grpc.Creds(credentials.NewTLS(nodegrpc.ServerTLS(cert, roots))))
-			edgehubv1.RegisterNodeControlServer(srv, &nodegrpc.Server{Hub: h, Region: cfg.Region, Revoked: revoked(link)})
+			ns := &nodegrpc.Server{Hub: h, Region: cfg.Region, Revoked: revoked(link)}
+			if bc != nil {
+				ns.Backend = bc // 注册与续签经本实例转发到后端（HUB-T03）
+			}
+			edgehubv1.RegisterNodeControlServer(srv, ns)
 			go func() { _ = srv.Serve(ln) }()
 			log.Info("NodeControl listening", "addr", ln.Addr().String())
 			if opt.OnListen != nil {
 				opt.OnListen(ln.Addr().String())
 			}
 		}
-		if cfg.BackendAddress != "" {
-			c := &backendgrpc.Client{Link: link, Addr: cfg.BackendAddress, TLS: backendgrpc.ClientTLS(cert, roots), Region: cfg.Region,
-				Version: Version, OnError: func(err error) { log.Warn("backend connection", "err", err) }}
-			go func() { c.Run(ctx); close(done) }()
+		if bc != nil {
+			go func() { bc.Run(ctx); close(done) }()
 		}
 	}
 	if cfg.BackendAddress == "" {
@@ -190,4 +203,140 @@ func Run(ctx context.Context, cfg *Config, log *slog.Logger, opt Options) error 
 	cancel()
 	<-done
 	return nil
+}
+
+// ---------------------------------------------------------------- 实例引导（HUB-T19）
+
+// EnrollParams 是 edge-hub enroll 的参数。
+type EnrollParams struct {
+	Token      string // 一次性引导令牌
+	Backend    string // 后端 HubControl 地址
+	CAFile     string // 平台 CA（随安装包分发）
+	Region     string
+	Listen     string
+	DataDir    string
+	ConfigPath string
+}
+
+// Enroll 本地生成私钥与 CSR，用引导令牌向后端换取实例证书与 hub_id，校验后写入数据目录并写配置。
+func Enroll(ctx context.Context, p EnrollParams) (*Config, error) {
+	pemCA, err := os.ReadFile(p.CAFile)
+	if err != nil {
+		return nil, err
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(pemCA) {
+		return nil, errors.New("ca file: no certificates")
+	}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	csr, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{}, key)
+	if err != nil {
+		return nil, err
+	}
+	tc := backendgrpc.ClientTLS(tls.Certificate{}, roots)
+	tc.Certificates = nil // 引导时还没有证书
+	cc, err := grpc.NewClient(p.Backend, grpc.WithTransportCredentials(credentials.NewTLS(tc)))
+	if err != nil {
+		return nil, err
+	}
+	defer cc.Close()
+	resp, err := backendv1.NewHubControlClient(cc).EnrollHub(ctx, &backendv1.EnrollHubRequest{BootstrapToken: p.Token, CsrDer: csr, Region: p.Region, HubVersion: Version})
+	if err != nil {
+		return nil, fmt.Errorf("enroll hub: %w", err)
+	}
+	id, err := wire.FromUUID(resp.GetHubId())
+	if err != nil || id.IsZero() {
+		return nil, fmt.Errorf("enroll hub: bad hub_id")
+	}
+	if err := verifyHubCert(resp.GetCertificateChainDer(), key, roots, id); err != nil {
+		return nil, fmt.Errorf("enroll hub: issued certificate: %w", err)
+	}
+	if err := os.MkdirAll(p.DataDir, 0o700); err != nil {
+		return nil, err
+	}
+	cfg := &Config{HubID: id.String(), Region: p.Region, DataDir: p.DataDir, Listen: p.Listen, BackendAddress: p.Backend,
+		CertFile: filepath.Join(p.DataDir, "hub.crt"), KeyFile: filepath.Join(p.DataDir, "hub.key"), CAFile: filepath.Join(p.DataDir, "ca.crt")}
+	var caOut, chainOut bytes.Buffer
+	for _, d := range resp.GetCaBundleDer() {
+		_ = pem.Encode(&caOut, &pem.Block{Type: "CERTIFICATE", Bytes: d})
+	}
+	if caOut.Len() == 0 {
+		caOut.Write(pemCA)
+	}
+	for _, d := range resp.GetCertificateChainDer() {
+		_ = pem.Encode(&chainOut, &pem.Block{Type: "CERTIFICATE", Bytes: d})
+	}
+	kd, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		return nil, err
+	}
+	for _, f := range []struct {
+		path string
+		data []byte
+		mode os.FileMode
+	}{
+		{cfg.KeyFile, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: kd}), 0o600},
+		{cfg.CertFile, chainOut.Bytes(), 0o644},
+		{cfg.CAFile, caOut.Bytes(), 0o644},
+	} {
+		if err := writeAtomic(f.path, f.data, f.mode); err != nil {
+			return nil, err
+		}
+	}
+	b, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := writeAtomic(p.ConfigPath, b, 0o600); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// verifyHubCert：公钥与本地私钥一致，链到平台 CA，SAN URI 为该 hub_id，扩展用途含 serverAuth 与 clientAuth（L5）。
+func verifyHubCert(chain [][]byte, key *ecdsa.PrivateKey, roots *x509.CertPool, id model.UUID) error {
+	if len(chain) == 0 {
+		return errors.New("empty chain")
+	}
+	var certs []*x509.Certificate
+	for _, d := range chain {
+		c, err := x509.ParseCertificate(d)
+		if err != nil {
+			return err
+		}
+		certs = append(certs, c)
+	}
+	leaf := certs[0]
+	if pub, ok := leaf.PublicKey.(*ecdsa.PublicKey); !ok || !pub.Equal(&key.PublicKey) {
+		return errors.New("public key mismatch")
+	}
+	inter := x509.NewCertPool()
+	for _, c := range certs[1:] {
+		inter.AddCert(c)
+	}
+	for _, ku := range []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth} {
+		if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots, Intermediates: inter, KeyUsages: []x509.ExtKeyUsage{ku}}); err != nil {
+			return err
+		}
+	}
+	want := nodegrpc.HubURI(id)
+	for _, u := range leaf.URIs {
+		if u.String() == want {
+			return nil
+		}
+	}
+	return fmt.Errorf("certificate does not carry %s", want)
+}
+
+func writeAtomic(path string, data []byte, mode os.FileMode) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, mode); err != nil {
+		return err
+	}
+	f, err := os.Open(tmp)
+	if err == nil {
+		_ = f.Sync()
+		f.Close()
+	}
+	return os.Rename(tmp, path)
 }

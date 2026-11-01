@@ -4,7 +4,6 @@ package app
 
 import (
 	"context"
-	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
@@ -19,13 +18,16 @@ import (
 	"vortex/engine"
 	"vortex/engine/types"
 	"vortex/node/agent"
+	"vortex/node/agent/certs"
 	"vortex/node/agent/control"
 	"vortex/node/agent/grpcconn"
 	"vortex/node/agent/localapi"
 	"vortex/node/agent/probe"
 	"vortex/node/agent/report"
 	"vortex/node/agent/store"
+	"vortex/node/agent/wire"
 	"vortex/node/internal/supervisor"
+	edgehubv1 "vortex/proto/gen/go/vortex/edgehub/v1"
 )
 
 // Version 由构建时注入。
@@ -45,7 +47,12 @@ type Config struct {
 	CertFile string `json:"cert_file"`
 	KeyFile  string `json:"key_file"`
 	CAFile   string `json:"ca_file"`
+
+	renewEvery time.Duration // 证书检查周期（测试用；默认 1 小时）
 }
+
+// SetRenewEvery 设置证书续签的检查周期（测试用）。
+func (c *Config) SetRenewEvery(d time.Duration) { c.renewEvery = d }
 
 type HubEntry struct {
 	HubID   string `json:"hub_id"`
@@ -99,7 +106,7 @@ func Dialer(cfg *Config) (control.Dialer, error) {
 	if cfg.CertFile == "" && cfg.KeyFile == "" && cfg.CAFile == "" {
 		return nil, nil
 	}
-	cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
+	cert, err := certs.Load(cfg.CertFile, cfg.KeyFile)
 	if err != nil {
 		return nil, fmt.Errorf("node certificate: %w", err)
 	}
@@ -111,7 +118,7 @@ func Dialer(cfg *Config) (control.Dialer, error) {
 	if !roots.AppendCertsFromPEM(pem) {
 		return nil, errors.New("ca_file: no certificates")
 	}
-	return grpcconn.Dialer{Cert: cert, Roots: roots}, nil
+	return grpcconn.Dialer{Holder: certs.NewHolder(cert), Roots: roots}, nil
 }
 
 // Run 组装并运行节点，直至 ctx 结束。dialer 为 nil 时不建立控制连接。
@@ -207,6 +214,21 @@ func Run(ctx context.Context, cfg *Config, dialer control.Dialer, log *slog.Logg
 		}
 		c := &control.Controller{Agent: a, Hubs: eps, Dialer: dialer}
 		sup.Go(ctx, "control", func(ctx context.Context) error { c.Run(ctx); return nil })
+		if gd, ok := dialer.(grpcconn.Dialer); ok && gd.Holder != nil {
+			r := &certs.Renewer{Holder: gd.Holder, Roots: gd.Roots, CertFile: cfg.CertFile, KeyFile: cfg.KeyFile, Every: cfg.renewEvery,
+				OnEvent: func(renewed bool, err error) {
+					if err != nil {
+						log.Error("certificate renewal failed (AGT-012)", "err", err)
+					} else if renewed {
+						log.Info("certificate renewed")
+					}
+				}}
+			for _, ep := range eps {
+				ep := ep
+				r.Submit = append(r.Submit, func(ctx context.Context, csr []byte) ([][]byte, error) { return gd.RenewCert(ctx, ep, csr) })
+			}
+			sup.Go(ctx, "cert", func(ctx context.Context) error { r.Run(ctx); return nil })
+		}
 	} else {
 		log.Warn("no control transport: running without an Edge Hub connection")
 	}
@@ -228,4 +250,72 @@ func StatusView(s agent.Status, disk *report.DiskGuard) localapi.Status {
 		v.DiskFreeBytes = disk.Last()
 	}
 	return v
+}
+
+// ---------------------------------------------------------------- 注册（AGT-001）
+
+// EnrollParams 是 vortex-node enroll 的参数。
+type EnrollParams struct {
+	Token      string // 一次性注册令牌
+	Hub        string // Edge Hub 地址
+	CAFile     string // 平台 CA（随安装包分发，用于校验 Edge Hub 与签发结果）
+	DataDir    string
+	ConfigPath string // 写入的节点配置文件
+	Socket     string
+	Caps       *edgehubv1.NodeCapabilities
+}
+
+// Enroll 本地生成私钥与 CSR，用令牌经 Edge Hub 换取节点证书，校验后写入数据目录（私钥 0600），并写节点配置。
+// 令牌只用于注册，不写入任何文件（SEC-001）。
+func Enroll(ctx context.Context, p EnrollParams) (*Config, error) {
+	roots, err := certs.LoadPool(p.CAFile)
+	if err != nil {
+		return nil, err
+	}
+	key, err := certs.NewKey()
+	if err != nil {
+		return nil, err
+	}
+	csr, err := certs.CSR(key)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := grpcconn.Enroll(ctx, p.Hub, roots, &edgehubv1.EnrollRequest{EnrollToken: p.Token, CsrDer: csr, AgentVersion: Version, Capabilities: p.Caps})
+	if err != nil {
+		return nil, fmt.Errorf("enroll: %w", err)
+	}
+	id, _, err := certs.Verify(resp.GetCertificateChainDer(), key, roots, types.UUID{})
+	if err != nil {
+		return nil, fmt.Errorf("enroll: issued certificate: %w", err)
+	}
+	if want, err := wire.FromUUID(resp.GetNodeId()); err != nil || want != id {
+		return nil, fmt.Errorf("enroll: node_id in response does not match the certificate")
+	}
+	if err := os.MkdirAll(p.DataDir, 0o700); err != nil {
+		return nil, err
+	}
+	cfg := &Config{NodeID: FormatUUID(id), DataDir: p.DataDir, Socket: p.Socket,
+		CertFile: filepath.Join(p.DataDir, "node.crt"), KeyFile: filepath.Join(p.DataDir, "node.key"), CAFile: filepath.Join(p.DataDir, "ca.crt")}
+	_, caPEM, err := certs.PoolFromDER(resp.GetCaBundleDer())
+	if err != nil {
+		return nil, err
+	}
+	if err := certs.WriteAtomic(cfg.CAFile, caPEM, 0o644); err != nil {
+		return nil, err
+	}
+	if err := certs.Save(cfg.CertFile, cfg.KeyFile, resp.GetCertificateChainDer(), key); err != nil {
+		return nil, err
+	}
+	for _, h := range resp.GetEdgeHubs() {
+		hid, err := wire.FromUUID(h.GetHubId())
+		if err != nil {
+			return nil, err
+		}
+		cfg.EdgeHubs = append(cfg.EdgeHubs, HubEntry{HubID: FormatUUID(hid), Address: h.GetAddress()})
+	}
+	b, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := certs.WriteAtomic(p.ConfigPath, b, 0o600); err != nil {
+		return nil, err
+	}
+	return cfg, nil
 }

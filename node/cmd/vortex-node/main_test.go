@@ -91,7 +91,7 @@ func TestRunStatusDrain(t *testing.T) {
 
 func TestCommands(t *testing.T) {
 	var out, errb bytes.Buffer
-	if run(nil, &out, &errb) != 2 || run([]string{"bogus"}, &out, &errb) != 2 || run([]string{"enroll"}, &out, &errb) != 2 {
+	if run(nil, &out, &errb) != 2 || run([]string{"bogus"}, &out, &errb) != 2 || run([]string{"enroll"}, &out, &errb) != 2 || run([]string{"enroll", "-token", "t", "-hub", "127.0.0.1:1", "-ca", "/nonexistent"}, &out, &errb) != 1 {
 		t.Fatal("exit codes")
 	}
 	if run([]string{"version"}, &out, &errb) != 0 || strings.TrimSpace(out.String()) != app.Version {

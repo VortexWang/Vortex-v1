@@ -82,6 +82,8 @@ type Server struct {
 	Region string
 	// Revoked 判断节点或证书是否已吊销（吊销列表随后端同步，SEC-002）；nil 表示没有吊销。
 	Revoked func(node model.UUID, serial []byte) bool
+	// Backend 转发注册与续签；nil 时这两个 RPC 返回 Unimplemented。
+	Backend Backend
 
 	mu      sync.Mutex
 	streams int
@@ -209,4 +211,46 @@ func handleErr(err error) error {
 		return status.Error(codes.FailedPrecondition, err.Error())
 	}
 	return status.Error(codes.Internal, err.Error())
+}
+
+// Backend 是注册与续签的后端代理（HUB-T03）：Edge Hub 只转发，CA 在后端。
+type Backend interface {
+	EnrollNode(ctx context.Context, req *edgehubv1.EnrollRequest, observedRemote string) (*edgehubv1.EnrollResponse, error)
+	RenewNodeCert(ctx context.Context, node model.UUID, csr []byte) (*edgehubv1.RenewCertResponse, error)
+}
+
+// Enroll 转发节点注册（AGT-001）。不需要客户端证书；自治或对账中不接受注册（HUB-007）。
+func (s *Server) Enroll(ctx context.Context, req *edgehubv1.EnrollRequest) (*edgehubv1.EnrollResponse, error) {
+	if s.Backend == nil {
+		return nil, status.Error(codes.Unimplemented, "enrollment not configured")
+	}
+	if !s.Hub.AcceptsEnrollment() {
+		return nil, status.Error(codes.Unavailable, "control plane degraded: enrollment is unavailable while the hub is autonomous")
+	}
+	if req.GetEnrollToken() == "" || len(req.GetCsrDer()) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "token and csr required")
+	}
+	remote := ""
+	if p, ok := peer.FromContext(ctx); ok && p.Addr != nil {
+		remote = p.Addr.String()
+	}
+	return s.Backend.EnrollNode(ctx, req, remote)
+}
+
+// RenewCert 转发证书续签（AGT-012）：身份取自当前客户端证书，已吊销的拒绝。
+func (s *Server) RenewCert(ctx context.Context, req *edgehubv1.RenewCertRequest) (*edgehubv1.RenewCertResponse, error) {
+	if s.Backend == nil {
+		return nil, status.Error(codes.Unimplemented, "renewal not configured")
+	}
+	node, cert, err := nodeFromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if s.Revoked != nil && s.Revoked(node, cert.SerialNumber.Bytes()) {
+		return nil, status.Error(codes.PermissionDenied, "certificate or node revoked")
+	}
+	if len(req.GetCsrDer()) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "csr required")
+	}
+	return s.Backend.RenewNodeCert(ctx, node, req.GetCsrDer())
 }

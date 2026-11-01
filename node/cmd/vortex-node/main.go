@@ -3,12 +3,11 @@
 //	vortex-node run    -config /etc/vortex/node.json
 //	vortex-node status [-socket /run/vortex/node.sock]
 //	vortex-node drain  [-socket ...] [-timeout 300s] [-rules id,id]
-//	vortex-node enroll -token ... -hub ...        （AGT-T02，尚未实现）
+//	vortex-node enroll -token T -hub host:port [-ca /etc/vortex/ca.crt] [-data-dir ...] [-config ...]
 //	vortex-node version
 //
 // run 的组装见 node/app：supervisor 下运行 Agent 事件循环、探测、本地运维接口与控制连接（配置了证书时
 // 经 gRPC + mTLS 连接 Edge Hub；未配置时不连接，恢复最后生效配置后保持“授权待确认”）。
-// enroll 在注册与证书续签实现后提供（AGT-T02）。
 package main
 
 import (
@@ -105,8 +104,27 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "drained")
 		return 0
 	case "enroll":
-		fmt.Fprintln(stderr, "enroll: not implemented yet (AGT-T02)")
-		return 2
+		fs := flag.NewFlagSet("enroll", flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		token := fs.String("token", "", "one-time enrollment token")
+		hub := fs.String("hub", "", "edge hub address host:port")
+		ca := fs.String("ca", "/etc/vortex/ca.crt", "platform CA (PEM), shipped with the installer")
+		dataDir := fs.String("data-dir", "/var/lib/vortex", "data directory for keys and state")
+		cfgPath := fs.String("config", "/etc/vortex/node.json", "node config file to write")
+		sock := fs.String("socket", app.DefaultSocket, "local API socket")
+		if fs.Parse(args[1:]) != nil || *token == "" || *hub == "" {
+			fmt.Fprintln(stderr, "enroll: -token and -hub are required")
+			return 2
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cfg, err := app.Enroll(ctx, app.EnrollParams{Token: *token, Hub: *hub, CAFile: *ca, DataDir: *dataDir, ConfigPath: *cfgPath, Socket: *sock})
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "enrolled as node %s; config written to %s\n", cfg.NodeID, *cfgPath)
+		return 0
 	}
 	fmt.Fprintf(stderr, "unknown command %q\n", args[0])
 	return 2

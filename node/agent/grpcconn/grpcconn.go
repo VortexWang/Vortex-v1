@@ -11,7 +11,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
-	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,6 +22,7 @@ import (
 	"vortex/engine/types"
 	"vortex/engine/vlink"
 	"vortex/node/agent"
+	"vortex/node/agent/certs"
 	"vortex/node/agent/control"
 	"vortex/node/agent/wire"
 	edgehubv1 "vortex/proto/gen/go/vortex/edgehub/v1"
@@ -34,10 +35,15 @@ func HubURI(id types.UUID) string { return "spiffe://vortex/hub/" + vlink.Format
 
 // ClientTLS 返回连接某个 Edge Hub 的 TLS 配置。
 func ClientTLS(cert tls.Certificate, roots *x509.CertPool, hub types.UUID) *tls.Config {
-	want := HubURI(hub)
+	c := hubTLS(roots, func(u string) bool { return u == HubURI(hub) })
+	c.Certificates = []tls.Certificate{cert}
+	return c
+}
+
+// hubTLS：Edge Hub 证书按平台 CA 校验链，SAN URI 须满足 ok。客户端证书由调用方设置。
+func hubTLS(roots *x509.CertPool, ok func(uri string) bool) *tls.Config {
 	return &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS13,
+		MinVersion: tls.VersionTLS13,
 		// 主机名校验关闭，改为下面的链与身份校验（不是跳过校验）
 		InsecureSkipVerify: true,
 		VerifyPeerCertificate: func(raw [][]byte, _ [][]*x509.Certificate) error {
@@ -61,20 +67,30 @@ func ClientTLS(cert tls.Certificate, roots *x509.CertPool, hub types.UUID) *tls.
 				return err
 			}
 			for _, u := range certs[0].URIs {
-				if u.String() == want {
+				if ok(u.String()) {
 					return nil
 				}
 			}
-			return fmt.Errorf("%w: want %s", ErrHubIdentity, want)
+			return ErrHubIdentity
 		},
 	}
 }
 
-// Dialer 建立到 Edge Hub 的控制流。
+// Dialer 建立到 Edge Hub 的控制流。Holder 非空时从中取当前证书（续签后之后的连接自动使用新证书），否则用 Cert。
 type Dialer struct {
 	Cert        tls.Certificate
+	Holder      *certs.Holder
 	Roots       *x509.CertPool
 	DialTimeout time.Duration // 默认 10 秒
+}
+
+func (d Dialer) tls(hub types.UUID) *tls.Config {
+	if d.Holder == nil {
+		return ClientTLS(d.Cert, d.Roots, hub)
+	}
+	c := hubTLS(d.Roots, func(u string) bool { return u == HubURI(hub) })
+	c.GetClientCertificate = d.Holder.GetClientCertificate
+	return c
 }
 
 type conn struct {
@@ -91,7 +107,7 @@ func (d Dialer) Dial(ctx context.Context, ep control.Endpoint) (control.Conn, er
 		timeout = 10 * time.Second
 	}
 	cc, err := grpc.NewClient(ep.Address,
-		grpc.WithTransportCredentials(credentials.NewTLS(ClientTLS(d.Cert, d.Roots, ep.ID))),
+		grpc.WithTransportCredentials(credentials.NewTLS(d.tls(ep.ID))),
 		// 传输层保活：连接中断尽快发现（控制流的应用层失联判定仍由 Edge Hub 的模式与授权有效期承担）
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{Time: 20 * time.Second, Timeout: 10 * time.Second}))
 	if err != nil {
@@ -174,4 +190,41 @@ func (c *conn) Close() error {
 		c.cc.Close()
 	})
 	return nil
+}
+
+// ---------------------------------------------------------------- 注册与续签（AGT-001、AGT-012）
+
+func unary(ctx context.Context, addr string, tc *tls.Config, f func(edgehubv1.NodeControlClient) error) error {
+	cc, err := grpc.NewClient(addr, grpc.WithTransportCredentials(credentials.NewTLS(tc)))
+	if err != nil {
+		return err
+	}
+	defer cc.Close()
+	return f(edgehubv1.NewNodeControlClient(cc))
+}
+
+// Enroll 用一次性注册令牌经 Edge Hub 换取节点证书（不出示客户端证书）。注册时还不知道实例 ID，
+// Edge Hub 证书只要求由平台 CA 签发且带 Edge Hub 身份（spiffe://vortex/hub/…）。
+func Enroll(ctx context.Context, addr string, roots *x509.CertPool, req *edgehubv1.EnrollRequest) (*edgehubv1.EnrollResponse, error) {
+	var resp *edgehubv1.EnrollResponse
+	err := unary(ctx, addr, hubTLS(roots, func(u string) bool { return strings.HasPrefix(u, "spiffe://vortex/hub/") }),
+		func(c edgehubv1.NodeControlClient) error {
+			var err error
+			resp, err = c.Enroll(ctx, req)
+			return err
+		})
+	return resp, err
+}
+
+// RenewCert 用当前证书经 Edge Hub 续签（本地新私钥，只上传 CSR）。
+func (d Dialer) RenewCert(ctx context.Context, ep control.Endpoint, csr []byte) ([][]byte, error) {
+	var chain [][]byte
+	err := unary(ctx, ep.Address, d.tls(ep.ID), func(c edgehubv1.NodeControlClient) error {
+		resp, err := c.RenewCert(ctx, &edgehubv1.RenewCertRequest{CsrDer: csr})
+		if err == nil {
+			chain = resp.GetCertificateChainDer()
+		}
+		return err
+	})
+	return chain, err
 }
