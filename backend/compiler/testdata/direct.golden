@@ -1,0 +1,229 @@
+== node 0d000000-0000-0000-0000-000000000001
+{
+  "version": "100",
+  "nodeId": {
+    "value": "DQAAAAAAAAAAAAAAAAAAAQ=="
+  },
+  "generation": "4",
+  "listeners": [
+    {
+      "bindAddress": "0.0.0.0",
+      "port": 10000,
+      "network": "NETWORK_TCP",
+      "ruleId": {
+        "value": "qgAAAAAAAAAAAAAAAAAAAQ=="
+      }
+    },
+    {
+      "bindAddress": "0.0.0.0",
+      "port": 10000,
+      "network": "NETWORK_UDP",
+      "ruleId": {
+        "value": "qgAAAAAAAAAAAAAAAAAAAQ=="
+      }
+    }
+  ],
+  "rules": [
+    {
+      "ruleId": {
+        "value": "qgAAAAAAAAAAAAAAAAAAAQ=="
+      },
+      "tenantId": {
+        "value": "fgAAAAAAAAAAAAAAAAAAAQ=="
+      },
+      "ruleVersion": "3",
+      "pathGeneration": "2",
+      "role": "HOP_ROLE_ENTRY",
+      "enforcementPoint": true,
+      "targets": [
+        {
+          "host": "198.51.100.10",
+          "port": 443,
+          "weight": 2
+        },
+        {
+          "host": "backend.example",
+          "port": 8443,
+          "weight": 1,
+          "priority": 1
+        }
+      ],
+      "targetSchedule": "SCHEDULE_WEIGHTED_ROUND_ROBIN",
+      "limits": {
+        "rateBps": "10000000",
+        "maxConns": 100
+      },
+      "proxyProtocol": "PROXY_PROTOCOL_V2",
+      "timeouts": {
+        "udpIdle": "60s"
+      },
+      "pathCoefficientMilli": "1500",
+      "billingVersion": "7",
+      "networks": [
+        "NETWORK_TCP",
+        "NETWORK_UDP"
+      ]
+    }
+  ],
+  "revocations": {
+    "serial": "5",
+    "certSerials": [
+      "Cgs="
+    ],
+    "nodeIds": [
+      {
+        "value": "DQAAAAAAAAAAAAAAAAAAmQ=="
+      }
+    ]
+  },
+  "targetPolicy": {
+    "denyCidrs": [
+      "192.0.2.0/24"
+    ],
+    "denyPorts": [
+      25
+    ]
+  }
+}
+== node 0d000000-0000-0000-0000-000000000002
+{
+  "version": "101",
+  "nodeId": {
+    "value": "DQAAAAAAAAAAAAAAAAAAAg=="
+  },
+  "generation": "4",
+  "listeners": [
+    {
+      "bindAddress": "0.0.0.0",
+      "port": 10000,
+      "network": "NETWORK_TCP",
+      "ruleId": {
+        "value": "qgAAAAAAAAAAAAAAAAAAAQ=="
+      }
+    },
+    {
+      "bindAddress": "0.0.0.0",
+      "port": 10000,
+      "network": "NETWORK_UDP",
+      "ruleId": {
+        "value": "qgAAAAAAAAAAAAAAAAAAAQ=="
+      }
+    }
+  ],
+  "rules": [
+    {
+      "ruleId": {
+        "value": "qgAAAAAAAAAAAAAAAAAAAQ=="
+      },
+      "tenantId": {
+        "value": "fgAAAAAAAAAAAAAAAAAAAQ=="
+      },
+      "ruleVersion": "3",
+      "pathGeneration": "2",
+      "role": "HOP_ROLE_ENTRY",
+      "enforcementPoint": true,
+      "targets": [
+        {
+          "host": "198.51.100.10",
+          "port": 443,
+          "weight": 2
+        },
+        {
+          "host": "backend.example",
+          "port": 8443,
+          "weight": 1,
+          "priority": 1
+        }
+      ],
+      "targetSchedule": "SCHEDULE_WEIGHTED_ROUND_ROBIN",
+      "limits": {
+        "rateBps": "10000000",
+        "maxConns": 100
+      },
+      "proxyProtocol": "PROXY_PROTOCOL_V2",
+      "timeouts": {
+        "udpIdle": "60s"
+      },
+      "pathCoefficientMilli": "1500",
+      "billingVersion": "7",
+      "networks": [
+        "NETWORK_TCP",
+        "NETWORK_UDP"
+      ]
+    }
+  ],
+  "revocations": {
+    "serial": "5",
+    "certSerials": [
+      "Cgs="
+    ],
+    "nodeIds": [
+      {
+        "value": "DQAAAAAAAAAAAAAAAAAAmQ=="
+      }
+    ]
+  },
+  "targetPolicy": {
+    "denyCidrs": [
+      "192.0.2.0/24"
+    ],
+    "denyPorts": [
+      25
+    ]
+  }
+}
+== node 0d000000-0000-0000-0000-000000000003
+{
+  "version": "102",
+  "nodeId": {
+    "value": "DQAAAAAAAAAAAAAAAAAAAw=="
+  },
+  "generation": "4",
+  "revocations": {
+    "serial": "5",
+    "certSerials": [
+      "Cgs="
+    ],
+    "nodeIds": [
+      {
+        "value": "DQAAAAAAAAAAAAAAAAAAmQ=="
+      }
+    ]
+  },
+  "targetPolicy": {
+    "denyCidrs": [
+      "192.0.2.0/24"
+    ],
+    "denyPorts": [
+      25
+    ]
+  }
+}
+== node 0d000000-0000-0000-0000-000000000004
+{
+  "version": "103",
+  "nodeId": {
+    "value": "DQAAAAAAAAAAAAAAAAAABA=="
+  },
+  "generation": "4",
+  "revocations": {
+    "serial": "5",
+    "certSerials": [
+      "Cgs="
+    ],
+    "nodeIds": [
+      {
+        "value": "DQAAAAAAAAAAAAAAAAAAmQ=="
+      }
+    ]
+  },
+  "targetPolicy": {
+    "denyCidrs": [
+      "192.0.2.0/24"
+    ],
+    "denyPorts": [
+      25
+    ]
+  }
+}
+== dials aa000000-0000-0000-0000-000000000001 

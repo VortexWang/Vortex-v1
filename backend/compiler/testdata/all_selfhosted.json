@@ -1,0 +1,106 @@
+{
+  "generation": 4,
+  "billing_version": 7,
+  "rules": [
+    {
+      "id": "aa000000-0000-0000-0000-000000000001",
+      "tenant": "7e000000-0000-0000-0000-000000000001",
+      "version": 3,
+      "path_generation": 2,
+      "network": "tcp",
+      "mode": "tunnel",
+      "entry_group": "9f000000-0000-0000-0000-000000000001",
+      "path": [
+        {
+          "group": "9f000000-0000-0000-0000-000000000002",
+          "dial": "auto"
+        }
+      ],
+      "port": 10000,
+      "targets": [
+        {
+          "host": "192.168.1.5",
+          "port": 22,
+          "weight": 1,
+          "priority": 0
+        }
+      ],
+      "target_schedule": "weighted_round_robin",
+      "proxy_protocol": "off",
+      "enabled": true
+    }
+  ],
+  "groups": {
+    "9f000000-0000-0000-0000-000000000001": {
+      "purpose": "entry",
+      "schedule": "weighted_round_robin",
+      "multiplier_milli": 0,
+      "members": [
+        {
+          "node": "0d000000-0000-0000-0000-000000000001",
+          "weight": 1,
+          "priority": 0
+        }
+      ],
+      "probe_interval_s": 3,
+      "fail_threshold": 3,
+      "recover_threshold": 2,
+      "tenant": "7e000000-0000-0000-0000-000000000001"
+    },
+    "9f000000-0000-0000-0000-000000000002": {
+      "purpose": "exit",
+      "schedule": "weighted_round_robin",
+      "multiplier_milli": 0,
+      "members": [
+        {
+          "node": "0d000000-0000-0000-0000-000000000002",
+          "weight": 1,
+          "priority": 0
+        }
+      ],
+      "probe_interval_s": 3,
+      "fail_threshold": 3,
+      "recover_threshold": 2,
+      "tenant": "7e000000-0000-0000-0000-000000000001"
+    }
+  },
+  "nodes": {
+    "0d000000-0000-0000-0000-000000000001": {
+      "public_addresses": [
+        "203.0.113.1"
+      ],
+      "link_port": 7443,
+      "tenant": "7e000000-0000-0000-0000-000000000001"
+    },
+    "0d000000-0000-0000-0000-000000000002": {
+      "public_addresses": [
+        "203.0.113.2"
+      ],
+      "link_port": 7443,
+      "tenant": "7e000000-0000-0000-0000-000000000001"
+    }
+  },
+  "permits": [],
+  "node_versions": {
+    "0d000000-0000-0000-0000-000000000001": 100,
+    "0d000000-0000-0000-0000-000000000002": 101
+  },
+  "revocations": {
+    "serial": 5,
+    "cert_serials": [
+      "0a0b"
+    ],
+    "node_ids": [
+      "0d000000-0000-0000-0000-000000000099"
+    ]
+  },
+  "target_policy": {
+    "deny_cidrs": [
+      "192.0.2.0/24"
+    ],
+    "deny_ports": [
+      25
+    ]
+  },
+  "entitlements": {}
+}

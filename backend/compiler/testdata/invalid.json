@@ -1,0 +1,717 @@
+{
+  "generation": 4,
+  "billing_version": 7,
+  "rules": [
+    {
+      "id": "aa000000-0000-0000-0000-000000000001",
+      "tenant": "7e000000-0000-0000-0000-000000000001",
+      "version": 3,
+      "path_generation": 2,
+      "network": "tcp",
+      "mode": "tunnel",
+      "entry_group": "9f000000-0000-0000-0000-000000000001",
+      "path": [
+        {
+          "group": "9f000000-0000-0000-0000-000000000002",
+          "dial": "auto"
+        }
+      ],
+      "port": 10000,
+      "targets": [
+        {
+          "host": "198.51.100.10",
+          "port": 443,
+          "weight": 2,
+          "priority": 0
+        },
+        {
+          "host": "backend.example",
+          "port": 8443,
+          "weight": 1,
+          "priority": 1
+        }
+      ],
+      "target_schedule": "weighted_round_robin",
+      "proxy_protocol": "off",
+      "enabled": true
+    },
+    {
+      "id": "aa000000-0000-0000-0000-000000000002",
+      "tenant": "7e000000-0000-0000-0000-000000000001",
+      "version": 3,
+      "path_generation": 2,
+      "network": "tcp",
+      "mode": "tunnel",
+      "entry_group": "9f000000-0000-0000-0000-000000000007",
+      "path": [
+        {
+          "group": "9f000000-0000-0000-0000-000000000008",
+          "dial": "auto"
+        }
+      ],
+      "port": 10000,
+      "targets": [
+        {
+          "host": "198.51.100.10",
+          "port": 443,
+          "weight": 2,
+          "priority": 0
+        },
+        {
+          "host": "backend.example",
+          "port": 8443,
+          "weight": 1,
+          "priority": 1
+        }
+      ],
+      "target_schedule": "weighted_round_robin",
+      "proxy_protocol": "off",
+      "enabled": true
+    },
+    {
+      "id": "aa000000-0000-0000-0000-000000000003",
+      "tenant": "7e000000-0000-0000-0000-000000000001",
+      "version": 3,
+      "path_generation": 2,
+      "network": "tcp",
+      "mode": "tunnel",
+      "entry_group": "9f000000-0000-0000-0000-000000000001",
+      "path": [
+        {
+          "group": "9f000000-0000-0000-0000-000000000009",
+          "dial": "reverse"
+        }
+      ],
+      "port": 10000,
+      "targets": [
+        {
+          "host": "198.51.100.10",
+          "port": 443,
+          "weight": 2,
+          "priority": 0
+        },
+        {
+          "host": "backend.example",
+          "port": 8443,
+          "weight": 1,
+          "priority": 1
+        }
+      ],
+      "target_schedule": "weighted_round_robin",
+      "proxy_protocol": "off",
+      "enabled": true
+    },
+    {
+      "id": "aa000000-0000-0000-0000-000000000004",
+      "tenant": "7e000000-0000-0000-0000-000000000001",
+      "version": 3,
+      "path_generation": 2,
+      "network": "tcp",
+      "mode": "tunnel",
+      "entry_group": "9f000000-0000-0000-0000-000000000001",
+      "path": [
+        {
+          "group": "9f000000-0000-0000-0000-000000000006",
+          "dial": "auto"
+        }
+      ],
+      "port": 10000,
+      "targets": [
+        {
+          "host": "198.51.100.10",
+          "port": 443,
+          "weight": 2,
+          "priority": 0
+        },
+        {
+          "host": "backend.example",
+          "port": 8443,
+          "weight": 1,
+          "priority": 1
+        }
+      ],
+      "target_schedule": "weighted_round_robin",
+      "proxy_protocol": "off",
+      "enabled": true
+    },
+    {
+      "id": "aa000000-0000-0000-0000-000000000005",
+      "tenant": "7e000000-0000-0000-0000-000000000001",
+      "version": 3,
+      "path_generation": 2,
+      "network": "tcp",
+      "mode": "tunnel",
+      "entry_group": "9f000000-0000-0000-0000-000000000001",
+      "path": [
+        {
+          "group": "9f000000-0000-0000-0000-000000000005",
+          "dial": "auto"
+        }
+      ],
+      "port": 10000,
+      "targets": [
+        {
+          "host": "198.51.100.10",
+          "port": 443,
+          "weight": 2,
+          "priority": 0
+        },
+        {
+          "host": "backend.example",
+          "port": 8443,
+          "weight": 1,
+          "priority": 1
+        }
+      ],
+      "target_schedule": "weighted_round_robin",
+      "proxy_protocol": "off",
+      "enabled": true
+    },
+    {
+      "id": "aa000000-0000-0000-0000-000000000006",
+      "tenant": "7e000000-0000-0000-0000-000000000001",
+      "version": 3,
+      "path_generation": 2,
+      "network": "tcp",
+      "mode": "tunnel",
+      "entry_group": "9f000000-0000-0000-0000-000000000001",
+      "path": [
+        {
+          "group": "9f000000-0000-0000-0000-000000000003",
+          "dial": "forward"
+        }
+      ],
+      "port": 10000,
+      "targets": [
+        {
+          "host": "198.51.100.10",
+          "port": 443,
+          "weight": 2,
+          "priority": 0
+        },
+        {
+          "host": "backend.example",
+          "port": 8443,
+          "weight": 1,
+          "priority": 1
+        }
+      ],
+      "target_schedule": "weighted_round_robin",
+      "proxy_protocol": "off",
+      "enabled": true
+    },
+    {
+      "id": "aa000000-0000-0000-0000-000000000007",
+      "tenant": "7e000000-0000-0000-0000-000000000001",
+      "version": 3,
+      "path_generation": 2,
+      "network": "tcp",
+      "mode": "direct",
+      "entry_group": "9f000000-0000-0000-0000-000000000001",
+      "path": [],
+      "port": 0,
+      "targets": [
+        {
+          "host": "198.51.100.10",
+          "port": 443,
+          "weight": 2,
+          "priority": 0
+        },
+        {
+          "host": "backend.example",
+          "port": 8443,
+          "weight": 1,
+          "priority": 1
+        }
+      ],
+      "target_schedule": "weighted_round_robin",
+      "proxy_protocol": "off",
+      "enabled": true
+    },
+    {
+      "id": "aa000000-0000-0000-0000-000000000008",
+      "tenant": "7e000000-0000-0000-0000-000000000001",
+      "version": 3,
+      "path_generation": 2,
+      "network": "tcp",
+      "mode": "tunnel",
+      "entry_group": "9f000000-0000-0000-0000-000000000001",
+      "path": [
+        {
+          "group": "9f000000-0000-0000-0000-000000000004",
+          "dial": "auto"
+        }
+      ],
+      "port": 10000,
+      "targets": [
+        {
+          "host": "198.51.100.10",
+          "port": 443,
+          "weight": 2,
+          "priority": 0
+        },
+        {
+          "host": "backend.example",
+          "port": 8443,
+          "weight": 1,
+          "priority": 1
+        }
+      ],
+      "target_schedule": "weighted_round_robin",
+      "proxy_protocol": "off",
+      "enabled": true
+    },
+    {
+      "id": "aa000000-0000-0000-0000-000000000009",
+      "tenant": "7e000000-0000-0000-0000-000000000001",
+      "version": 3,
+      "path_generation": 2,
+      "network": "tcp",
+      "mode": "direct",
+      "entry_group": "9f000000-0000-0000-0000-000000000001",
+      "path": [],
+      "port": 10000,
+      "targets": [
+        {
+          "host": "10.1.2.3",
+          "port": 80,
+          "weight": 1,
+          "priority": 0
+        }
+      ],
+      "target_schedule": "weighted_round_robin",
+      "proxy_protocol": "off",
+      "enabled": true
+    },
+    {
+      "id": "aa000000-0000-0000-0000-000000000010",
+      "tenant": "7e000000-0000-0000-0000-000000000001",
+      "version": 3,
+      "path_generation": 2,
+      "network": "tcp",
+      "mode": "direct",
+      "entry_group": "9f000000-0000-0000-0000-000000000001",
+      "path": [],
+      "port": 10000,
+      "targets": [
+        {
+          "host": "192.0.2.9",
+          "port": 80,
+          "weight": 1,
+          "priority": 0
+        }
+      ],
+      "target_schedule": "weighted_round_robin",
+      "proxy_protocol": "off",
+      "enabled": true
+    },
+    {
+      "id": "aa000000-0000-0000-0000-000000000011",
+      "tenant": "7e000000-0000-0000-0000-000000000001",
+      "version": 3,
+      "path_generation": 2,
+      "network": "tcp",
+      "mode": "direct",
+      "entry_group": "9f000000-0000-0000-0000-000000000001",
+      "path": [],
+      "port": 10000,
+      "targets": [
+        {
+          "host": "198.51.100.1",
+          "port": 25,
+          "weight": 1,
+          "priority": 0
+        }
+      ],
+      "target_schedule": "weighted_round_robin",
+      "proxy_protocol": "off",
+      "enabled": true
+    },
+    {
+      "id": "aa000000-0000-0000-0000-000000000012",
+      "tenant": "7e000000-0000-0000-0000-000000000001",
+      "version": 3,
+      "path_generation": 2,
+      "network": "udp",
+      "mode": "direct",
+      "entry_group": "9f000000-0000-0000-0000-000000000001",
+      "path": [],
+      "port": 10000,
+      "targets": [
+        {
+          "host": "198.51.100.10",
+          "port": 443,
+          "weight": 2,
+          "priority": 0
+        },
+        {
+          "host": "backend.example",
+          "port": 8443,
+          "weight": 1,
+          "priority": 1
+        }
+      ],
+      "target_schedule": "weighted_round_robin",
+      "proxy_protocol": "v1",
+      "enabled": true
+    },
+    {
+      "id": "aa000000-0000-0000-0000-000000000013",
+      "tenant": "7e000000-0000-0000-0000-000000000001",
+      "version": 3,
+      "path_generation": 2,
+      "network": "tcp",
+      "mode": "multi_hop",
+      "entry_group": "9f000000-0000-0000-0000-000000000001",
+      "path": [
+        {
+          "group": "9f000000-0000-0000-0000-000000000004",
+          "dial": "auto"
+        },
+        {
+          "group": "9f000000-0000-0000-0000-000000000004",
+          "dial": "auto"
+        }
+      ],
+      "port": 10000,
+      "targets": [
+        {
+          "host": "198.51.100.10",
+          "port": 443,
+          "weight": 2,
+          "priority": 0
+        },
+        {
+          "host": "backend.example",
+          "port": 8443,
+          "weight": 1,
+          "priority": 1
+        }
+      ],
+      "target_schedule": "weighted_round_robin",
+      "proxy_protocol": "off",
+      "enabled": true
+    },
+    {
+      "id": "aa000000-0000-0000-0000-000000000014",
+      "tenant": "7e000000-0000-0000-0000-000000000001",
+      "version": 3,
+      "path_generation": 2,
+      "network": "tcp",
+      "mode": "tunnel",
+      "entry_group": "9f000000-0000-0000-0000-000000000001",
+      "path": [],
+      "port": 10000,
+      "targets": [
+        {
+          "host": "198.51.100.10",
+          "port": 443,
+          "weight": 2,
+          "priority": 0
+        },
+        {
+          "host": "backend.example",
+          "port": 8443,
+          "weight": 1,
+          "priority": 1
+        }
+      ],
+      "target_schedule": "weighted_round_robin",
+      "proxy_protocol": "off",
+      "enabled": true
+    },
+    {
+      "id": "aa000000-0000-0000-0000-000000000015",
+      "tenant": "7e000000-0000-0000-0000-000000000001",
+      "version": 3,
+      "path_generation": 2,
+      "network": "tcp",
+      "mode": "tunnel",
+      "entry_group": "9f000000-0000-0000-0000-000000000001",
+      "path": [
+        {
+          "group": "9f000000-0000-0000-0000-000000000003",
+          "dial": "auto"
+        }
+      ],
+      "port": 10000,
+      "targets": [
+        {
+          "host": "169.254.169.254",
+          "port": 80,
+          "weight": 1,
+          "priority": 0
+        }
+      ],
+      "target_schedule": "weighted_round_robin",
+      "proxy_protocol": "off",
+      "enabled": true
+    },
+    {
+      "id": "aa000000-0000-0000-0000-000000000099",
+      "tenant": "7e000000-0000-0000-0000-000000000001",
+      "version": 3,
+      "path_generation": 2,
+      "network": "tcp",
+      "mode": "tunnel",
+      "entry_group": "9f000000-0000-0000-0000-000000000001",
+      "path": [
+        {
+          "group": "9f000000-0000-0000-0000-000000000003",
+          "dial": "auto"
+        }
+      ],
+      "port": 10000,
+      "targets": [
+        {
+          "host": "127.0.0.1",
+          "port": 80,
+          "weight": 1,
+          "priority": 0
+        }
+      ],
+      "target_schedule": "weighted_round_robin",
+      "proxy_protocol": "off",
+      "enabled": true
+    }
+  ],
+  "groups": {
+    "9f000000-0000-0000-0000-000000000001": {
+      "purpose": "entry",
+      "schedule": "weighted_round_robin",
+      "multiplier_milli": 1000,
+      "members": [
+        {
+          "node": "0d000000-0000-0000-0000-000000000001",
+          "weight": 1,
+          "priority": 0
+        }
+      ],
+      "probe_interval_s": 3,
+      "fail_threshold": 3,
+      "recover_threshold": 2
+    },
+    "9f000000-0000-0000-0000-000000000002": {
+      "purpose": "exit",
+      "schedule": "weighted_round_robin",
+      "multiplier_milli": 1000,
+      "members": [
+        {
+          "node": "0d000000-0000-0000-0000-000000000002",
+          "weight": 1,
+          "priority": 0
+        }
+      ],
+      "probe_interval_s": 3,
+      "fail_threshold": 3,
+      "recover_threshold": 2
+    },
+    "9f000000-0000-0000-0000-000000000003": {
+      "purpose": "exit",
+      "schedule": "weighted_round_robin",
+      "multiplier_milli": 0,
+      "members": [
+        {
+          "node": "0d000000-0000-0000-0000-000000000003",
+          "weight": 1,
+          "priority": 0
+        }
+      ],
+      "probe_interval_s": 3,
+      "fail_threshold": 3,
+      "recover_threshold": 2,
+      "tenant": "7e000000-0000-0000-0000-000000000001"
+    },
+    "9f000000-0000-0000-0000-000000000004": {
+      "purpose": "relay",
+      "schedule": "weighted_round_robin",
+      "multiplier_milli": 1000,
+      "members": [
+        {
+          "node": "0d000000-0000-0000-0000-000000000004",
+          "weight": 1,
+          "priority": 0
+        }
+      ],
+      "probe_interval_s": 3,
+      "fail_threshold": 3,
+      "recover_threshold": 2
+    },
+    "9f000000-0000-0000-0000-000000000005": {
+      "purpose": "exit",
+      "schedule": "weighted_round_robin",
+      "multiplier_milli": 0,
+      "members": [
+        {
+          "node": "0d000000-0000-0000-0000-000000000005",
+          "weight": 1,
+          "priority": 0
+        }
+      ],
+      "probe_interval_s": 3,
+      "fail_threshold": 3,
+      "recover_threshold": 2,
+      "tenant": "7e000000-0000-0000-0000-000000000002"
+    },
+    "9f000000-0000-0000-0000-000000000006": {
+      "purpose": "exit",
+      "schedule": "weighted_round_robin",
+      "multiplier_milli": 1000,
+      "members": [
+        {
+          "node": "0d000000-0000-0000-0000-000000000001",
+          "weight": 1,
+          "priority": 0
+        }
+      ],
+      "probe_interval_s": 3,
+      "fail_threshold": 3,
+      "recover_threshold": 2
+    },
+    "9f000000-0000-0000-0000-000000000007": {
+      "purpose": "entry",
+      "schedule": "weighted_round_robin",
+      "multiplier_milli": 0,
+      "members": [
+        {
+          "node": "0d000000-0000-0000-0000-000000000006",
+          "weight": 1,
+          "priority": 0
+        }
+      ],
+      "probe_interval_s": 3,
+      "fail_threshold": 3,
+      "recover_threshold": 2,
+      "tenant": "7e000000-0000-0000-0000-000000000001"
+    },
+    "9f000000-0000-0000-0000-000000000008": {
+      "purpose": "exit",
+      "schedule": "weighted_round_robin",
+      "multiplier_milli": 0,
+      "members": [
+        {
+          "node": "0d000000-0000-0000-0000-000000000007",
+          "weight": 1,
+          "priority": 0
+        }
+      ],
+      "probe_interval_s": 3,
+      "fail_threshold": 3,
+      "recover_threshold": 2,
+      "tenant": "7e000000-0000-0000-0000-000000000001"
+    },
+    "9f000000-0000-0000-0000-000000000009": {
+      "purpose": "exit",
+      "schedule": "weighted_round_robin",
+      "multiplier_milli": 1000,
+      "members": [
+        {
+          "node": "0d000000-0000-0000-0000-000000000008",
+          "weight": 1,
+          "priority": 0
+        }
+      ],
+      "probe_interval_s": 3,
+      "fail_threshold": 3,
+      "recover_threshold": 2
+    }
+  },
+  "nodes": {
+    "0d000000-0000-0000-0000-000000000001": {
+      "public_addresses": [
+        "203.0.113.1"
+      ],
+      "link_port": 7443
+    },
+    "0d000000-0000-0000-0000-000000000002": {
+      "public_addresses": [
+        "203.0.113.2"
+      ],
+      "link_port": 7443
+    },
+    "0d000000-0000-0000-0000-000000000003": {
+      "public_addresses": [],
+      "link_port": 7443,
+      "tenant": "7e000000-0000-0000-0000-000000000001"
+    },
+    "0d000000-0000-0000-0000-000000000004": {
+      "public_addresses": [
+        "203.0.113.4"
+      ],
+      "link_port": 7443
+    },
+    "0d000000-0000-0000-0000-000000000005": {
+      "public_addresses": [
+        "203.0.113.5"
+      ],
+      "link_port": 7443,
+      "tenant": "7e000000-0000-0000-0000-000000000002"
+    },
+    "0d000000-0000-0000-0000-000000000006": {
+      "public_addresses": [],
+      "link_port": 7443,
+      "tenant": "7e000000-0000-0000-0000-000000000001"
+    },
+    "0d000000-0000-0000-0000-000000000007": {
+      "public_addresses": [],
+      "link_port": 7443,
+      "tenant": "7e000000-0000-0000-0000-000000000001"
+    },
+    "0d000000-0000-0000-0000-000000000008": {
+      "public_addresses": [
+        "203.0.113.8"
+      ],
+      "link_port": 7443
+    }
+  },
+  "permits": [
+    {
+      "upstream": "9f000000-0000-0000-0000-000000000001",
+      "downstream": "9f000000-0000-0000-0000-000000000003"
+    },
+    {
+      "upstream": "9f000000-0000-0000-0000-000000000001",
+      "downstream": "9f000000-0000-0000-0000-000000000005"
+    },
+    {
+      "upstream": "9f000000-0000-0000-0000-000000000001",
+      "downstream": "9f000000-0000-0000-0000-000000000006"
+    },
+    {
+      "upstream": "9f000000-0000-0000-0000-000000000001",
+      "downstream": "9f000000-0000-0000-0000-000000000004"
+    },
+    {
+      "upstream": "9f000000-0000-0000-0000-000000000001",
+      "downstream": "9f000000-0000-0000-0000-000000000009"
+    }
+  ],
+  "node_versions": {
+    "0d000000-0000-0000-0000-000000000001": 100,
+    "0d000000-0000-0000-0000-000000000002": 101,
+    "0d000000-0000-0000-0000-000000000003": 102,
+    "0d000000-0000-0000-0000-000000000004": 103,
+    "0d000000-0000-0000-0000-000000000005": 104,
+    "0d000000-0000-0000-0000-000000000006": 105,
+    "0d000000-0000-0000-0000-000000000007": 106,
+    "0d000000-0000-0000-0000-000000000008": 107
+  },
+  "revocations": {
+    "serial": 5,
+    "cert_serials": [
+      "0a0b"
+    ],
+    "node_ids": [
+      "0d000000-0000-0000-0000-000000000099"
+    ]
+  },
+  "target_policy": {
+    "deny_cidrs": [
+      "192.0.2.0/24"
+    ],
+    "deny_ports": [
+      25
+    ]
+  },
+  "entitlements": {}
+}

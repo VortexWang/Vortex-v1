@@ -89,9 +89,9 @@ func (s *Server) Connect(stream grpc.BidiStreamingServer[backendv1.HubUpMessage,
 			return err
 		case <-reconcileDue:
 			reconciling, reconcileDue = false, nil
+			_ = q.SetHubMode(ctx, db.SetHubModeParams{ID: hub.PG(), Mode: "online"}) // 先入库，再通知实例
 			send(&backendv1.BackendMessage{Body: &backendv1.BackendMessage_Reconcile{Reconcile: &backendv1.ReconcileDirective{
 				Phase: backendv1.ReconcilePhase_RECONCILE_PHASE_COMPLETED}}})
-			_ = q.SetHubMode(ctx, db.SetHubModeParams{ID: hub.PG(), Mode: "online"})
 			s.log().Info("hub reconcile completed", "hub", hub.String())
 		case m := <-in:
 			_ = q.TouchHub(ctx, hub.PG())

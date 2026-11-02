@@ -1,0 +1,352 @@
+== node 0d000000-0000-0000-0000-000000000001
+{
+  "version": "100",
+  "nodeId": {
+    "value": "DQAAAAAAAAAAAAAAAAAAAQ=="
+  },
+  "generation": "4",
+  "listeners": [
+    {
+      "bindAddress": "0.0.0.0",
+      "port": 10000,
+      "network": "NETWORK_TCP",
+      "ruleId": {
+        "value": "qgAAAAAAAAAAAAAAAAAAmQ=="
+      }
+    }
+  ],
+  "rules": [
+    {
+      "ruleId": {
+        "value": "qgAAAAAAAAAAAAAAAAAAmQ=="
+      },
+      "tenantId": {
+        "value": "fgAAAAAAAAAAAAAAAAAAAQ=="
+      },
+      "ruleVersion": "3",
+      "pathGeneration": "2",
+      "role": "HOP_ROLE_ENTRY",
+      "enforcementPoint": true,
+      "nextHop": {
+        "groupId": {
+          "value": "nwAAAAAAAAAAAAAAAAAAAw=="
+        },
+        "members": [
+          {
+            "nodeId": {
+              "value": "DQAAAAAAAAAAAAAAAAAAAw=="
+            },
+            "weight": 1
+          }
+        ],
+        "memberSchedule": "SCHEDULE_WEIGHTED_ROUND_ROBIN",
+        "dialDirection": "DIAL_DIRECTION_REVERSE",
+        "probe": {
+          "interval": "3s",
+          "failThreshold": 3,
+          "recoverThreshold": 2
+        }
+      },
+      "targetSchedule": "SCHEDULE_WEIGHTED_ROUND_ROBIN",
+      "limits": {},
+      "proxyProtocol": "PROXY_PROTOCOL_OFF",
+      "timeouts": {
+        "udpIdle": "60s"
+      },
+      "pathCoefficientMilli": "1000",
+      "billingVersion": "7",
+      "networks": [
+        "NETWORK_TCP"
+      ]
+    }
+  ],
+  "peers": [
+    {
+      "nodeId": {
+        "value": "DQAAAAAAAAAAAAAAAAAAAw=="
+      },
+      "dial": "PEER_DIAL_INBOUND",
+      "linkMode": "LINK_MODE_AUTO"
+    }
+  ],
+  "revocations": {
+    "serial": "5",
+    "certSerials": [
+      "Cgs="
+    ],
+    "nodeIds": [
+      {
+        "value": "DQAAAAAAAAAAAAAAAAAAmQ=="
+      }
+    ]
+  },
+  "targetPolicy": {
+    "denyCidrs": [
+      "192.0.2.0/24"
+    ],
+    "denyPorts": [
+      25
+    ]
+  }
+}
+== node 0d000000-0000-0000-0000-000000000002
+{
+  "version": "101",
+  "nodeId": {
+    "value": "DQAAAAAAAAAAAAAAAAAAAg=="
+  },
+  "generation": "4",
+  "revocations": {
+    "serial": "5",
+    "certSerials": [
+      "Cgs="
+    ],
+    "nodeIds": [
+      {
+        "value": "DQAAAAAAAAAAAAAAAAAAmQ=="
+      }
+    ]
+  },
+  "targetPolicy": {
+    "denyCidrs": [
+      "192.0.2.0/24"
+    ],
+    "denyPorts": [
+      25
+    ]
+  }
+}
+== node 0d000000-0000-0000-0000-000000000003
+{
+  "version": "102",
+  "nodeId": {
+    "value": "DQAAAAAAAAAAAAAAAAAAAw=="
+  },
+  "generation": "4",
+  "rules": [
+    {
+      "ruleId": {
+        "value": "qgAAAAAAAAAAAAAAAAAAmQ=="
+      },
+      "tenantId": {
+        "value": "fgAAAAAAAAAAAAAAAAAAAQ=="
+      },
+      "ruleVersion": "3",
+      "pathGeneration": "2",
+      "role": "HOP_ROLE_EXIT",
+      "hopIndex": 1,
+      "allowedUpstreams": [
+        {
+          "value": "DQAAAAAAAAAAAAAAAAAAAQ=="
+        }
+      ],
+      "targets": [
+        {
+          "host": "127.0.0.1",
+          "port": 80,
+          "weight": 1
+        }
+      ],
+      "targetSchedule": "SCHEDULE_WEIGHTED_ROUND_ROBIN",
+      "limits": {},
+      "proxyProtocol": "PROXY_PROTOCOL_OFF",
+      "timeouts": {
+        "udpIdle": "60s"
+      },
+      "networks": [
+        "NETWORK_TCP"
+      ]
+    }
+  ],
+  "peers": [
+    {
+      "nodeId": {
+        "value": "DQAAAAAAAAAAAAAAAAAAAQ=="
+      },
+      "address": "203.0.113.1",
+      "linkPort": 7443,
+      "dial": "PEER_DIAL_OUTBOUND",
+      "linkMode": "LINK_MODE_AUTO",
+      "servedRuleIds": [
+        {
+          "value": "qgAAAAAAAAAAAAAAAAAAmQ=="
+        }
+      ]
+    }
+  ],
+  "revocations": {
+    "serial": "5",
+    "certSerials": [
+      "Cgs="
+    ],
+    "nodeIds": [
+      {
+        "value": "DQAAAAAAAAAAAAAAAAAAmQ=="
+      }
+    ]
+  },
+  "targetPolicy": {
+    "denyCidrs": [
+      "192.0.2.0/24"
+    ],
+    "denyPorts": [
+      25
+    ],
+    "selfHostedNode": true
+  }
+}
+== node 0d000000-0000-0000-0000-000000000004
+{
+  "version": "103",
+  "nodeId": {
+    "value": "DQAAAAAAAAAAAAAAAAAABA=="
+  },
+  "generation": "4",
+  "revocations": {
+    "serial": "5",
+    "certSerials": [
+      "Cgs="
+    ],
+    "nodeIds": [
+      {
+        "value": "DQAAAAAAAAAAAAAAAAAAmQ=="
+      }
+    ]
+  },
+  "targetPolicy": {
+    "denyCidrs": [
+      "192.0.2.0/24"
+    ],
+    "denyPorts": [
+      25
+    ]
+  }
+}
+== node 0d000000-0000-0000-0000-000000000005
+{
+  "version": "104",
+  "nodeId": {
+    "value": "DQAAAAAAAAAAAAAAAAAABQ=="
+  },
+  "generation": "4",
+  "revocations": {
+    "serial": "5",
+    "certSerials": [
+      "Cgs="
+    ],
+    "nodeIds": [
+      {
+        "value": "DQAAAAAAAAAAAAAAAAAAmQ=="
+      }
+    ]
+  },
+  "targetPolicy": {
+    "denyCidrs": [
+      "192.0.2.0/24"
+    ],
+    "denyPorts": [
+      25
+    ],
+    "selfHostedNode": true
+  }
+}
+== node 0d000000-0000-0000-0000-000000000006
+{
+  "version": "105",
+  "nodeId": {
+    "value": "DQAAAAAAAAAAAAAAAAAABg=="
+  },
+  "generation": "4",
+  "revocations": {
+    "serial": "5",
+    "certSerials": [
+      "Cgs="
+    ],
+    "nodeIds": [
+      {
+        "value": "DQAAAAAAAAAAAAAAAAAAmQ=="
+      }
+    ]
+  },
+  "targetPolicy": {
+    "denyCidrs": [
+      "192.0.2.0/24"
+    ],
+    "denyPorts": [
+      25
+    ],
+    "selfHostedNode": true
+  }
+}
+== node 0d000000-0000-0000-0000-000000000007
+{
+  "version": "106",
+  "nodeId": {
+    "value": "DQAAAAAAAAAAAAAAAAAABw=="
+  },
+  "generation": "4",
+  "revocations": {
+    "serial": "5",
+    "certSerials": [
+      "Cgs="
+    ],
+    "nodeIds": [
+      {
+        "value": "DQAAAAAAAAAAAAAAAAAAmQ=="
+      }
+    ]
+  },
+  "targetPolicy": {
+    "denyCidrs": [
+      "192.0.2.0/24"
+    ],
+    "denyPorts": [
+      25
+    ],
+    "selfHostedNode": true
+  }
+}
+== node 0d000000-0000-0000-0000-000000000008
+{
+  "version": "107",
+  "nodeId": {
+    "value": "DQAAAAAAAAAAAAAAAAAACA=="
+  },
+  "generation": "4",
+  "revocations": {
+    "serial": "5",
+    "certSerials": [
+      "Cgs="
+    ],
+    "nodeIds": [
+      {
+        "value": "DQAAAAAAAAAAAAAAAAAAmQ=="
+      }
+    ]
+  },
+  "targetPolicy": {
+    "denyCidrs": [
+      "192.0.2.0/24"
+    ],
+    "denyPorts": [
+      25
+    ]
+  }
+}
+== dials aa000000-0000-0000-0000-000000000099 reverse
+== problem aa000000-0000-0000-0000-000000000001 RULE_SEGMENT_NOT_PERMITTED: segment 9f000000-0000-0000-0000-000000000001 → 9f000000-0000-0000-0000-000000000002 has no permit
+== problem aa000000-0000-0000-0000-000000000002 RULE_SEGMENT_UNREACHABLE: segment 1: reverse dialing needs every upstream member to have a public address
+== problem aa000000-0000-0000-0000-000000000003 RULE_REVERSE_NOT_ENTITLED: segment 1: manual reverse dialing needs the reverse_dial entitlement
+== problem aa000000-0000-0000-0000-000000000004 RULE_NODE_REPEATED: node 0d000000-0000-0000-0000-000000000001 is in the groups at positions 0 and 1
+== problem aa000000-0000-0000-0000-000000000005 RULE_GROUP_NOT_OWNED: group 9f000000-0000-0000-0000-000000000005 belongs to another tenant
+== problem aa000000-0000-0000-0000-000000000006 RULE_SEGMENT_UNREACHABLE: segment 1: forward dialing needs every downstream member to have a public address
+== problem aa000000-0000-0000-0000-000000000007 RULE_PORT_UNASSIGNED: service port not assigned (PRT-003)
+== problem aa000000-0000-0000-0000-000000000008 RULE_PATH_GROUP_PURPOSE: group 9f000000-0000-0000-0000-000000000004 is relay, position 1 needs exit
+== problem aa000000-0000-0000-0000-000000000009 RULE_TARGET_FORBIDDEN: target 10.1.2.3:80 loopback and private addresses are only allowed for self-hosted exits
+== problem aa000000-0000-0000-0000-000000000010 RULE_TARGET_FORBIDDEN: target 192.0.2.9:80 address is denied by platform policy
+== problem aa000000-0000-0000-0000-000000000011 RULE_TARGET_FORBIDDEN: target 198.51.100.1:25 port is denied
+== problem aa000000-0000-0000-0000-000000000012 RULE_PROXY_PROTOCOL_INVALID: PROXY protocol v1 is TCP only (ENG-009)
+== problem aa000000-0000-0000-0000-000000000013 RULE_PATH_GROUP_PURPOSE: group 9f000000-0000-0000-0000-000000000004 is relay, position 2 needs exit
+== problem aa000000-0000-0000-0000-000000000013 RULE_DUPLICATE_GROUP: group 9f000000-0000-0000-0000-000000000004 repeated
+== problem aa000000-0000-0000-0000-000000000014 RULE_PATH_SHAPE: mode tunnel has 0 segments
+== problem aa000000-0000-0000-0000-000000000015 RULE_TARGET_FORBIDDEN: target 169.254.169.254:80 address class is never allowed

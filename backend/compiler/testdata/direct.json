@@ -1,0 +1,143 @@
+{
+  "generation": 4,
+  "billing_version": 7,
+  "rules": [
+    {
+      "id": "aa000000-0000-0000-0000-000000000001",
+      "tenant": "7e000000-0000-0000-0000-000000000001",
+      "version": 3,
+      "path_generation": 2,
+      "network": "tcp_udp",
+      "mode": "direct",
+      "entry_group": "9f000000-0000-0000-0000-000000000001",
+      "path": [],
+      "port": 10000,
+      "targets": [
+        {
+          "host": "198.51.100.10",
+          "port": 443,
+          "weight": 2,
+          "priority": 0
+        },
+        {
+          "host": "backend.example",
+          "port": 8443,
+          "weight": 1,
+          "priority": 1
+        }
+      ],
+      "target_schedule": "weighted_round_robin",
+      "proxy_protocol": "v2",
+      "enabled": true,
+      "rate_bps": 10000000,
+      "max_conns": 100
+    },
+    {
+      "id": "aa000000-0000-0000-0000-000000000002",
+      "tenant": "7e000000-0000-0000-0000-000000000001",
+      "version": 3,
+      "path_generation": 2,
+      "network": "tcp",
+      "mode": "direct",
+      "entry_group": "9f000000-0000-0000-0000-000000000001",
+      "path": [],
+      "port": 10000,
+      "targets": [
+        {
+          "host": "198.51.100.10",
+          "port": 443,
+          "weight": 2,
+          "priority": 0
+        },
+        {
+          "host": "backend.example",
+          "port": 8443,
+          "weight": 1,
+          "priority": 1
+        }
+      ],
+      "target_schedule": "weighted_round_robin",
+      "proxy_protocol": "off",
+      "enabled": false
+    }
+  ],
+  "groups": {
+    "9f000000-0000-0000-0000-000000000001": {
+      "purpose": "entry",
+      "schedule": "weighted_round_robin",
+      "multiplier_milli": 1500,
+      "members": [
+        {
+          "node": "0d000000-0000-0000-0000-000000000001",
+          "weight": 1,
+          "priority": 0
+        },
+        {
+          "node": "0d000000-0000-0000-0000-000000000002",
+          "weight": 1,
+          "priority": 1
+        },
+        {
+          "node": "0d000000-0000-0000-0000-000000000003",
+          "weight": 1,
+          "priority": 2
+        }
+      ],
+      "probe_interval_s": 3,
+      "fail_threshold": 3,
+      "recover_threshold": 2
+    }
+  },
+  "nodes": {
+    "0d000000-0000-0000-0000-000000000001": {
+      "public_addresses": [
+        "203.0.113.1"
+      ],
+      "link_port": 7443
+    },
+    "0d000000-0000-0000-0000-000000000002": {
+      "public_addresses": [
+        "203.0.113.2"
+      ],
+      "link_port": 7443
+    },
+    "0d000000-0000-0000-0000-000000000003": {
+      "public_addresses": [
+        "203.0.113.3"
+      ],
+      "link_port": 7443,
+      "disabled": true
+    },
+    "0d000000-0000-0000-0000-000000000004": {
+      "public_addresses": [
+        "203.0.113.4"
+      ],
+      "link_port": 7443
+    }
+  },
+  "permits": [],
+  "node_versions": {
+    "0d000000-0000-0000-0000-000000000001": 100,
+    "0d000000-0000-0000-0000-000000000002": 101,
+    "0d000000-0000-0000-0000-000000000003": 102,
+    "0d000000-0000-0000-0000-000000000004": 103
+  },
+  "revocations": {
+    "serial": 5,
+    "cert_serials": [
+      "0a0b"
+    ],
+    "node_ids": [
+      "0d000000-0000-0000-0000-000000000099"
+    ]
+  },
+  "target_policy": {
+    "deny_cidrs": [
+      "192.0.2.0/24"
+    ],
+    "deny_ports": [
+      25
+    ]
+  },
+  "entitlements": {}
+}

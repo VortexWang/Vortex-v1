@@ -1,0 +1,164 @@
+== node 0d000000-0000-0000-0000-000000000001
+{
+  "version": "100",
+  "nodeId": {
+    "value": "DQAAAAAAAAAAAAAAAAAAAQ=="
+  },
+  "generation": "4",
+  "listeners": [
+    {
+      "bindAddress": "0.0.0.0",
+      "port": 10000,
+      "network": "NETWORK_TCP",
+      "ruleId": {
+        "value": "qgAAAAAAAAAAAAAAAAAAAQ=="
+      }
+    }
+  ],
+  "rules": [
+    {
+      "ruleId": {
+        "value": "qgAAAAAAAAAAAAAAAAAAAQ=="
+      },
+      "tenantId": {
+        "value": "fgAAAAAAAAAAAAAAAAAAAQ=="
+      },
+      "ruleVersion": "3",
+      "pathGeneration": "2",
+      "role": "HOP_ROLE_ENTRY",
+      "nextHop": {
+        "groupId": {
+          "value": "nwAAAAAAAAAAAAAAAAAAAg=="
+        },
+        "members": [
+          {
+            "nodeId": {
+              "value": "DQAAAAAAAAAAAAAAAAAAAg=="
+            },
+            "weight": 1
+          }
+        ],
+        "memberSchedule": "SCHEDULE_WEIGHTED_ROUND_ROBIN",
+        "dialDirection": "DIAL_DIRECTION_FORWARD",
+        "probe": {
+          "interval": "3s",
+          "failThreshold": 3,
+          "recoverThreshold": 2
+        }
+      },
+      "targetSchedule": "SCHEDULE_WEIGHTED_ROUND_ROBIN",
+      "limits": {},
+      "proxyProtocol": "PROXY_PROTOCOL_OFF",
+      "timeouts": {
+        "udpIdle": "60s"
+      },
+      "networks": [
+        "NETWORK_TCP"
+      ]
+    }
+  ],
+  "peers": [
+    {
+      "nodeId": {
+        "value": "DQAAAAAAAAAAAAAAAAAAAg=="
+      },
+      "address": "203.0.113.2",
+      "linkPort": 7443,
+      "dial": "PEER_DIAL_OUTBOUND",
+      "linkMode": "LINK_MODE_AUTO"
+    }
+  ],
+  "revocations": {
+    "serial": "5",
+    "certSerials": [
+      "Cgs="
+    ],
+    "nodeIds": [
+      {
+        "value": "DQAAAAAAAAAAAAAAAAAAmQ=="
+      }
+    ]
+  },
+  "targetPolicy": {
+    "denyCidrs": [
+      "192.0.2.0/24"
+    ],
+    "denyPorts": [
+      25
+    ],
+    "selfHostedNode": true
+  }
+}
+== node 0d000000-0000-0000-0000-000000000002
+{
+  "version": "101",
+  "nodeId": {
+    "value": "DQAAAAAAAAAAAAAAAAAAAg=="
+  },
+  "generation": "4",
+  "rules": [
+    {
+      "ruleId": {
+        "value": "qgAAAAAAAAAAAAAAAAAAAQ=="
+      },
+      "tenantId": {
+        "value": "fgAAAAAAAAAAAAAAAAAAAQ=="
+      },
+      "ruleVersion": "3",
+      "pathGeneration": "2",
+      "role": "HOP_ROLE_EXIT",
+      "hopIndex": 1,
+      "allowedUpstreams": [
+        {
+          "value": "DQAAAAAAAAAAAAAAAAAAAQ=="
+        }
+      ],
+      "targets": [
+        {
+          "host": "192.168.1.5",
+          "port": 22,
+          "weight": 1
+        }
+      ],
+      "targetSchedule": "SCHEDULE_WEIGHTED_ROUND_ROBIN",
+      "limits": {},
+      "proxyProtocol": "PROXY_PROTOCOL_OFF",
+      "timeouts": {
+        "udpIdle": "60s"
+      },
+      "networks": [
+        "NETWORK_TCP"
+      ]
+    }
+  ],
+  "peers": [
+    {
+      "nodeId": {
+        "value": "DQAAAAAAAAAAAAAAAAAAAQ=="
+      },
+      "dial": "PEER_DIAL_INBOUND",
+      "linkMode": "LINK_MODE_AUTO"
+    }
+  ],
+  "revocations": {
+    "serial": "5",
+    "certSerials": [
+      "Cgs="
+    ],
+    "nodeIds": [
+      {
+        "value": "DQAAAAAAAAAAAAAAAAAAmQ=="
+      }
+    ]
+  },
+  "targetPolicy": {
+    "denyCidrs": [
+      "192.0.2.0/24"
+    ],
+    "denyPorts": [
+      25
+    ],
+    "selfHostedNode": true
+  }
+}
+== dials aa000000-0000-0000-0000-000000000001 forward
