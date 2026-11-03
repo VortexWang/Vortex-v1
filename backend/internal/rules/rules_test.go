@@ -184,19 +184,21 @@ func TestValidationOnSave(t *testing.T) {
 		{"no permit", func(s *Spec) { s.Path[0].Group = CID(noPermit) }, compiler.ErrSegmentNotPermitted},
 		{"entry group at the exit position", func(s *Spec) { s.EntryGroup = CID(f.exit) }, compiler.ErrGroupPurpose},
 		{"unknown group", func(s *Spec) { s.Path[0].Group = CID(p.NewUUIDv7()) }, compiler.ErrGroupMissing},
-		{"no port", func(s *Spec) { s.ServicePort = 0 }, compiler.ErrPortUnassigned},
+		{"port taken by another rule", func(s *Spec) { s.ServicePort = 20000 }, ErrPortUnavailable},
 		{"proxy v1 with udp", func(s *Spec) { s.ProxyProtocol = "v1" }, compiler.ErrProxyProtocol},
 		{"reverse without entitlement", func(s *Spec) { s.Path[0].Dial = "reverse" }, compiler.ErrReverseNotEntitled},
 		{"bad group id", func(s *Spec) { s.EntryGroup = "x" }, compiler.ErrGroupMissing},
 	}
-	for _, c := range cases {
+	for i, c := range cases {
 		s := f.spec(f.exit)
+		s.ServicePort = uint16(21000 + i)
 		c.mut(&s)
 		if _, err := f.svc.Create(ctx, f.tenant, s); len(problems(err)) == 0 || problems(err)[0] != c.want {
 			t.Errorf("%s: %v", c.name, err)
 		}
 	}
 	// 他租户使用本租户的个人组
+	ok.ServicePort = 22000
 	if _, err := f.svc.Create(ctx, f.other, ok); len(problems(err)) == 0 || problems(err)[0] != compiler.ErrGroupTenant {
 		t.Fatalf("personal group of another tenant: %v", err)
 	}
@@ -208,6 +210,7 @@ func TestValidationOnSave(t *testing.T) {
 	}
 	// 组 ID 大小写规范化
 	up := f.spec(f.exit)
+	up.ServicePort = 0 // 自动分配
 	up.EntryGroup = compiler.UUID(upper(string(CID(f.entry))))
 	if _, err := f.svc.Create(ctx, f.tenant, up); err != nil {
 		t.Fatalf("uppercase group id: %v", err)

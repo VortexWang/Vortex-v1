@@ -121,14 +121,21 @@ func LoadSnapshot(ctx context.Context, q *db.Queries) (*compiler.Snapshot, error
 	}
 	for _, r := range rules {
 		v, err := q.GetRuleVersion(ctx, db.GetRuleVersionParams{RuleID: r.ID, Version: r.DesiredVersion})
-		if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			continue // 正在同一事务中保存的规则（版本快照尚未写入）
+		} else if err != nil {
 			return nil, err
 		}
 		var spec Spec
 		if err := json.Unmarshal(v.Snapshot, &spec); err != nil {
 			return nil, err
 		}
-		s.Rules = append(s.Rules, ToCompiler(p.FromPG(r.ID), p.FromPG(r.TenantID), uint64(r.DesiredVersion), 0, spec))
+		cr := ToCompiler(p.FromPG(r.ID), p.FromPG(r.TenantID), uint64(r.DesiredVersion), 0, spec)
+		cr.Port = 0
+		if r.ServicePort != nil {
+			cr.Port = uint16(*r.ServicePort) // 已预留的端口（指定或自动分配）
+		}
+		s.Rules = append(s.Rules, cr)
 	}
 	return s, nil
 }

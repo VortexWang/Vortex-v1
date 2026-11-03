@@ -15,10 +15,12 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
 
+	"vortex/backend/internal/apply"
 	"vortex/backend/internal/fleet"
 	"vortex/backend/internal/grpcgw"
 	"vortex/backend/internal/pki"
 	"vortex/backend/internal/platform"
+	"vortex/backend/internal/rules"
 	backendv1 "vortex/proto/gen/go/vortex/backend/v1"
 )
 
@@ -26,6 +28,12 @@ import (
 var Version = "dev"
 
 type Config = platform.Config
+
+// RuleSpec、RuleSaved 是规则的内容与保存结果（供集成测试与运维工具使用）。
+type (
+	RuleSpec  = rules.Spec
+	RuleSaved = rules.Saved
+)
 
 func LoadConfig(path string) (*Config, error) { return platform.LoadConfig(path) }
 
@@ -36,11 +44,44 @@ type Options struct {
 	ReconcileQuiet time.Duration
 	// 证书有效期覆盖（测试用）
 	NodeCertLife, HubCertLife time.Duration
+	// ReconcileEvery 是定期部署与推进编排的周期（成员变化等也由此收敛）；默认 10 秒
+	ReconcileEvery time.Duration
 }
 
 // Backend 是运行中的后端，暴露运维与测试所需的操作。
 type Backend struct {
 	Fleet *fleet.Service
+	Rules *rules.Service
+	Apply *apply.Service
+}
+
+// CreateRule 保存规则并部署（RUL-010 ①～②：校验、编译、下发准备）。
+func (b *Backend) CreateRule(ctx context.Context, tenant [16]byte, spec rules.Spec) (*rules.Saved, error) {
+	s, err := b.Rules.Create(ctx, tenant, spec)
+	if err != nil {
+		return nil, err
+	}
+	_, err = b.Apply.Deploy(ctx)
+	return s, err
+}
+
+// UpdateRule 修改规则并部署。
+func (b *Backend) UpdateRule(ctx context.Context, tenant, id [16]byte, rowVersion int64, spec rules.Spec) (*rules.Saved, error) {
+	s, err := b.Rules.Update(ctx, tenant, id, rowVersion, spec)
+	if err != nil {
+		return nil, err
+	}
+	_, err = b.Apply.Deploy(ctx)
+	return s, err
+}
+
+// DeleteRule 删除规则并部署。
+func (b *Backend) DeleteRule(ctx context.Context, tenant, id [16]byte) error {
+	if err := b.Rules.Delete(ctx, tenant, id); err != nil {
+		return err
+	}
+	_, err := b.Apply.Deploy(ctx)
+	return err
 }
 
 // CreateHubBootstrapToken 签发实例引导令牌。
@@ -67,6 +108,28 @@ func LoadCA(cfg *Config) (*pki.CA, error) {
 	return pki.Load(cfg.CA.RootCertFile, cfg.CA.IntermediateCertFile, cfg.CA.IntermediateKeyFile, []byte(pass))
 }
 
+// reconcileLoop 定期部署（节点组成员、节点状态等变化由此收敛）并推进编排。
+func reconcileLoop(ctx context.Context, ap *apply.Service, every time.Duration, log *slog.Logger) {
+	if every <= 0 {
+		every = 10 * time.Second
+	}
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		if _, err := ap.Deploy(ctx); err != nil && ctx.Err() == nil {
+			log.Warn("deploy", "err", err)
+		}
+		if _, err := ap.Advance(ctx); err != nil && ctx.Err() == nil {
+			log.Warn("advance", "err", err)
+		}
+	}
+}
+
 // Run 运行后端直至 ctx 结束。
 func Run(ctx context.Context, cfg *Config, log *slog.Logger, opt Options) error {
 	if cfg.DatabaseURL == "" {
@@ -86,6 +149,10 @@ func Run(ctx context.Context, cfg *Config, log *slog.Logger, opt Options) error 
 	}
 	fl := &fleet.Service{DB: pool, CA: ca, NodeLife: opt.NodeCertLife, HubLife: opt.HubCertLife}
 	gw := &grpcgw.Server{Fleet: fl, Log: log, ReconcileQuiet: opt.ReconcileQuiet}
+	ap := &apply.Service{DB: pool, Notify: gw.Wake}
+	gw.Apply = ap
+	go gw.RunDelivery(ctx)
+	go reconcileLoop(ctx, ap, opt.ReconcileEvery, log)
 	ln, err := net.Listen("tcp", cfg.GRPCListen)
 	if err != nil {
 		return err
@@ -99,7 +166,7 @@ func Run(ctx context.Context, cfg *Config, log *slog.Logger, opt Options) error 
 		opt.OnListen(ln.Addr().String())
 	}
 	if opt.OnReady != nil {
-		opt.OnReady(&Backend{Fleet: fl})
+		opt.OnReady(&Backend{Fleet: fl, Rules: &rules.Service{DB: pool}, Apply: ap})
 	}
 	<-ctx.Done()
 	srv.Stop()

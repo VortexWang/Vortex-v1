@@ -45,6 +45,8 @@ func (s *Server) Connect(stream grpc.BidiStreamingServer[backendv1.HubUpMessage,
 			overflow.Do(cancel)
 		}
 	}
+	conn := s.attach(hub, send)
+	defer s.detach(hub, conn)
 	go func() {
 		for {
 			select {
@@ -100,6 +102,7 @@ func (s *Server) Connect(stream grpc.BidiStreamingServer[backendv1.HubUpMessage,
 				if err := s.onRegister(ctx, hub, b.Register, send); err != nil {
 					return err
 				}
+				s.pushHubNodes(ctx, hub, send) // 本实例所辖节点的最新配置与未完成的提交
 				if b.Register.GetMode() == commonv1.HubMode_HUB_MODE_RECONCILING {
 					reconciling = true
 					reconcileTimer = time.NewTimer(quiet)
@@ -107,6 +110,13 @@ func (s *Server) Connect(stream grpc.BidiStreamingServer[backendv1.HubUpMessage,
 				}
 			case *backendv1.HubUpMessage_NodeStatus:
 				s.onNodeStatus(ctx, hub, b.NodeStatus)
+				for _, n := range b.NodeStatus.GetNodes() { // 节点接入（含切换实例）：发给它当前所在的实例
+					if id, err := fromMsg(n.GetNodeId()); err == nil && n.GetConnected() {
+						s.pushNode(ctx, id, send, true)
+					}
+				}
+			case *backendv1.HubUpMessage_ApplyProgress:
+				s.onApplyProgress(ctx, b.ApplyProgress)
 			case *backendv1.HubUpMessage_Ledger:
 				if err := s.onLedger(ctx, hub, b.Ledger, send); err != nil {
 					return err

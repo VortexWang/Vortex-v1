@@ -20,12 +20,13 @@ type Announcement struct {
 }
 
 type ApplyNodeState struct {
-	RunID         pgtype.UUID
-	NodeID        pgtype.UUID
-	ActualVersion *int64
-	Status        string
-	ErrorCode     *string
-	UpdatedAt     pgtype.Timestamptz
+	RunID           pgtype.UUID
+	NodeID          pgtype.UUID
+	ActualVersion   *int64
+	Status          string
+	ErrorCode       *string
+	UpdatedAt       pgtype.Timestamptz
+	RequiredVersion *int64
 }
 
 type ApplyRun struct {
@@ -210,6 +211,19 @@ type Node struct {
 	CreatedAt       pgtype.Timestamptz
 	UpdatedAt       pgtype.Timestamptz
 	DeletedAt       pgtype.Timestamptz
+}
+
+type NodeConfig struct {
+	NodeID          pgtype.UUID
+	Version         int64
+	Config          []byte
+	ContentDigest   []byte
+	PreparedVersion *int64
+	CommitSent      *int64
+	AppliedVersion  *int64
+	LastError       *string
+	CompiledAt      pgtype.Timestamptz
+	UpdatedAt       pgtype.Timestamptz
 }
 
 type NodeGroup struct {

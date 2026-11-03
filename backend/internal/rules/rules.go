@@ -17,6 +17,7 @@ import (
 	"vortex/backend/compiler"
 	"vortex/backend/internal/db"
 	p "vortex/backend/internal/platform"
+	"vortex/backend/internal/ports"
 )
 
 var (
@@ -98,12 +99,15 @@ func (s *Service) Create(ctx context.Context, tenant p.UUID, spec Spec) (*Saved,
 	var out *Saved
 	err = p.InTx(ctx, s.DB, func(tx pgx.Tx) error {
 		q := db.New(tx)
-		if err := s.validate(ctx, q, tenant, id, 1, spec); err != nil {
+		if err := s.validate(ctx, q, tenant, id, 1, withPort(spec)); err != nil {
 			return err
 		}
 		if err := q.InsertRule(ctx, db.InsertRuleParams{ID: id.PG(), TenantID: tenant.PG(), Name: spec.Name, Network: spec.Network,
 			ForwardMode: spec.Mode, EntryGroupID: entry.PG(), ServicePort: port(spec.ServicePort), TargetSchedule: spec.TargetSchedule,
 			ProxyProtocol: spec.ProxyProtocol, LimitRateBps: i64(spec.RateBps), LimitMaxConns: i32(spec.MaxConns), Enabled: spec.Enabled}); err != nil {
+			return err
+		}
+		if err := reserve(ctx, q, tenant, id, entry, spec); err != nil {
 			return err
 		}
 		if err := writeChildren(ctx, q, id, spec); err != nil {
@@ -137,7 +141,7 @@ func (s *Service) Update(ctx context.Context, tenant, id p.UUID, rowVersion int6
 			return err
 		}
 		next := uint64(cur.DesiredVersion) + 1
-		if err := s.validate(ctx, q, tenant, id, next, spec); err != nil {
+		if err := s.validate(ctx, q, tenant, id, next, withPort(spec)); err != nil {
 			return err
 		}
 		n, err := q.UpdateRuleForTenant(ctx, db.UpdateRuleForTenantParams{ID: id.PG(), TenantID: tenant.PG(), Name: spec.Name,
@@ -149,6 +153,9 @@ func (s *Service) Update(ctx context.Context, tenant, id p.UUID, rowVersion int6
 		}
 		if n == 0 {
 			return ErrConflict
+		}
+		if err := reserve(ctx, q, tenant, id, entry, spec); err != nil {
+			return err
 		}
 		if err := q.DeleteRulePaths(ctx, id.PG()); err != nil {
 			return err
@@ -168,17 +175,41 @@ func (s *Service) Update(ctx context.Context, tenant, id p.UUID, rowVersion int6
 	return out, err
 }
 
-// Delete 删除规则（软删除，保留历史）。
+// Delete 删除规则（软删除，保留历史）；端口预留转为 releasing，节点确认不再监听后释放（PRT-009）。
 func (s *Service) Delete(ctx context.Context, tenant, id p.UUID) error {
-	n, err := db.New(s.DB).SoftDeleteRuleForTenant(ctx, db.SoftDeleteRuleForTenantParams{ID: id.PG(), TenantID: tenant.PG()})
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		return ErrNotFound
-	}
-	return nil
+	return p.InTx(ctx, s.DB, func(tx pgx.Tx) error {
+		q := db.New(tx)
+		n, err := q.SoftDeleteRuleForTenant(ctx, db.SoftDeleteRuleForTenantParams{ID: id.PG(), TenantID: tenant.PG()})
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return ErrNotFound
+		}
+		return ports.Release(ctx, q, id)
+	})
 }
+
+// withPort：保存前校验时，自动分配的端口尚未选定，以占位端口校验其余内容（端口由 reserve 检查）。
+func withPort(spec Spec) Spec {
+	if spec.ServicePort == 0 {
+		spec.ServicePort = ports.DefaultMin
+	}
+	return spec
+}
+
+// reserve 预留端口（指定或自动分配，PRT-003）。
+func reserve(ctx context.Context, q *db.Queries, tenant, id, entry p.UUID, spec Spec) error {
+	_, err := ports.Reserve(ctx, q, tenant, id, entry, spec.Network, spec.ServicePort)
+	var ue *ports.UnavailableError
+	if errors.As(err, &ue) || errors.Is(err, ports.ErrExhausted) {
+		return &ValidationError{[]compiler.Problem{{Code: ErrPortUnavailable, Detail: err.Error()}}}
+	}
+	return err
+}
+
+// ErrPortUnavailable 是端口不可用的校验错误码（PRT-003）。
+const ErrPortUnavailable = "PORT_UNAVAILABLE"
 
 // Get 读取规则的当前期望内容与版本。
 func (s *Service) Get(ctx context.Context, tenant, id p.UUID) (*Spec, *Saved, error) {

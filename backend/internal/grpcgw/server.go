@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 
+	"vortex/backend/internal/apply"
 	"vortex/backend/internal/fleet"
 	"vortex/backend/internal/pki"
 	p "vortex/backend/internal/platform"
@@ -31,9 +32,15 @@ type Server struct {
 	// ReconcileQuiet：对账中（STARTED 之后）多久没有新的账本条目即视为上报完毕并下发 COMPLETED。
 	// 暂行规则，BE-T23 实现结清与重算后替换；默认 1 秒。
 	ReconcileQuiet time.Duration
+	// Apply 处理节点的 Prepare / Commit 报告并推进编排（BE-T15）；nil 时只记录。
+	Apply *apply.Service
 
 	certMu sync.Mutex
 	cert   *tls.Certificate
+
+	hubsMu sync.Mutex
+	hubs   map[p.UUID]*hubConn // 当前连接的实例 → 下行发送
+	wake   chan struct{}
 }
 
 // TLSConfig 返回 HubControl 的服务端 TLS：后端证书由平台 CA 自签发（spiffe://vortex/backend），剩余 1/3 时更换；
