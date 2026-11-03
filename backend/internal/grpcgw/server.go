@@ -18,6 +18,7 @@ import (
 
 	"vortex/backend/internal/apply"
 	"vortex/backend/internal/fleet"
+	"vortex/backend/internal/leases"
 	"vortex/backend/internal/pki"
 	p "vortex/backend/internal/platform"
 	backendv1 "vortex/proto/gen/go/vortex/backend/v1"
@@ -34,6 +35,8 @@ type Server struct {
 	ReconcileQuiet time.Duration
 	// Apply 处理节点的 Prepare / Commit 报告并推进编排（BE-T15）；nil 时只记录。
 	Apply *apply.Service
+	// Leases 下发限制快照、份额与区域额度（BE-T20、BE-T21）；nil 时不下发。
+	Leases *leases.Service
 
 	certMu sync.Mutex
 	cert   *tls.Certificate

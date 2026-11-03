@@ -55,6 +55,20 @@ func (s *Server) hubSender(hub p.UUID) func(*backendv1.BackendMessage) {
 	return nil
 }
 
+// Sender 返回实例当前控制流的发送函数（未连接时为 nil）。
+func (s *Server) Sender(hub p.UUID) func(*backendv1.BackendMessage) { return s.hubSender(hub) }
+
+// Connected 返回当前连接的实例。
+func (s *Server) Connected() []p.UUID {
+	s.hubsMu.Lock()
+	defer s.hubsMu.Unlock()
+	out := make([]p.UUID, 0, len(s.hubs))
+	for h := range s.hubs {
+		out = append(out, h)
+	}
+	return out
+}
+
 // Wake 唤醒投递（apply.Service.Notify）。
 func (s *Server) Wake() {
 	s.hubsMu.Lock()

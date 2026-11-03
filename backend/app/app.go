@@ -16,8 +16,10 @@ import (
 	"google.golang.org/grpc/keepalive"
 
 	"vortex/backend/internal/apply"
+	"vortex/backend/internal/db"
 	"vortex/backend/internal/fleet"
 	"vortex/backend/internal/grpcgw"
+	"vortex/backend/internal/leases"
 	"vortex/backend/internal/pki"
 	"vortex/backend/internal/platform"
 	"vortex/backend/internal/rules"
@@ -46,13 +48,16 @@ type Options struct {
 	NodeCertLife, HubCertLife time.Duration
 	// ReconcileEvery 是定期部署与推进编排的周期（成员变化等也由此收敛）；默认 10 秒
 	ReconcileEvery time.Duration
+	// LeaseEvery 是份额重算与限制快照广播的周期；默认 60 秒（LIM-009）
+	LeaseEvery time.Duration
 }
 
 // Backend 是运行中的后端，暴露运维与测试所需的操作。
 type Backend struct {
-	Fleet *fleet.Service
-	Rules *rules.Service
-	Apply *apply.Service
+	Fleet  *fleet.Service
+	Rules  *rules.Service
+	Apply  *apply.Service
+	Leases *leases.Service
 }
 
 // CreateRule 保存规则并部署（RUL-010 ①～②：校验、编译、下发准备）。
@@ -61,8 +66,10 @@ func (b *Backend) CreateRule(ctx context.Context, tenant [16]byte, spec rules.Sp
 	if err != nil {
 		return nil, err
 	}
-	_, err = b.Apply.Deploy(ctx)
-	return s, err
+	if _, err = b.Apply.Deploy(ctx); err != nil {
+		return s, err
+	}
+	return s, b.Leases.Refresh(ctx, tenant)
 }
 
 // UpdateRule 修改规则并部署。
@@ -71,8 +78,10 @@ func (b *Backend) UpdateRule(ctx context.Context, tenant, id [16]byte, rowVersio
 	if err != nil {
 		return nil, err
 	}
-	_, err = b.Apply.Deploy(ctx)
-	return s, err
+	if _, err = b.Apply.Deploy(ctx); err != nil {
+		return s, err
+	}
+	return s, b.Leases.Refresh(ctx, tenant)
 }
 
 // DeleteRule 删除规则并部署。
@@ -80,8 +89,10 @@ func (b *Backend) DeleteRule(ctx context.Context, tenant, id [16]byte) error {
 	if err := b.Rules.Delete(ctx, tenant, id); err != nil {
 		return err
 	}
-	_, err := b.Apply.Deploy(ctx)
-	return err
+	if _, err := b.Apply.Deploy(ctx); err != nil {
+		return err
+	}
+	return b.Leases.Refresh(ctx, tenant)
 }
 
 // CreateHubBootstrapToken 签发实例引导令牌。
@@ -147,10 +158,16 @@ func Run(ctx context.Context, cfg *Config, log *slog.Logger, opt Options) error 
 	if err != nil {
 		return err
 	}
+	if err := db.New(pool).EnsureInitialBillingVersion(ctx, platform.NewUUIDv7().PG()); err != nil {
+		return fmt.Errorf("initial billing version: %w", err)
+	}
 	fl := &fleet.Service{DB: pool, CA: ca, NodeLife: opt.NodeCertLife, HubLife: opt.HubCertLife}
 	gw := &grpcgw.Server{Fleet: fl, Log: log, ReconcileQuiet: opt.ReconcileQuiet}
 	ap := &apply.Service{DB: pool, Notify: gw.Wake}
 	gw.Apply = ap
+	ls := &leases.Service{DB: pool, Hubs: gw, Log: log}
+	gw.Leases = ls
+	go ls.Run(ctx, opt.LeaseEvery)
 	go gw.RunDelivery(ctx)
 	go reconcileLoop(ctx, ap, opt.ReconcileEvery, log)
 	ln, err := net.Listen("tcp", cfg.GRPCListen)
@@ -166,7 +183,7 @@ func Run(ctx context.Context, cfg *Config, log *slog.Logger, opt Options) error 
 		opt.OnListen(ln.Addr().String())
 	}
 	if opt.OnReady != nil {
-		opt.OnReady(&Backend{Fleet: fl, Rules: &rules.Service{DB: pool}, Apply: ap})
+		opt.OnReady(&Backend{Fleet: fl, Rules: &rules.Service{DB: pool}, Apply: ap, Leases: ls})
 	}
 	<-ctx.Done()
 	srv.Stop()

@@ -95,6 +95,11 @@ func (s *Server) Connect(stream grpc.BidiStreamingServer[backendv1.HubUpMessage,
 			send(&backendv1.BackendMessage{Body: &backendv1.BackendMessage_Reconcile{Reconcile: &backendv1.ReconcileDirective{
 				Phase: backendv1.ReconcilePhase_RECONCILE_PHASE_COMPLETED}}})
 			s.log().Info("hub reconcile completed", "hub", hub.String())
+			if s.Leases != nil {
+				if err := s.Leases.HubOnline(ctx, hub); err != nil {
+					s.log().Warn("budgets after reconcile", "hub", hub.String(), "err", err)
+				}
+			}
 		case m := <-in:
 			_ = q.TouchHub(ctx, hub.PG())
 			switch b := m.Body.(type) {
@@ -113,6 +118,18 @@ func (s *Server) Connect(stream grpc.BidiStreamingServer[backendv1.HubUpMessage,
 				for _, n := range b.NodeStatus.GetNodes() { // 节点接入（含切换实例）：发给它当前所在的实例
 					if id, err := fromMsg(n.GetNodeId()); err == nil && n.GetConnected() {
 						s.pushNode(ctx, id, send, true)
+						if s.Leases != nil { // 新启动的份额（LIM-010）与该实例的区域额度
+							if err := s.Leases.NodeConnected(ctx, id); err != nil {
+								s.log().Warn("leases on node connect", "node", id.String(), "err", err)
+							}
+						}
+					}
+				}
+			case *backendv1.HubUpMessage_BudgetRequest:
+				if t, err := fromMsg(b.BudgetRequest.GetTenantId()); err == nil && s.Leases != nil {
+					s.Leases.ReportRate(t, hub, b.BudgetRequest.GetRateBillingBps_1H())
+					if err := s.Leases.Rebudget(ctx, t, hub); err != nil {
+						s.log().Warn("budget request", "tenant", t.String(), "err", err)
 					}
 				}
 			case *backendv1.HubUpMessage_ApplyProgress:
@@ -160,10 +177,24 @@ func (s *Server) onRegister(ctx context.Context, hub p.UUID, r *backendv1.HubReg
 	if acked, err := q.MaxLedgerSeq(ctx, hub.PG()); err == nil && acked > 0 {
 		send(&backendv1.BackendMessage{Body: &backendv1.BackendMessage_LedgerAck{LedgerAck: &backendv1.LedgerAck{AckedThroughSeq: uint64(acked)}}})
 	}
-	if r.GetMode() == commonv1.HubMode_HUB_MODE_RECONCILING {
-		// 恢复对账（HUB-013）：先下发限制，再 STARTED；Edge Hub 随后上报账本
+	reconciling := r.GetMode() == commonv1.HubMode_HUB_MODE_RECONCILING
+	// 限制快照（HUB-009）；在线时随后下发区域额度（HUB-006），对账中在 COMPLETED 之后下发
+	if s.Leases != nil {
+		reported := map[p.UUID]uint64{}
+		for _, bv := range r.GetBudgetVersions() {
+			if t, err := fromMsg(bv.GetTenantId()); err == nil {
+				reported[t] = bv.GetBudgetVersion()
+			}
+		}
+		if err := s.Leases.HubRegistered(ctx, hub, reported, mode == "online"); err != nil {
+			return err
+		}
+	} else if reconciling {
 		send(&backendv1.BackendMessage{Body: &backendv1.BackendMessage_Restrictions{Restrictions: &backendv1.RestrictionSnapshot{
 			SnapshotVersion: uint64(time.Now().UnixNano())}}})
+	}
+	if reconciling {
+		// 恢复对账（HUB-013）：先下发吊销与限制，再 STARTED；Edge Hub 随后上报账本
 		send(&backendv1.BackendMessage{Body: &backendv1.BackendMessage_Reconcile{Reconcile: &backendv1.ReconcileDirective{
 			Phase: backendv1.ReconcilePhase_RECONCILE_PHASE_STARTED}}})
 	}
