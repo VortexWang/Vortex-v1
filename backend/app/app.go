@@ -183,7 +183,7 @@ func Run(ctx context.Context, cfg *Config, log *slog.Logger, opt Options) error 
 	}
 	fl := &fleet.Service{DB: pool, CA: ca, NodeLife: opt.NodeCertLife, HubLife: opt.HubCertLife}
 	gw := &grpcgw.Server{Fleet: fl, Log: log, ReconcileQuiet: opt.ReconcileQuiet}
-	ap := &apply.Service{DB: pool, Notify: gw.Wake}
+	ap := &apply.Service{DB: pool, Notify: gw.Wake, Log: log}
 	gw.Apply = ap
 	ls := &leases.Service{DB: pool, Hubs: gw, Log: log, ReclaimAfter: opt.ReclaimAfter}
 	if err := ls.Startup(ctx); err != nil { // 上次运行时连接的实例视为失联，冻结其额度（HUB-015）

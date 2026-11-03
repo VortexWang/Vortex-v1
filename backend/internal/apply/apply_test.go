@@ -3,6 +3,7 @@ package apply
 import (
 	"context"
 	"testing"
+	"time"
 
 	"vortex/backend/apptest"
 	"vortex/backend/compiler"
@@ -125,7 +126,7 @@ func TestTwoPhase(t *testing.T) {
 		t.Fatal("commit sent twice")
 	}
 	_ = f.svc.Applied(ctx, f.e1, ve, true, "")
-	if f.advance(); f.sync(saved.ID) != "committing" {
+	if f.advance(); f.sync(saved.ID) != "partially_applied" { // RUL-012：部分节点已生效
 		t.Fatal("applied before every node applied")
 	}
 	_ = f.svc.Applied(ctx, f.x1, vx, true, "")
@@ -221,7 +222,312 @@ func TestPrepareFailureFallsBack(t *testing.T) {
 	var old, nw string
 	apptest.QueryRow(t, f.dsn, "SELECT string_agg(state, ',') FROM port_allocations WHERE rule_id = $1 AND port = 20000", []any{saved.ID.PG()}, &old)
 	apptest.QueryRow(t, f.dsn, "SELECT string_agg(state, ',') FROM port_allocations WHERE rule_id = $1 AND port = 20001", []any{saved.ID.PG()}, &nw)
-	if old == "released" || nw == "occupied" {
+	if old != "occupied" || nw != "released" { // 恢复为上一已生效版本的端口；失败版本的端口在节点确认后释放
 		t.Fatalf("after the fallback: port 20000 %s, port 20001 %s", old, nw)
+	}
+}
+
+func (f *fixture) prepareAll(nodes ...p.UUID) {
+	for _, n := range nodes {
+		_ = f.svc.Prepared(context.Background(), n, uint64(f.config(n).Version), nil)
+	}
+}
+
+func (f *fixture) applyAll(nodes ...p.UUID) {
+	for _, n := range nodes {
+		_ = f.svc.Applied(context.Background(), n, uint64(f.config(n).Version), true, "")
+	}
+}
+
+func (f *fixture) expire(rule p.UUID) {
+	apptest.Exec(f.t, f.dsn, "UPDATE apply_runs SET deadline_at = now() - interval '1 second' WHERE rule_id = $1 AND phase <> 'applied'", rule.PG())
+}
+
+func (f *fixture) count(sql string, args ...any) int {
+	var n int
+	apptest.QueryRow(f.t, f.dsn, sql, args, &n)
+	return n
+}
+
+// 已生效的规则修改后提交只部分生效：partially_applied、重发提交；120 秒后以上一已生效版本的内容生成新版本回滚
+// （rolling_back），回滚生效后 applied（RUL-012）。
+func TestPartialApplyRollsBack(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	saved, _ := f.rules.Create(ctx, f.tenant, f.spec(20000))
+	_, _ = f.svc.Deploy(ctx)
+	f.prepareAll(f.e1, f.x1)
+	f.advance()
+	f.applyAll(f.e1, f.x1)
+	f.advance()
+	// 修改目标；两个节点都准备好、都下发提交，只有入口生效，出口提交失败
+	spec := f.spec(0)
+	spec.Targets = []compiler.Target{{Host: "198.51.100.8", Port: 443, Weight: 1}}
+	up, err := f.rules.Update(ctx, f.tenant, saved.ID, saved.RowVersion, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.svc.Deploy(ctx)
+	f.expire(saved.ID) // 期限自进入提交起算：准备阶段用掉的时间不算
+	f.prepareAll(f.e1, f.x1)
+	if r := f.advance(); len(r.Committed) != 2 {
+		t.Fatalf("commit %+v", r)
+	}
+	f.applyAll(f.e1)
+	_ = f.svc.Applied(ctx, f.x1, uint64(f.config(f.x1).Version), false, "LISTEN_FAILED")
+	old := CommitRetry
+	CommitRetry = time.Hour
+	defer func() { CommitRetry = old }()
+	if r := f.advance(); f.sync(saved.ID) != "partially_applied" || len(r.Committed) != 0 {
+		t.Fatalf("partial %s %+v", f.sync(saved.ID), r)
+	}
+	if f.count("SELECT count(*) FROM apply_node_states s JOIN apply_runs r ON r.id = s.run_id WHERE r.version = $1 AND s.status = 'commit_failed'",
+		int64(up.Version)) != 1 {
+		t.Fatal("commit failure not recorded")
+	}
+	// 重试收敛：间隔到了才重发同一提交
+	CommitRetry = 0
+	if r := f.advance(); r.Committed[f.x1] != uint64(f.config(f.x1).Version) || len(r.Committed) != 1 {
+		t.Fatalf("retry %+v", r)
+	}
+	CommitRetry = time.Hour
+	if r := f.advance(); len(r.Committed) != 0 || len(r.RolledBack) != 0 {
+		t.Fatalf("retried within the interval, or rolled back before the deadline: %+v", r)
+	}
+	// 节点已有更新的期望配置：不再重发旧版本的提交
+	apptest.Exec(t, f.dsn, "UPDATE node_configs SET version = version + 1 WHERE node_id = $1", f.x1.PG())
+	CommitRetry = 0
+	if r := f.advance(); len(r.Committed) != 0 {
+		t.Fatalf("stale commit resent: %+v", r)
+	}
+	CommitRetry = time.Hour
+	// 超时：回滚为新的递增版本，内容取上一已生效版本
+	f.expire(saved.ID)
+	r := f.advance()
+	if len(r.RolledBack) != 1 || f.sync(saved.ID) != "rolling_back" {
+		t.Fatalf("rollback %+v %s", r, f.sync(saved.ID))
+	}
+	cur, info, err := f.rules.Get(ctx, f.tenant, saved.ID)
+	if err != nil || info.Version != up.Version+1 || cur.Targets[0].Host != "198.51.100.7" || cur.ServicePort != 20000 {
+		t.Fatalf("rollback version %+v %+v %v", info, cur, err)
+	}
+	if f.count("SELECT count(*) FROM apply_runs WHERE rule_id = $1 AND version = $2 AND is_rollback", saved.ID.PG(), int64(info.Version)) != 1 {
+		t.Fatal("rollback run not marked")
+	}
+	if f.count("SELECT count(*) FROM apply_runs WHERE rule_id = $1 AND version = $2 AND phase = 'failed'", saved.ID.PG(), int64(up.Version)) != 1 {
+		t.Fatal("timed-out run not closed")
+	}
+	f.prepareAll(f.e1, f.x1)
+	f.advance()
+	if f.sync(saved.ID) != "rolling_back" {
+		t.Fatalf("during the rollback commit %s", f.sync(saved.ID))
+	}
+	f.applyAll(f.e1, f.x1)
+	if f.advance(); f.sync(saved.ID) != "applied" {
+		t.Fatalf("after the rollback %s", f.sync(saved.ID))
+	}
+}
+
+// 回滚自身超时：failed 并告警，不再自动回滚；新建的规则没有可回滚的版本：直接 failed 并告警（RUL-012）。
+func TestRollbackFailureAndNothingToRollBackTo(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	fresh, _ := f.rules.Create(ctx, f.tenant, f.spec(20000))
+	_, _ = f.svc.Deploy(ctx)
+	f.prepareAll(f.e1, f.x1)
+	f.advance()
+	f.applyAll(f.e1)
+	f.advance()
+	f.expire(fresh.ID)
+	if r := f.advance(); len(r.RolledBack) != 0 || f.sync(fresh.ID) != "failed" {
+		t.Fatalf("new rule: %+v %s", r, f.sync(fresh.ID))
+	}
+	if f.count("SELECT count(*) FROM audit_logs WHERE action = 'rule.apply_failed' AND target_id = $1 AND detail->>'reason' LIKE '%no applied version%'",
+		fresh.ID.String()) != 1 {
+		t.Fatal("no alert")
+	}
+	// 另一条已生效的规则：修改后部分生效、回滚，回滚自身再次超时
+	g := setup(t)
+	f = g
+	fresh, _ = f.rules.Create(ctx, f.tenant, f.spec(20000))
+	_, _ = f.svc.Deploy(ctx)
+	f.prepareAll(f.e1, f.x1)
+	f.advance()
+	f.applyAll(f.e1, f.x1)
+	f.advance()
+	_, info, _ := f.rules.Get(ctx, f.tenant, fresh.ID)
+	if f.sync(fresh.ID) != "applied" {
+		t.Fatalf("setup: %s", f.sync(fresh.ID))
+	}
+	spec := f.spec(0)
+	spec.Targets = []compiler.Target{{Host: "198.51.100.9", Port: 443, Weight: 1}}
+	if _, err := f.rules.Update(ctx, f.tenant, fresh.ID, f.rowVersion(fresh.ID), spec); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.svc.Deploy(ctx)
+	f.prepareAll(f.e1, f.x1)
+	f.advance()
+	f.applyAll(f.e1)
+	f.expire(fresh.ID)
+	if r := f.advance(); len(r.RolledBack) != 1 {
+		t.Fatalf("rollback %+v", r)
+	}
+	f.prepareAll(f.e1, f.x1)
+	f.advance()
+	f.applyAll(f.e1)
+	f.expire(fresh.ID)
+	if r := f.advance(); len(r.RolledBack) != 0 || f.sync(fresh.ID) != "failed" {
+		t.Fatalf("rollback timed out: %+v %s", r, f.sync(fresh.ID))
+	}
+	if f.count("SELECT count(*) FROM audit_logs WHERE action = 'rule.apply_failed' AND target_id = $1", fresh.ID.String()) != 1 {
+		t.Fatal("no alert for the failed rollback")
+	}
+	_, after, _ := f.rules.Get(ctx, f.tenant, fresh.ID)
+	if after.Version != info.Version+2 {
+		t.Fatalf("versions %d → %d: a failed rollback must not roll back again", info.Version, after.Version)
+	}
+}
+
+func (f *fixture) rowVersion(rule p.UUID) int64 {
+	var v int64
+	apptest.QueryRow(f.t, f.dsn, "SELECT row_version FROM rules WHERE id = $1", []any{rule.PG()}, &v)
+	return v
+}
+
+// 失联节点（RUL-013）：未生效的节点全部失联时 unknown，不回滚、不报成功；恢复并生效后 applied。
+func TestUnknownWhileNodeLost(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	saved, _ := f.rules.Create(ctx, f.tenant, f.spec(20000))
+	_, _ = f.svc.Deploy(ctx)
+	f.prepareAll(f.e1, f.x1)
+	f.advance()
+	// 提交后两个节点都失联、都未生效：unknown，期限到了也不回滚
+	apptest.Exec(t, f.dsn, "UPDATE nodes SET lifecycle = 'offline'")
+	f.expire(saved.ID)
+	if r := f.advance(); len(r.RolledBack) != 0 || f.sync(saved.ID) != "unknown" {
+		t.Fatalf("all lost: %+v %s", r, f.sync(saved.ID))
+	}
+	apptest.Exec(t, f.dsn, "UPDATE nodes SET lifecycle = 'online' WHERE id = $1", f.e1.PG())
+	f.applyAll(f.e1)
+	apptest.Exec(t, f.dsn, "UPDATE nodes SET lifecycle = 'offline' WHERE id = $1", f.x1.PG())
+	if f.advance(); f.sync(saved.ID) != "unknown" {
+		t.Fatalf("lost node: %s", f.sync(saved.ID))
+	}
+	f.expire(saved.ID)
+	if r := f.advance(); len(r.RolledBack) != 0 || f.sync(saved.ID) != "unknown" {
+		t.Fatalf("after the deadline: %+v %s", r, f.sync(saved.ID))
+	}
+	if f.count("SELECT count(*) FROM apply_node_states WHERE node_id = $1 AND status = 'unknown'", f.x1.PG()) != 1 {
+		t.Fatal("node state not unknown")
+	}
+	apptest.Exec(t, f.dsn, "UPDATE nodes SET lifecycle = 'online' WHERE id = $1", f.x1.PG())
+	f.applyAll(f.x1)
+	if f.advance(); f.sync(saved.ID) != "applied" {
+		t.Fatalf("after recovery: %s", f.sync(saved.ID))
+	}
+}
+
+// 入口组成员变化（PRT-007）：新成员补预留同一端口，退出成员的预留转 releasing。
+func TestEntryMembersFollowPorts(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	saved, _ := f.rules.Create(ctx, f.tenant, f.spec(20000))
+	e2 := p.NewUUIDv7()
+	apptest.Exec(t, f.dsn, "INSERT INTO nodes (id, name, region, can_entry, public_addresses, lifecycle) VALUES ($1, 'e2', 'eu', true, '{203.0.113.3}', 'online')", e2.PG())
+	apptest.Exec(t, f.dsn, "INSERT INTO node_group_members (node_group_id, node_id) VALUES ($1, $2)", f.entry.PG(), e2.PG())
+	if _, err := f.svc.Deploy(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if f.count("SELECT count(*) FROM port_allocations WHERE rule_id = $1 AND node_id = $2 AND port = 20000 AND state = 'reserved'", saved.ID.PG(), e2.PG()) != 1 {
+		t.Fatal("new member has no port")
+	}
+	apptest.Exec(t, f.dsn, "DELETE FROM node_group_members WHERE node_group_id = $1 AND node_id = $2", f.entry.PG(), f.e1.PG())
+	if _, err := f.svc.Deploy(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if f.count("SELECT count(*) FROM port_allocations WHERE rule_id = $1 AND node_id = $2 AND state = 'releasing'", saved.ID.PG(), f.e1.PG()) != 1 {
+		t.Fatal("departed member's port not releasing")
+	}
+	// 新成员上端口已被占用：不静默排除，告警（该成员的准备将失败）
+	e3 := p.NewUUIDv7()
+	apptest.Exec(t, f.dsn, "INSERT INTO nodes (id, name, region, can_entry, public_addresses, lifecycle) VALUES ($1, 'e3', 'eu', true, '{203.0.113.4}', 'online')", e3.PG())
+	apptest.Exec(t, f.dsn, "INSERT INTO node_port_ranges (node_id, kind, port_min, port_max) VALUES ($1, 'service', 30000, 30010)", e3.PG())
+	apptest.Exec(t, f.dsn, "INSERT INTO node_group_members (node_group_id, node_id) VALUES ($1, $2)", f.entry.PG(), e3.PG())
+	if _, err := f.svc.Deploy(ctx); err != nil {
+		t.Fatalf("deploy must go on: %v", err)
+	}
+	if f.count("SELECT count(*) FROM port_allocations WHERE rule_id = $1 AND node_id = $2", saved.ID.PG(), e3.PG()) != 0 {
+		t.Fatal("port reserved outside the member's range")
+	}
+}
+
+// 回滚按当前权限重新校验（RUL-016）：上一已生效版本已不合法时不回滚，failed 并告警；回滚的准备失败同样告警。
+func TestRollbackRevalidates(t *testing.T) {
+	for _, mode := range []string{"invalid", "prepare_failed"} {
+		t.Run(mode, func(t *testing.T) {
+			f := setup(t)
+			ctx := context.Background()
+			saved, _ := f.rules.Create(ctx, f.tenant, f.spec(20000))
+			_, _ = f.svc.Deploy(ctx)
+			f.prepareAll(f.e1, f.x1)
+			f.advance()
+			f.applyAll(f.e1, f.x1)
+			f.advance()
+			spec := f.spec(0)
+			spec.Targets = []compiler.Target{{Host: "198.51.100.8", Port: 443, Weight: 1}}
+			if _, err := f.rules.Update(ctx, f.tenant, saved.ID, saved.RowVersion, spec); err != nil {
+				t.Fatal(err)
+			}
+			_, _ = f.svc.Deploy(ctx)
+			f.prepareAll(f.e1, f.x1)
+			f.advance()
+			f.applyAll(f.e1)
+			f.expire(saved.ID)
+			if mode == "invalid" {
+				apptest.Exec(t, f.dsn, "DELETE FROM segment_permits") // 段许可已撤销
+				if r := f.advance(); len(r.RolledBack) != 0 || f.sync(saved.ID) != "failed" {
+					t.Fatalf("rollback of an invalid version: %+v %s", r, f.sync(saved.ID))
+				}
+			} else {
+				if r := f.advance(); len(r.RolledBack) != 1 {
+					t.Fatalf("rollback %+v", r)
+				}
+				_ = f.svc.Prepared(ctx, f.x1, uint64(f.config(f.x1).Version), []string{"PORT_IN_USE"})
+				f.prepareAll(f.e1)
+				if f.advance(); f.sync(saved.ID) != "failed" {
+					t.Fatalf("rollback prepare failure: %s", f.sync(saved.ID))
+				}
+			}
+			if f.count("SELECT count(*) FROM audit_logs WHERE action = 'rule.apply_failed' AND target_id = $1", saved.ID.String()) != 1 {
+				t.Fatal("no alert")
+			}
+		})
+	}
+}
+
+// 自动分配端口的规则：版本快照记录实际端口，准备失败回到上一已生效版本时恢复该端口（而不是失败版本的端口）。
+func TestFallbackRestoresAutoPort(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	saved, _ := f.rules.Create(ctx, f.tenant, f.spec(0))
+	var auto int
+	apptest.QueryRow(t, f.dsn, "SELECT service_port FROM rules WHERE id = $1", []any{saved.ID.PG()}, &auto)
+	_, _ = f.svc.Deploy(ctx)
+	f.prepareAll(f.e1, f.x1)
+	f.advance()
+	f.applyAll(f.e1, f.x1)
+	f.advance()
+	if _, err := f.rules.Update(ctx, f.tenant, saved.ID, saved.RowVersion, f.spec(20001)); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.svc.Deploy(ctx)
+	_ = f.svc.Prepared(ctx, f.e1, uint64(f.config(f.e1).Version), []string{"PORT_IN_USE: 20001"})
+	f.advance() // 失败 → 重新部署回到上一已生效版本
+	if got := f.count("SELECT count(*) FROM port_allocations WHERE rule_id = $1 AND port = $2 AND state IN ('reserved', 'occupied')", saved.ID.PG(), int32(auto)); got != 1 {
+		t.Fatalf("auto port %d not restored", auto)
+	}
+	if got := f.count("SELECT count(*) FROM port_allocations WHERE rule_id = $1 AND port = 20001 AND state = 'releasing'", saved.ID.PG()); got != 1 {
+		t.Fatal("failed version's port not releasing")
 	}
 }

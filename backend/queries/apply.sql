@@ -52,17 +52,19 @@ SELECT * FROM apply_runs WHERE rule_id = $1 ORDER BY version DESC LIMIT 1;
 SELECT coalesce(max(version), 0)::bigint FROM apply_runs WHERE rule_id = $1 AND phase = 'applied';
 
 -- name: InsertApplyRun :exec
-INSERT INTO apply_runs (id, tenant_id, rule_id, version, phase, deadline_at, finished_at) VALUES ($1, $2, $3, $4, $5, $6, $7);
+INSERT INTO apply_runs (id, tenant_id, rule_id, version, phase, deadline_at, finished_at, is_rollback) VALUES ($1, $2, $3, $4, $5, $6, $7, $8);
 
 -- name: InsertApplyNodeState :exec
 INSERT INTO apply_node_states (run_id, node_id, status, required_version) VALUES ($1, $2, 'pending', $3);
 
 -- name: ListOpenRuns :many
-SELECT * FROM apply_runs WHERE phase IN ('preparing', 'committing') ORDER BY started_at, id;
+SELECT * FROM apply_runs WHERE phase IN ('preparing', 'committing', 'partially_applied', 'unknown') ORDER BY started_at, id;
 
 -- name: ListRunNodes :many
-SELECT s.node_id, s.required_version, s.status, c.version, c.prepared_version, c.applied_version, c.last_error
-FROM apply_node_states s LEFT JOIN node_configs c ON c.node_id = s.node_id WHERE s.run_id = $1 ORDER BY s.node_id;
+SELECT s.node_id, s.required_version, s.status, c.version, c.prepared_version, c.applied_version, c.last_error, c.commit_sent,
+  coalesce(n.lifecycle, 'offline') AS lifecycle
+FROM apply_node_states s LEFT JOIN node_configs c ON c.node_id = s.node_id LEFT JOIN nodes n ON n.id = s.node_id
+WHERE s.run_id = $1 ORDER BY s.node_id;
 
 -- name: SetRunNodeStatus :exec
 UPDATE apply_node_states SET status = $3, actual_version = $4, error_code = $5, updated_at = now() WHERE run_id = $1 AND node_id = $2;
@@ -105,3 +107,19 @@ WHERE m.node_group_id = $1 AND n.deleted_at IS NULL AND n.lifecycle <> 'disabled
 
 -- name: ListRulesForDeploy :many
 SELECT id, tenant_id, desired_version, service_port, deleted_at FROM rules ORDER BY id;
+
+-- name: SetRunDeadline :exec
+-- RUL-012：部分应用的回滚期限自进入提交起算
+UPDATE apply_runs SET deadline_at = $2 WHERE id = $1;
+
+-- name: RulesNeedingPortSync :many
+-- PRT-007：入口组成员变化后需要重新检查端口的规则（有成员缺少预留，或有预留的节点已不是成员）
+SELECT r.id, r.tenant_id, r.entry_group_id, r.network, r.service_port FROM rules r
+WHERE r.deleted_at IS NULL AND r.enabled AND r.service_port IS NOT NULL AND (
+  EXISTS (SELECT 1 FROM node_group_members m JOIN nodes n ON n.id = m.node_id
+          WHERE m.node_group_id = r.entry_group_id AND n.deleted_at IS NULL AND n.lifecycle <> 'disabled'
+            AND NOT EXISTS (SELECT 1 FROM port_allocations a WHERE a.rule_id = r.id AND a.node_id = m.node_id AND a.state <> 'released'))
+  OR EXISTS (SELECT 1 FROM port_allocations a WHERE a.rule_id = r.id AND a.state IN ('reserved', 'occupied')
+          AND NOT EXISTS (SELECT 1 FROM node_group_members m JOIN nodes n ON n.id = m.node_id
+                          WHERE m.node_group_id = r.entry_group_id AND m.node_id = a.node_id AND n.deleted_at IS NULL AND n.lifecycle <> 'disabled')))
+ORDER BY r.id;

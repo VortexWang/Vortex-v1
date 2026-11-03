@@ -107,7 +107,7 @@ func (s *Service) Create(ctx context.Context, tenant p.UUID, spec Spec) (*Saved,
 			ProxyProtocol: spec.ProxyProtocol, LimitRateBps: i64(spec.RateBps), LimitMaxConns: i32(spec.MaxConns), Enabled: spec.Enabled}); err != nil {
 			return err
 		}
-		if err := reserve(ctx, q, tenant, id, entry, spec); err != nil {
+		if err := reserve(ctx, q, tenant, id, entry, &spec); err != nil {
 			return err
 		}
 		if err := writeChildren(ctx, q, id, spec); err != nil {
@@ -124,15 +124,20 @@ func (s *Service) Create(ctx context.Context, tenant p.UUID, spec Spec) (*Saved,
 
 // Update 修改规则：rowVersion 须与当前一致（乐观并发）；期望版本递增。
 func (s *Service) Update(ctx context.Context, tenant, id p.UUID, rowVersion int64, spec Spec) (*Saved, error) {
-	if err := normalize(&spec); err != nil {
-		return nil, err
-	}
-	entry, err := ParseUUID(string(spec.EntryGroup))
-	if err != nil {
-		return nil, &ValidationError{[]compiler.Problem{{Code: compiler.ErrGroupMissing, Detail: err.Error()}}}
-	}
 	var out *Saved
-	err = p.InTx(ctx, s.DB, func(tx pgx.Tx) error {
+	err := p.InTx(ctx, s.DB, func(tx pgx.Tx) error {
+		var err error
+		out, err = s.update(ctx, db.New(tx), tenant, id, rowVersion, spec)
+		return err
+	})
+	return out, err
+}
+
+// Rollback 以版本 to 的内容生成新的递增版本（RUL-012）：与修改走同一校验（RUL-016：重新检查当前权限与资源，
+// 旧内容不得重新开放已失效的权限）与端口预留。
+func (s *Service) Rollback(ctx context.Context, tenant, id p.UUID, to uint64) (*Saved, error) {
+	var out *Saved
+	err := p.InTx(ctx, s.DB, func(tx pgx.Tx) error {
 		q := db.New(tx)
 		cur, err := q.LockRuleForTenant(ctx, db.LockRuleForTenantParams{ID: id.PG(), TenantID: tenant.PG()})
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -140,39 +145,64 @@ func (s *Service) Update(ctx context.Context, tenant, id p.UUID, rowVersion int6
 		} else if err != nil {
 			return err
 		}
-		next := uint64(cur.DesiredVersion) + 1
-		if err := s.validate(ctx, q, tenant, id, next, withPort(spec)); err != nil {
-			return err
-		}
-		n, err := q.UpdateRuleForTenant(ctx, db.UpdateRuleForTenantParams{ID: id.PG(), TenantID: tenant.PG(), Name: spec.Name,
-			Network: spec.Network, ForwardMode: spec.Mode, EntryGroupID: entry.PG(), ServicePort: port(spec.ServicePort),
-			TargetSchedule: spec.TargetSchedule, ProxyProtocol: spec.ProxyProtocol, LimitRateBps: i64(spec.RateBps),
-			LimitMaxConns: i32(spec.MaxConns), Enabled: spec.Enabled, RowVersion: rowVersion})
+		v, err := q.GetRuleVersion(ctx, db.GetRuleVersionParams{RuleID: id.PG(), Version: int64(to)})
 		if err != nil {
 			return err
 		}
-		if n == 0 {
-			return ErrConflict
-		}
-		if err := reserve(ctx, q, tenant, id, entry, spec); err != nil {
+		var spec Spec
+		if err := json.Unmarshal(v.Snapshot, &spec); err != nil {
 			return err
 		}
-		if err := q.DeleteRulePaths(ctx, id.PG()); err != nil {
-			return err
-		}
-		if err := q.DeleteRuleTargets(ctx, id.PG()); err != nil {
-			return err
-		}
-		if err := writeChildren(ctx, q, id, spec); err != nil {
-			return err
-		}
-		if err := recordVersion(ctx, q, id, next, spec); err != nil {
-			return err
-		}
-		out = &Saved{ID: id, Version: next, RowVersion: rowVersion + 1}
-		return nil
+		out, err = s.update(ctx, q, tenant, id, cur.RowVersion, spec)
+		return err
 	})
 	return out, err
+}
+
+func (s *Service) update(ctx context.Context, q *db.Queries, tenant, id p.UUID, rowVersion int64, spec Spec) (*Saved, error) {
+	if err := normalize(&spec); err != nil {
+		return nil, err
+	}
+	entry, err := ParseUUID(string(spec.EntryGroup))
+	if err != nil {
+		return nil, &ValidationError{[]compiler.Problem{{Code: compiler.ErrGroupMissing, Detail: err.Error()}}}
+	}
+	cur, err := q.LockRuleForTenant(ctx, db.LockRuleForTenantParams{ID: id.PG(), TenantID: tenant.PG()})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	} else if err != nil {
+		return nil, err
+	}
+	next := uint64(cur.DesiredVersion) + 1
+	if err := s.validate(ctx, q, tenant, id, next, withPort(spec)); err != nil {
+		return nil, err
+	}
+	n, err := q.UpdateRuleForTenant(ctx, db.UpdateRuleForTenantParams{ID: id.PG(), TenantID: tenant.PG(), Name: spec.Name,
+		Network: spec.Network, ForwardMode: spec.Mode, EntryGroupID: entry.PG(), ServicePort: port(spec.ServicePort),
+		TargetSchedule: spec.TargetSchedule, ProxyProtocol: spec.ProxyProtocol, LimitRateBps: i64(spec.RateBps),
+		LimitMaxConns: i32(spec.MaxConns), Enabled: spec.Enabled, RowVersion: rowVersion})
+	if err != nil {
+		return nil, err
+	}
+	if n == 0 {
+		return nil, ErrConflict
+	}
+	if err := reserve(ctx, q, tenant, id, entry, &spec); err != nil {
+		return nil, err
+	}
+	if err := q.DeleteRulePaths(ctx, id.PG()); err != nil {
+		return nil, err
+	}
+	if err := q.DeleteRuleTargets(ctx, id.PG()); err != nil {
+		return nil, err
+	}
+	if err := writeChildren(ctx, q, id, spec); err != nil {
+		return nil, err
+	}
+	if err := recordVersion(ctx, q, id, next, spec); err != nil {
+		return nil, err
+	}
+	return &Saved{ID: id, Version: next, RowVersion: rowVersion + 1}, nil
 }
 
 // Delete 删除规则（软删除，保留历史）；端口预留转为 releasing，节点确认不再监听后释放（PRT-009）。
@@ -199,11 +229,15 @@ func withPort(spec Spec) Spec {
 }
 
 // reserve 预留端口（指定或自动分配，PRT-003）。
-func reserve(ctx context.Context, q *db.Queries, tenant, id, entry p.UUID, spec Spec) error {
-	_, err := ports.Reserve(ctx, q, tenant, id, entry, spec.Network, spec.ServicePort)
+// reserve 预留端口，并把选定的端口写回 spec（版本快照记录实际端口，回退时恢复同一端口）。
+func reserve(ctx context.Context, q *db.Queries, tenant, id, entry p.UUID, spec *Spec) error {
+	port, err := ports.Reserve(ctx, q, tenant, id, entry, spec.Network, spec.ServicePort)
 	var ue *ports.UnavailableError
 	if errors.As(err, &ue) || errors.Is(err, ports.ErrExhausted) {
 		return &ValidationError{[]compiler.Problem{{Code: ErrPortUnavailable, Detail: err.Error()}}}
+	}
+	if err == nil {
+		spec.ServicePort = port
 	}
 	return err
 }

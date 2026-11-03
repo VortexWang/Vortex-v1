@@ -133,7 +133,7 @@ func (q *Queries) InsertApplyNodeState(ctx context.Context, arg InsertApplyNodeS
 }
 
 const insertApplyRun = `-- name: InsertApplyRun :exec
-INSERT INTO apply_runs (id, tenant_id, rule_id, version, phase, deadline_at, finished_at) VALUES ($1, $2, $3, $4, $5, $6, $7)
+INSERT INTO apply_runs (id, tenant_id, rule_id, version, phase, deadline_at, finished_at, is_rollback) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 `
 
 type InsertApplyRunParams struct {
@@ -144,6 +144,7 @@ type InsertApplyRunParams struct {
 	Phase      string
 	DeadlineAt pgtype.Timestamptz
 	FinishedAt pgtype.Timestamptz
+	IsRollback bool
 }
 
 func (q *Queries) InsertApplyRun(ctx context.Context, arg InsertApplyRunParams) error {
@@ -155,6 +156,7 @@ func (q *Queries) InsertApplyRun(ctx context.Context, arg InsertApplyRunParams) 
 		arg.Phase,
 		arg.DeadlineAt,
 		arg.FinishedAt,
+		arg.IsRollback,
 	)
 	return err
 }
@@ -369,7 +371,7 @@ func (q *Queries) ListNodeConfigs(ctx context.Context) ([]NodeConfig, error) {
 }
 
 const listOpenRuns = `-- name: ListOpenRuns :many
-SELECT id, tenant_id, rule_id, version, is_rollback, phase, deadline_at, started_at, finished_at FROM apply_runs WHERE phase IN ('preparing', 'committing') ORDER BY started_at, id
+SELECT id, tenant_id, rule_id, version, is_rollback, phase, deadline_at, started_at, finished_at FROM apply_runs WHERE phase IN ('preparing', 'committing', 'partially_applied', 'unknown') ORDER BY started_at, id
 `
 
 func (q *Queries) ListOpenRuns(ctx context.Context) ([]ApplyRun, error) {
@@ -477,8 +479,10 @@ func (q *Queries) ListRulesForDeploy(ctx context.Context) ([]ListRulesForDeployR
 }
 
 const listRunNodes = `-- name: ListRunNodes :many
-SELECT s.node_id, s.required_version, s.status, c.version, c.prepared_version, c.applied_version, c.last_error
-FROM apply_node_states s LEFT JOIN node_configs c ON c.node_id = s.node_id WHERE s.run_id = $1 ORDER BY s.node_id
+SELECT s.node_id, s.required_version, s.status, c.version, c.prepared_version, c.applied_version, c.last_error, c.commit_sent,
+  coalesce(n.lifecycle, 'offline') AS lifecycle
+FROM apply_node_states s LEFT JOIN node_configs c ON c.node_id = s.node_id LEFT JOIN nodes n ON n.id = s.node_id
+WHERE s.run_id = $1 ORDER BY s.node_id
 `
 
 type ListRunNodesRow struct {
@@ -489,6 +493,8 @@ type ListRunNodesRow struct {
 	PreparedVersion *int64
 	AppliedVersion  *int64
 	LastError       *string
+	CommitSent      *int64
+	Lifecycle       string
 }
 
 func (q *Queries) ListRunNodes(ctx context.Context, runID pgtype.UUID) ([]ListRunNodesRow, error) {
@@ -508,6 +514,8 @@ func (q *Queries) ListRunNodes(ctx context.Context, runID pgtype.UUID) ([]ListRu
 			&i.PreparedVersion,
 			&i.AppliedVersion,
 			&i.LastError,
+			&i.CommitSent,
+			&i.Lifecycle,
 		); err != nil {
 			return nil, err
 		}
@@ -652,6 +660,53 @@ func (q *Queries) NodePrepared(ctx context.Context, arg NodePreparedParams) erro
 	return err
 }
 
+const rulesNeedingPortSync = `-- name: RulesNeedingPortSync :many
+SELECT r.id, r.tenant_id, r.entry_group_id, r.network, r.service_port FROM rules r
+WHERE r.deleted_at IS NULL AND r.enabled AND r.service_port IS NOT NULL AND (
+  EXISTS (SELECT 1 FROM node_group_members m JOIN nodes n ON n.id = m.node_id
+          WHERE m.node_group_id = r.entry_group_id AND n.deleted_at IS NULL AND n.lifecycle <> 'disabled'
+            AND NOT EXISTS (SELECT 1 FROM port_allocations a WHERE a.rule_id = r.id AND a.node_id = m.node_id AND a.state <> 'released'))
+  OR EXISTS (SELECT 1 FROM port_allocations a WHERE a.rule_id = r.id AND a.state IN ('reserved', 'occupied')
+          AND NOT EXISTS (SELECT 1 FROM node_group_members m JOIN nodes n ON n.id = m.node_id
+                          WHERE m.node_group_id = r.entry_group_id AND m.node_id = a.node_id AND n.deleted_at IS NULL AND n.lifecycle <> 'disabled')))
+ORDER BY r.id
+`
+
+type RulesNeedingPortSyncRow struct {
+	ID           pgtype.UUID
+	TenantID     pgtype.UUID
+	EntryGroupID pgtype.UUID
+	Network      string
+	ServicePort  *int32
+}
+
+// PRT-007：入口组成员变化后需要重新检查端口的规则（有成员缺少预留，或有预留的节点已不是成员）
+func (q *Queries) RulesNeedingPortSync(ctx context.Context) ([]RulesNeedingPortSyncRow, error) {
+	rows, err := q.db.Query(ctx, rulesNeedingPortSync)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []RulesNeedingPortSyncRow
+	for rows.Next() {
+		var i RulesNeedingPortSyncRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.EntryGroupID,
+			&i.Network,
+			&i.ServicePort,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const setAllocationState = `-- name: SetAllocationState :exec
 UPDATE port_allocations SET state = $2, released_confirmed_at = CASE WHEN $2 = 'released' THEN now() ELSE released_confirmed_at END WHERE id = $1
 `
@@ -692,6 +747,21 @@ type SetRuleSyncParams struct {
 
 func (q *Queries) SetRuleSync(ctx context.Context, arg SetRuleSyncParams) error {
 	_, err := q.db.Exec(ctx, setRuleSync, arg.ID, arg.SyncStatus, arg.DesiredVersion)
+	return err
+}
+
+const setRunDeadline = `-- name: SetRunDeadline :exec
+UPDATE apply_runs SET deadline_at = $2 WHERE id = $1
+`
+
+type SetRunDeadlineParams struct {
+	ID         pgtype.UUID
+	DeadlineAt pgtype.Timestamptz
+}
+
+// RUL-012：部分应用的回滚期限自进入提交起算
+func (q *Queries) SetRunDeadline(ctx context.Context, arg SetRunDeadlineParams) error {
+	_, err := q.db.Exec(ctx, setRunDeadline, arg.ID, arg.DeadlineAt)
 	return err
 }
 

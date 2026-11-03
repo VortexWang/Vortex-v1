@@ -5,8 +5,13 @@
 //	Advance：按节点报告推进——规则的全部节点都准备好后才允许提交（RUL-010 两阶段）；任一节点准备失败则该规则
 //	        版本失败、只撤销本次准备（RUL-011：重新部署时该规则回到上一已生效版本，节点上的未决版本被新版本取代）；
 //	        全部节点生效后规则 applied。端口预留随节点生效转为 occupied，释放中的端口在节点确认不再监听后 released（PRT-009）。
-//
-// 本批未包含：部分应用 120 秒回滚与失联节点的 unknown（RUL-012、RUL-013），在下一批实现。
+//	提交后（RUL-012、RUL-013）：部分节点已生效时 partially_applied，仍未生效的在线节点按 10 秒间隔重发提交；
+//	        自进入提交起 PartialTimeout（120 秒）仍有在线节点未生效则回滚——以上一已生效版本的内容生成新的递增版本
+//	        （rules.Rollback，RUL-016 重新校验），走同一两阶段流程，期间 rolling_back；回滚自身失败（校验不过、准备
+//	        失败或再次超时）则 failed 并告警，不再自动回滚。没有上一已生效版本、或规则已删除时直接 failed 并告警。
+//	        未生效的节点全部失联时 unknown（不回滚、不报成功），节点恢复并生效后转为 applied。
+//	端口（PRT-007、PRT-009）：入口组成员变化后补齐新成员的预留、退出成员的预留转 releasing；准备失败回到上一已生效
+//	        版本时，端口预留随之恢复为该版本的端口，失败版本新预留的端口转 releasing，节点确认不再监听后释放。
 package apply
 
 import (
@@ -15,7 +20,9 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -25,6 +32,7 @@ import (
 	"vortex/backend/compiler"
 	"vortex/backend/internal/db"
 	p "vortex/backend/internal/platform"
+	"vortex/backend/internal/ports"
 	"vortex/backend/internal/rules"
 	runtimev1 "vortex/proto/gen/go/vortex/runtime/v1"
 )
@@ -38,9 +46,29 @@ const (
 // PartialTimeout 是部分应用的回滚期限（RUL-012，附录 A 默认 120 秒）；记录在 apply_runs.deadline_at。
 const PartialTimeout = 120 * time.Second
 
+// CommitRetry 是提交未生效的在线节点重发提交的最小间隔（RUL-012“重试收敛”；测试可调）。
+var CommitRetry = 10 * time.Second
+
 type Service struct {
 	DB     *pgxpool.Pool
 	Notify func() // Outbox 有新内容时唤醒 grpcgw 的投递
+	Log    *slog.Logger
+
+	mu        sync.Mutex
+	rollbacks map[rollbackKey]bool // 回滚生成的（规则, 版本），部署时标记 is_rollback
+	retried   map[p.UUID]time.Time // 节点 → 上次重发提交的时刻
+}
+
+type rollbackKey struct {
+	rule    p.UUID
+	version int64
+}
+
+func (s *Service) log() *slog.Logger {
+	if s.Log == nil {
+		return slog.New(slog.DiscardHandler)
+	}
+	return s.Log
 }
 
 func (s *Service) notify() {
@@ -89,11 +117,14 @@ func (s *Service) Deploy(ctx context.Context) (*DeployResult, error) {
 		if err := q.LockDeploy(ctx); err != nil {
 			return err
 		}
+		if err := s.syncEntryPorts(ctx, q); err != nil {
+			return err
+		}
 		snap, err := rules.LoadSnapshot(ctx, q)
 		if err != nil {
 			return err
 		}
-		if err := fallBackFailed(ctx, q, snap); err != nil {
+		if err := s.fallBackFailed(ctx, q, snap); err != nil {
 			return err
 		}
 		existing := map[p.UUID]db.NodeConfig{}
@@ -174,8 +205,12 @@ func (s *Service) Deploy(ctx context.Context) (*DeployResult, error) {
 				phase, finished = "applied", p.TS(time.Now())
 			}
 			run := p.NewUUIDv7()
+			s.mu.Lock()
+			rb := s.rollbacks[rollbackKey{rid, r.DesiredVersion}]
+			delete(s.rollbacks, rollbackKey{rid, r.DesiredVersion})
+			s.mu.Unlock()
 			if err := q.InsertApplyRun(ctx, db.InsertApplyRunParams{ID: run.PG(), TenantID: r.TenantID, RuleID: r.ID, Version: r.DesiredVersion,
-				Phase: phase, DeadlineAt: p.TS(time.Now().Add(PartialTimeout)), FinishedAt: finished}); err != nil {
+				Phase: phase, DeadlineAt: p.TS(time.Now().Add(PartialTimeout)), FinishedAt: finished, IsRollback: rb}); err != nil {
 				return err
 			}
 			if phase == "preparing" || phase == "failed" { // 失败的版本同样不得提交（随后重新部署取代它）
@@ -187,7 +222,7 @@ func (s *Service) Deploy(ctx context.Context) (*DeployResult, error) {
 				}
 			}
 			if !r.DeletedAt.Valid {
-				if err := q.SetRuleSync(ctx, db.SetRuleSyncParams{ID: r.ID, SyncStatus: phase, DesiredVersion: r.DesiredVersion}); err != nil {
+				if err := q.SetRuleSync(ctx, db.SetRuleSyncParams{ID: r.ID, SyncStatus: ruleSync(phase, rb), DesiredVersion: r.DesiredVersion}); err != nil {
 					return err
 				}
 			}
@@ -202,7 +237,8 @@ func (s *Service) Deploy(ctx context.Context) (*DeployResult, error) {
 }
 
 // fallBackFailed：期望版本的编排已失败的规则，改为编译上一已生效版本（没有则不编译）——只撤销本次准备（RUL-011）。
-func fallBackFailed(ctx context.Context, q *db.Queries, snap *compiler.Snapshot) error {
+// 端口预留随之恢复为该版本的端口（失败版本新预留的转 releasing）。
+func (s *Service) fallBackFailed(ctx context.Context, q *db.Queries, snap *compiler.Snapshot) error {
 	kept := snap.Rules[:0]
 	for _, r := range snap.Rules {
 		id, _ := rules.ParseUUID(string(r.ID))
@@ -230,7 +266,13 @@ func fallBackFailed(ctx context.Context, q *db.Queries, snap *compiler.Snapshot)
 		}
 		old := rules.ToCompiler(id, mustParse(string(r.Tenant)), uint64(good), 0, spec)
 		if old.Port == 0 {
-			old.Port = r.Port // 自动分配：修改时保持原端口
+			old.Port = r.Port // 早期快照未记录端口：保持当前端口
+		}
+		if entry, err := rules.ParseUUID(string(spec.EntryGroup)); err == nil && old.Port != 0 {
+			tenant := mustParse(string(r.Tenant))
+			if _, err := ports.Reserve(ctx, q, tenant, id, entry, spec.Network, old.Port); err != nil {
+				s.log().Warn("restore ports of the last applied version", "rule", id.String(), "port", old.Port, "err", err)
+			}
 		}
 		kept = append(kept, old)
 	}
@@ -240,18 +282,64 @@ func fallBackFailed(ctx context.Context, q *db.Queries, snap *compiler.Snapshot)
 
 func mustParse(s string) p.UUID { u, _ := rules.ParseUUID(s); return u }
 
-// AdvanceResult 是一次推进的摘要。
-type AdvanceResult struct {
-	Committed map[p.UUID]uint64 // 本次下发 Commit 的节点 → 版本
-	Applied   []p.UUID          // 本次完成的规则
-	Failed    []p.UUID          // 本次失败的规则
+// ruleSync 是编排阶段对应的规则同步状态：回滚编排进行中显示 rolling_back（7.5 节）。
+func ruleSync(phase string, rollback bool) string {
+	if rollback && (phase == "preparing" || phase == "committing" || phase == "partially_applied") {
+		return "rolling_back"
+	}
+	return phase
 }
 
-// Advance 按节点报告推进编排。任一规则失败时随后重新部署（回到上一已生效版本）。
+// syncEntryPorts：入口组成员变化后补齐新成员的端口预留、退出成员的预留转 releasing（PRT-007）。新成员上端口不可用时
+// 不静默排除（PRT-005）：记录告警，该成员的准备会失败，规则停留在上一已生效版本。
+func (s *Service) syncEntryPorts(ctx context.Context, q *db.Queries) error {
+	rs, err := q.RulesNeedingPortSync(ctx)
+	if err != nil {
+		return err
+	}
+	for _, r := range rs {
+		if _, err := ports.Reserve(ctx, q, p.FromPG(r.TenantID), p.FromPG(r.ID), p.FromPG(r.EntryGroupID), r.Network, uint16(deref32(r.ServicePort))); err != nil {
+			var ue *ports.UnavailableError
+			if errors.As(err, &ue) || errors.Is(err, ports.ErrExhausted) {
+				s.log().Warn("entry group changed: port unavailable on a member", "rule", p.FromPG(r.ID).String(), "err", err)
+				continue
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+func deref32(v *int32) int32 {
+	if v == nil {
+		return 0
+	}
+	return *v
+}
+
+// AdvanceResult 是一次推进的摘要。
+type AdvanceResult struct {
+	Committed  map[p.UUID]uint64 // 本次下发 Commit 的节点 → 版本
+	Applied    []p.UUID          // 本次完成的规则
+	Failed     []p.UUID          // 本次失败的规则
+	RolledBack []p.UUID          // 本次触发回滚的规则
+}
+
+type rollbackPlan struct {
+	tenant, rule p.UUID
+	from         int64 // 超时的版本
+	to           int64 // 上一已生效版本
+}
+
+// Advance 按节点报告推进编排。任一规则失败时随后重新部署（回到上一已生效版本）；部分应用超时则回滚（RUL-012）。
 func (s *Service) Advance(ctx context.Context) (*AdvanceResult, error) {
 	res := &AdvanceResult{Committed: map[p.UUID]uint64{}}
+	var plans []rollbackPlan
+	var alerts []rollbackPlan
 	err := p.InTx(ctx, s.DB, func(tx pgx.Tx) error {
 		q := db.New(tx)
+		plans, alerts = nil, nil
+		res.Committed, res.Applied, res.Failed = map[p.UUID]uint64{}, nil, nil
 		if err := q.LockDeploy(ctx); err != nil {
 			return err
 		}
@@ -259,13 +347,16 @@ func (s *Service) Advance(ctx context.Context) (*AdvanceResult, error) {
 		if err != nil {
 			return err
 		}
+		now := time.Now()
 		blocked := map[p.UUID]int64{} // 节点 → 仍在准备中的编排要求的最低版本（不得提交到 ≥ 该版本之前的内容）
+		retry := map[p.UUID]int64{}   // 提交后仍未生效的在线节点 → 重发的版本
 		for _, run := range runs {
 			nodes, err := q.ListRunNodes(ctx, run.ID)
 			if err != nil {
 				return err
 			}
 			prepared, applied, failed := true, true, false
+			anyApplied, missingOnline := false, 0
 			for _, n := range nodes {
 				req := deref(n.RequiredVersion)
 				pv, av := deref(n.PreparedVersion), deref(n.AppliedVersion)
@@ -276,8 +367,26 @@ func (s *Service) Advance(ctx context.Context) (*AdvanceResult, error) {
 						_ = q.SetRunNodeStatus(ctx, db.SetRunNodeStatusParams{RunID: run.ID, NodeID: n.NodeID, Status: "prepare_failed", ErrorCode: n.LastError})
 					}
 				}
-				if av < req {
-					applied = false
+				if av >= req {
+					anyApplied = true
+					continue
+				}
+				applied = false
+				if run.Phase == "preparing" {
+					continue
+				}
+				// 已提交、尚未生效
+				switch {
+				case n.Lifecycle != "online":
+					_ = q.SetRunNodeStatus(ctx, db.SetRunNodeStatusParams{RunID: run.ID, NodeID: n.NodeID, Status: "unknown"}) // RUL-013
+				default:
+					missingOnline++
+					if n.LastError != nil && deref(n.CommitSent) >= req {
+						_ = q.SetRunNodeStatus(ctx, db.SetRunNodeStatusParams{RunID: run.ID, NodeID: n.NodeID, Status: "commit_failed", ErrorCode: n.LastError})
+					}
+					if deref(n.CommitSent) >= req && deref(n.CommitSent) == deref(n.Version) {
+						retry[p.FromPG(n.NodeID)] = deref(n.CommitSent)
+					}
 				}
 			}
 			phase := run.Phase
@@ -287,14 +396,38 @@ func (s *Service) Advance(ctx context.Context) (*AdvanceResult, error) {
 				res.Failed = append(res.Failed, p.FromPG(run.RuleID))
 			case phase == "preparing" && prepared:
 				phase = "committing"
-			}
-			if phase == "committing" && applied {
-				phase = "applied"
-				res.Applied = append(res.Applied, p.FromPG(run.RuleID))
-				for _, n := range nodes {
-					av := n.AppliedVersion
-					_ = q.SetRunNodeStatus(ctx, db.SetRunNodeStatusParams{RunID: run.ID, NodeID: n.NodeID, Status: "active", ActualVersion: av})
+				if err := q.SetRunDeadline(ctx, db.SetRunDeadlineParams{ID: run.ID, DeadlineAt: p.TS(now.Add(PartialTimeout))}); err != nil {
+					return err
 				}
+				run.DeadlineAt = p.TS(now.Add(PartialTimeout))
+			}
+			if phase != "preparing" && phase != "failed" && run.Phase != "preparing" { // 刚进入提交：本轮先下发 Commit
+				switch {
+				case applied:
+					phase = "applied"
+					res.Applied = append(res.Applied, p.FromPG(run.RuleID))
+					for _, n := range nodes {
+						av := n.AppliedVersion
+						_ = q.SetRunNodeStatus(ctx, db.SetRunNodeStatusParams{RunID: run.ID, NodeID: n.NodeID, Status: "active", ActualVersion: av})
+					}
+				case missingOnline == 0:
+					phase = "unknown" // 未生效的节点全部失联（RUL-013）：不回滚、不报成功
+				case run.DeadlineAt.Valid && now.After(run.DeadlineAt.Time):
+					phase = "failed" // 超时：回滚（RUL-012）
+					plan := rollbackPlan{tenant: p.FromPG(run.TenantID), rule: p.FromPG(run.RuleID), from: run.Version}
+					if run.IsRollback {
+						alerts = append(alerts, plan) // 回滚自身失败：不再自动回滚
+					} else {
+						plans = append(plans, plan)
+					}
+				case anyApplied:
+					phase = "partially_applied"
+				default:
+					phase = "committing"
+				}
+			}
+			if phase == "failed" && run.Phase == "preparing" && run.IsRollback {
+				alerts = append(alerts, rollbackPlan{tenant: p.FromPG(run.TenantID), rule: p.FromPG(run.RuleID), from: run.Version})
 			}
 			if phase == "preparing" || phase == "failed" { // 失败的版本同样不得提交（随后重新部署取代它）
 				for _, n := range nodes {
@@ -308,10 +441,17 @@ func (s *Service) Advance(ctx context.Context) (*AdvanceResult, error) {
 				if err := q.SetRunPhase(ctx, db.SetRunPhaseParams{ID: run.ID, Phase: phase}); err != nil {
 					return err
 				}
-				if err := q.SetRuleSync(ctx, db.SetRuleSyncParams{ID: run.RuleID, SyncStatus: phase, DesiredVersion: run.Version}); err != nil {
+				if err := q.SetRuleSync(ctx, db.SetRuleSyncParams{ID: run.RuleID, SyncStatus: ruleSync(phase, run.IsRollback), DesiredVersion: run.Version}); err != nil {
 					return err
 				}
 			}
+		}
+		for i := range plans { // 回滚的目标：上一已生效版本
+			good, err := q.LastAppliedVersion(ctx, plans[i].rule.PG())
+			if err != nil {
+				return err
+			}
+			plans[i].to = good
 		}
 		// 提交：节点已准备好最新版本、尚未提交，且没有仍在准备中的编排要求不低于该版本的内容
 		ncs, err := q.ListNodeConfigs(ctx)
@@ -330,13 +470,31 @@ func (s *Service) Advance(ctx context.Context) (*AdvanceResult, error) {
 			if err := q.MarkCommitSent(ctx, db.MarkCommitSentParams{NodeID: nc.NodeID, CommitSent: &pv}); err != nil {
 				return err
 			}
-			payload := make([]byte, 24)
-			copy(payload, n[:])
-			binary.BigEndian.PutUint64(payload[16:], uint64(pv))
-			if err := q.InsertOutbox(ctx, db.InsertOutboxParams{ID: p.NewUUIDv7().PG(), Topic: TopicCommit, Key: n.String(), Payload: payload}); err != nil {
+			if err := commit(ctx, q, n, pv); err != nil {
 				return err
 			}
 			res.Committed[n] = uint64(pv)
+		}
+		// 重试收敛：已提交仍未生效的在线节点，按间隔重发同一提交
+		s.mu.Lock()
+		if s.retried == nil {
+			s.retried = map[p.UUID]time.Time{}
+		}
+		var resend []p.UUID
+		for n := range retry {
+			if last, ok := s.retried[n]; !ok || now.Sub(last) >= CommitRetry {
+				if ok { // 第一次下发不算重试
+					resend = append(resend, n)
+				}
+				s.retried[n] = now
+			}
+		}
+		s.mu.Unlock()
+		for _, n := range resend {
+			if err := commit(ctx, q, n, retry[n]); err != nil {
+				return err
+			}
+			res.Committed[n] = uint64(retry[n])
 		}
 		return settlePorts(ctx, q, ncs)
 	})
@@ -346,12 +504,56 @@ func (s *Service) Advance(ctx context.Context) (*AdvanceResult, error) {
 	if len(res.Committed) > 0 {
 		s.notify()
 	}
-	if len(res.Failed) > 0 {
+	for _, a := range alerts {
+		s.alert(ctx, a, "rollback failed; an administrator must resolve it")
+	}
+	rs := &rules.Service{DB: s.DB}
+	for _, pl := range plans {
+		if pl.to == 0 {
+			s.alert(ctx, pl, "partial apply timed out and there is no applied version to roll back to")
+			continue
+		}
+		s.mu.Lock()
+		if s.rollbacks == nil {
+			s.rollbacks = map[rollbackKey]bool{}
+		}
+		s.mu.Unlock()
+		saved, err := rs.Rollback(ctx, pl.tenant, pl.rule, uint64(pl.to))
+		if err != nil {
+			s.alert(ctx, pl, "rollback rejected: "+err.Error()) // RUL-016 校验不过，或规则已删除
+			continue
+		}
+		s.mu.Lock()
+		s.rollbacks[rollbackKey{pl.rule, int64(saved.Version)}] = true
+		s.mu.Unlock()
+		res.RolledBack = append(res.RolledBack, pl.rule)
+		s.log().Warn("partial apply timed out; rolling back", "rule", pl.rule.String(), "from", pl.from, "to", pl.to, "version", saved.Version)
+	}
+	if len(res.Failed) > 0 || len(res.RolledBack) > 0 {
 		if _, err := s.Deploy(ctx); err != nil {
 			return res, err
 		}
 	}
 	return res, nil
+}
+
+func commit(ctx context.Context, q *db.Queries, n p.UUID, v int64) error {
+	payload := make([]byte, 24)
+	copy(payload, n[:])
+	binary.BigEndian.PutUint64(payload[16:], uint64(v))
+	return q.InsertOutbox(ctx, db.InsertOutboxParams{ID: p.NewUUIDv7().PG(), Topic: TopicCommit, Key: n.String(), Payload: payload})
+}
+
+// alert：回滚无法进行或回滚自身失败——规则置为 failed 并写审计，由管理员处理（RUL-012）。
+func (s *Service) alert(ctx context.Context, pl rollbackPlan, msg string) {
+	s.log().Error("rule apply needs an administrator", "rule", pl.rule.String(), "version", pl.from, "reason", msg)
+	q := db.New(s.DB) // 规则的同步状态已随编排置为 failed
+	detail, _ := json.Marshal(map[string]any{"version": pl.from, "reason": msg})
+	kind, target := "rule", pl.rule.String()
+	if err := q.InsertAudit(ctx, db.InsertAuditParams{ActorKind: "system", TenantID: pl.tenant.PG(), Action: "rule.apply_failed",
+		TargetKind: &kind, TargetID: &target, Detail: detail}); err != nil {
+		s.log().Warn("audit", "err", err)
+	}
 }
 
 // settlePorts：节点已生效的配置中有该监听 → reserved 转 occupied；没有 → releasing 转 released（PRT-009 节点确认）。
