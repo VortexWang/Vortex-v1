@@ -115,3 +115,10 @@ func TestUpUpgradeStatus(t *testing.T) {
 		t.Fatal("corrupt upgrade status accepted")
 	}
 }
+
+func TestUpBudgetRequest(t *testing.T) {
+	m, err := Up(upstream.BudgetRequest{Tenant: model.UUID{7}, RateBps: 12345}, "", "", time.Now())
+	if err != nil || m.GetBudgetRequest().GetRateBillingBps_1H() != 12345 || m.GetBudgetRequest().GetTenantId().GetValue()[0] != 7 {
+		t.Fatalf("%v %v", m, err)
+	}
+}

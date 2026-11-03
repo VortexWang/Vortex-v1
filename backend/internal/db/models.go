@@ -469,6 +469,12 @@ type TenantBalance struct {
 	BalanceBytes int64
 }
 
+type TenantBillingCarry struct {
+	TenantID       pgtype.UUID
+	RemainderMilli int16
+	UpdatedAt      pgtype.Timestamptz
+}
+
 type TrafficPack struct {
 	ID             pgtype.UUID
 	TenantID       pgtype.UUID

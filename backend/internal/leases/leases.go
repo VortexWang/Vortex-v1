@@ -10,8 +10,9 @@
 // 顺延（多留一个续租周期），保证“计入占用”覆盖实例续出的租约；数额变化时生成新租约并作废旧租约，调小先于调大下发。
 //
 // 区域额度（HUB-006、MTR-004）：每个“租户 × 实例”一行。在线且管理该租户执行点的实例参与切分；离线、自治中的实例
-// 额度保持不变并从余额中扣除。全部实例 Σ delegated ≤ 租户余额在锁住订阅行的事务内保证。结算入账（MTR-004 结算
-// 归零）、失联回收（HUB-015）与对账重算在 BE-T18、BE-T22、BE-T23。
+// 额度保持不变并从余额中扣除；在线实例已签发、尚未结算的部分不收回，切分只针对余量。全部实例 Σ delegated ≤ 租户余额
+// 在锁住订阅行的事务内保证。结算入账（SettleBudget，由 metering 在入账事务内调用）把 delegated 下调结算值并累加
+// settled_acked_total（MTR-004）。失联回收（HUB-015）与对账重算在 BE-T22、BE-T23。
 package leases
 
 import (
@@ -58,12 +59,44 @@ type Service struct {
 	mu       sync.Mutex
 	rates    map[budgetKey]uint64 // 实例上报的近 1 小时计费速率（BudgetRequest）
 	reported map[budgetKey]uint64 // 实例注册时报告的已应用额度版本
+	demand   map[demandKey]demandSignal
 	rver     uint64
 	rdigest  [32]byte
 	rsent    uint64
 }
 
 type budgetKey struct{ tenant, hub p.UUID }
+
+type demandKey struct{ node, tenant p.UUID }
+
+type demandSignal struct {
+	value uint64 // 近 60 秒用量 × (1 + 令牌耗尽占比)
+	at    time.Time
+}
+
+// DemandTTL：需求信号超过这个时长未更新即视为 0（执行点每秒上报，两个续租周期内都没有即无流量）。
+const DemandTTL = 2 * RenewEvery
+
+// ReportDemand 记录执行点上报的需求信号（LIM-009）：近 60 秒用量 × (1 + 令牌耗尽时间占比)。
+func (s *Service) ReportDemand(node, tenant p.UUID, bytes60s uint64, starvedPermille uint32) {
+	v := mulDiv(bytes60s, 1000+uint64(min(starvedPermille, 1000)), 1000)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.demand == nil {
+		s.demand = map[demandKey]demandSignal{}
+	}
+	s.demand[demandKey{node, tenant}] = demandSignal{v, time.Now()}
+}
+
+func (s *Service) demandOf(node, tenant p.UUID, now time.Time) uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d, ok := s.demand[demandKey{node, tenant}]
+	if !ok || now.Sub(d.at) > DemandTTL {
+		return 0
+	}
+	return d.value
+}
 
 func (s *Service) log() *slog.Logger {
 	if s.Log == nil {
@@ -309,7 +342,11 @@ func (s *Service) reallocate(ctx context.Context, q *db.Queries, tenant p.UUID) 
 		limits := map[string]uint64{"rate": uint64(plan.RateBps), "conn": uint64(plan.MaxConns)}
 		for _, k := range kinds {
 			avail := limits[k.name] - min(limits[k.name], outside[k.name])
-			targets := SplitShare(avail, make([]uint64, len(set))) // 需求信号在计量入账（BE-T18）后接入
+			demand := make([]uint64, len(set))
+			for i, e := range set {
+				demand[i] = s.demandOf(e.node, tenant, now)
+			}
+			targets := SplitShare(avail, demand)
 			for i, e := range set {
 				c, had := held[k.name][e.node]
 				if had && uint64(c.amount) == targets[i] {
@@ -433,14 +470,28 @@ func (s *Service) rebudget(ctx context.Context, q *db.Queries, tenant, force p.U
 		rates[i] = s.rates[budgetKey{tenant, h}]
 	}
 	s.mu.Unlock()
-	avail := balance - min(balance, held)
+	// 在线实例已签发、尚未结算的部分不收回（MTR-013 只收回尚未签发的部分），先从余额中扣除，切分只针对未签发的余量
+	outs, err := q.OutstandingByHub(ctx, tenant.PG())
+	if err != nil {
+		return nil, err
+	}
+	floor := map[p.UUID]uint64{}
+	var floors uint64
+	for _, o := range outs {
+		h := p.FromPG(o.HubID)
+		if c, ok := cur[h]; ok && online[h] {
+			floor[h] = min(uint64(max(o.Reserved, 0)), uint64(c.delegated))
+			floors += floor[h]
+		}
+	}
+	avail := balance - min(balance, held+floors)
 	targets := map[p.UUID]uint64{}
 	for i, t := range SplitBudget(avail, rates) {
-		targets[hubs[i]] = t
+		targets[hubs[i]] = floor[hubs[i]] + t
 	}
 	for h := range cur {
 		if online[h] && !part[h] {
-			targets[h] = 0 // 在线但不再管理该租户执行点：收回
+			targets[h] = floor[h] // 在线但不再管理该租户执行点：收回未签发的部分
 		}
 	}
 	if force != (p.UUID{}) && online[force] {
@@ -479,6 +530,34 @@ func (s *Service) rebudget(ctx context.Context, q *db.Queries, tenant, force p.U
 		s.log().Warn("regional budgets exceed balance; held by disconnected hubs", "tenant", tenant.String(), "balance", balance, "held", held)
 	}
 	return out, nil
+}
+
+// SettleBudget 入账一次结算（MTR-004，C2b H3、H4）：在调用方事务内（已锁订阅行）把实例的 delegated 下调结算值
+// （不低于 0），累加 settled_acked_total，版本递增。返回新行，提交后由调用方下发 BudgetUpdate。
+func (s *Service) SettleBudget(ctx context.Context, q *db.Queries, tenant, hub p.UUID, settled uint64) (db.SettleBudgetRow, error) {
+	rows, err := q.LockBudget(ctx, db.LockBudgetParams{TenantID: tenant.PG(), HubID: hub.PG()})
+	if err != nil {
+		return db.SettleBudgetRow{}, err
+	}
+	var delegated, acked, version int64
+	if len(rows) == 1 {
+		delegated, acked, version = rows[0].Delegated, rows[0].SettledAckedTotal, rows[0].BudgetVersion
+	}
+	s.mu.Lock()
+	rep := s.reported[budgetKey{tenant, hub}]
+	s.mu.Unlock()
+	cut := int64(min(settled, uint64(delegated)))
+	return q.SettleBudget(ctx, db.SettleBudgetParams{TenantID: tenant.PG(), HubID: hub.PG(), Delegated: delegated - cut,
+		SettledAckedTotal: acked + int64(min(settled, 1<<62)), BudgetVersion: max(version, int64(rep)) + 1})
+}
+
+// SendBudget 下发一行区域额度。
+func (s *Service) SendBudget(r db.SettleBudgetRow) {
+	if send := s.Hubs.Sender(p.FromPG(r.HubID)); send != nil {
+		send(&backendv1.BackendMessage{Body: &backendv1.BackendMessage_Budget{Budget: &backendv1.BudgetUpdate{
+			TenantId: msgUUID(p.FromPG(r.TenantID)), BudgetVersion: uint64(r.BudgetVersion), Delegated: uint64(r.Delegated),
+			SettledAckedTotal: uint64(r.SettledAckedTotal)}}})
+	}
 }
 
 // ---------------------------------------------------------------- 事件

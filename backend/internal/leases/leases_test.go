@@ -581,3 +581,81 @@ func (f *fixture) rules() (p.UUID, p.UUID) {
 	}
 	return ids[0], ids[1]
 }
+
+// LIM-009：需求信号 = 近 60 秒用量 × (1 + 令牌耗尽占比)；超过 DemandTTL 未更新视为 0。
+func TestSharesFollowDemand(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	f.subscribe(f.tenant, 1000, 10, 1<<30)
+	h := f.hub("online", true)
+	a, _ := f.node(h, true, f.tenant)
+	b, _ := f.node(h, true, f.tenant)
+	f.s.ReportDemand(a, f.tenant, 3000, 0)
+	f.s.ReportDemand(b, f.tenant, 1000, 0)
+	if err := f.s.ReallocateShares(ctx, f.tenant); err != nil {
+		t.Fatal(err)
+	}
+	if f.live(a) != "conn:7,rate:625" || f.live(b) != "conn:3,rate:375" {
+		t.Fatalf("by demand a=%s b=%s", f.live(a), f.live(b))
+	}
+	// 被限速（令牌耗尽 100%）的执行点需求加倍
+	f.s.ReportDemand(a, f.tenant, 1000, 1000)
+	f.s.ReportDemand(b, f.tenant, 2000, 0)
+	if err := f.s.ReallocateShares(ctx, f.tenant); err != nil {
+		t.Fatal(err)
+	}
+	if f.live(a) != "conn:5,rate:500" || f.live(b) != "conn:5,rate:500" {
+		t.Fatalf("starved a=%s b=%s", f.live(a), f.live(b))
+	}
+	// 过期的信号不再计入
+	f.s.mu.Lock()
+	d := f.s.demand[demandKey{b, f.tenant}]
+	d.at = d.at.Add(-DemandTTL - time.Second)
+	f.s.demand[demandKey{b, f.tenant}] = d
+	f.s.mu.Unlock()
+	if err := f.s.ReallocateShares(ctx, f.tenant); err != nil {
+		t.Fatal(err)
+	}
+	if f.live(a) != "conn:8,rate:750" || f.live(b) != "conn:2,rate:250" {
+		t.Fatalf("stale demand a=%s b=%s", f.live(a), f.live(b))
+	}
+}
+
+// 重算不收回已签发、尚未结算的部分（MTR-013），切分只针对未签发的余量。
+func TestBudgetKeepsIssued(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	f.subscribe(f.tenant, 1000, 10, 100<<20)
+	rule, _ := f.rules()
+	h := f.hub("online", true)
+	n, boot := f.node(h, false, f.tenant) // 执行点离线：实例不参与切分
+	f.exec("INSERT INTO regional_budgets (tenant_id, hub_id, delegated, budget_version) VALUES ($1, $2, $3, 1)", f.tenant.PG(), h.PG(), int64(64<<20))
+	grant := func(reserved int64, status string) {
+		settledAt := any(nil)
+		if status == "settled" {
+			settledAt = time.Now()
+		}
+		f.exec(`INSERT INTO billing_grants (id, tenant_id, rule_id, node_id, boot_id, hub_id, billing_version, path_coefficient_milli, raw_bytes,
+			reserved_billing_bytes, status, settled_at) VALUES ($1, $2, $3, $4, $5, $6, 0, 1000, $7, $7, $8, $9)`,
+			p.NewUUIDv7().PG(), f.tenant.PG(), rule.PG(), n.PG(), boot.PG(), h.PG(), reserved, status, settledAt)
+	}
+	grant(30<<20, "active")
+	grant(10<<20, "settling")
+	grant(5<<20, "settled")
+	if err := f.s.Rebudget(ctx, f.tenant, p.UUID{}); err != nil {
+		t.Fatal(err)
+	}
+	d := func() string {
+		return f.query("SELECT delegated::text FROM regional_budgets WHERE tenant_id = $1 AND hub_id = $2", f.tenant.PG(), h.PG())
+	}
+	if d() != "41943040" { // 40 MiB
+		t.Fatalf("withdrawn below the issued part: %s", d())
+	}
+	f.exec("UPDATE nodes SET lifecycle = 'online' WHERE id = $1", n.PG())
+	if err := f.s.Rebudget(ctx, f.tenant, p.UUID{}); err != nil {
+		t.Fatal(err)
+	}
+	if d() != "104857600" { // 40 MiB 已签发 + 余额中未签发的 60 MiB
+		t.Fatalf("participant: %s", d())
+	}
+}

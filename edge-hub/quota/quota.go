@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"vortex/edgehub/ledger"
 	"vortex/edgehub/model"
@@ -51,6 +52,23 @@ type account struct {
 	settled   uint64
 	issued    uint64
 	grants    map[model.UUID]reservation
+	recent    []sample // 近 1 小时的签发（计费字节），用于上报近 1 小时平均计费速率（HUB-006）
+}
+
+type sample struct {
+	at    time.Time
+	bytes uint64
+}
+
+// RateWindow 是上报计费速率的统计窗口（HUB-006：近 1 小时平均）。
+const RateWindow = time.Hour
+
+func (a *account) prune(now time.Time) {
+	i := 0
+	for i < len(a.recent) && now.Sub(a.recent[i].at) > RateWindow {
+		i++
+	}
+	a.recent = a.recent[i:]
 }
 
 func (a *account) pending() uint64 {
@@ -79,6 +97,8 @@ type Accounts struct {
 	mu      sync.Mutex
 	l       *ledger.Ledger
 	tenants map[model.UUID]*account
+	// Now 是签发时刻的时钟（默认 time.Now；Edge Hub 用自己的时钟）
+	Now func() time.Time
 }
 
 type issueData struct {
@@ -119,6 +139,13 @@ func New(l *ledger.Ledger) *Accounts {
 // SetLedger 在重放完成后绑定账本（ledger.Open 的重放回调先于 Ledger 可用）。
 func (q *Accounts) SetLedger(l *ledger.Ledger) { q.l = l }
 
+func (q *Accounts) now() time.Time {
+	if q.Now != nil {
+		return q.Now()
+	}
+	return time.Now()
+}
+
 func (q *Accounts) acct(t model.UUID) *account {
 	a := q.tenants[t]
 	if a == nil {
@@ -138,7 +165,7 @@ func (q *Accounts) Replay(e ledger.Entry) (bool, error) {
 		if err := json.Unmarshal(e.Data, &d); err != nil {
 			return true, err
 		}
-		q.applyIssue(d)
+		q.applyIssue(d, e.At)
 	case KindSettle:
 		var d settleData
 		if err := json.Unmarshal(e.Data, &d); err != nil {
@@ -157,10 +184,25 @@ func (q *Accounts) Replay(e ledger.Entry) (bool, error) {
 	return true, nil
 }
 
-func (q *Accounts) applyIssue(d issueData) {
+func (q *Accounts) applyIssue(d issueData, at time.Time) {
 	a := q.acct(d.Tenant)
 	a.grants[d.Grant] = d.reservation
 	a.issued += d.Reserved
+	a.prune(at)
+	a.recent = append(a.recent, sample{at, d.Reserved})
+}
+
+// RateBps1h 返回租户在本实例近 1 小时的平均计费速率（bit/s），按签发的计费字节计（BudgetRequest，HUB-006）。
+func (q *Accounts) RateBps1h(tenant model.UUID, now time.Time) uint64 {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	a := q.acct(tenant)
+	a.prune(now)
+	var sum uint64
+	for _, x := range a.recent {
+		sum += x.bytes
+	}
+	return sum * 8 / uint64(RateWindow/time.Second)
 }
 
 func (q *Accounts) applySettle(d settleData) {
@@ -207,7 +249,7 @@ func (q *Accounts) ReserveWith(tenant, grant model.UUID, raw, coefMilli uint64, 
 	if _, err := q.l.Append(KindIssue, d); err != nil {
 		return 0, err
 	}
-	q.applyIssue(d)
+	q.applyIssue(d, q.now())
 	return reserved, nil
 }
 

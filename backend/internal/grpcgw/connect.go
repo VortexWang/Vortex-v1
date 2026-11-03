@@ -1,7 +1,9 @@
 package grpcgw
 
 import (
+	"bytes"
 	"context"
+	"sort"
 	"sync"
 	"time"
 
@@ -11,6 +13,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"vortex/backend/internal/db"
+	"vortex/backend/internal/metering"
 	p "vortex/backend/internal/platform"
 	backendv1 "vortex/proto/gen/go/vortex/backend/v1"
 	commonv1 "vortex/proto/gen/go/vortex/common/v1"
@@ -229,7 +232,9 @@ func (s *Server) onLedger(ctx context.Context, hub p.UUID, b *backendv1.LedgerEn
 	if len(es) == 0 {
 		return nil
 	}
+	var eff *metering.Effect
 	err := p.InTx(ctx, s.Fleet.DB, func(tx pgx.Tx) error {
+		eff = &metering.Effect{} // 重试时重新收集
 		q := db.New(tx)
 		for _, e := range es {
 			kind, tenant := entryKind(e)
@@ -242,8 +247,14 @@ func (s *Server) onLedger(ctx context.Context, hub p.UUID, b *backendv1.LedgerEn
 			}
 			t := tenant.PG()
 			t.Valid = tenant != (p.UUID{})
-			if _, err := q.InsertLedgerEntry(ctx, db.InsertLedgerEntryParams{HubID: hub.PG(), Seq: int64(e.GetSeq()), Kind: kind, TenantID: t, Payload: raw}); err != nil {
+			n, err := q.InsertLedgerEntry(ctx, db.InsertLedgerEntryParams{HubID: hub.PG(), Seq: int64(e.GetSeq()), Kind: kind, TenantID: t, Payload: raw})
+			if err != nil {
 				return err
+			}
+			if n == 1 && s.Metering != nil { // 首次落库的条目在同一事务内入账（BE-T18）
+				if err := s.Metering.Apply(ctx, q, hub, e, eff); err != nil {
+					return err
+				}
 			}
 		}
 		return nil
@@ -252,7 +263,36 @@ func (s *Server) onLedger(ctx context.Context, hub p.UUID, b *backendv1.LedgerEn
 		return err
 	}
 	send(&backendv1.BackendMessage{Body: &backendv1.BackendMessage_LedgerAck{LedgerAck: &backendv1.LedgerAck{AckedThroughSeq: es[len(es)-1].GetSeq()}}})
+	if s.Leases != nil {
+		eff.Commit(s.Leases)
+		for _, r := range eff.Budgets { // 结算确认（MTR-004）：实例据此把待入账量归零
+			s.Leases.SendBudget(r)
+		}
+		exhausted := false
+		for _, t := range sortedTenants(eff.Tenants) { // 结算后补充区域额度（HUB-006）
+			if err := s.Leases.Rebudget(ctx, t, hub); err != nil {
+				s.log().Warn("budget after settlement", "tenant", t.String(), "err", err)
+			}
+			if bal, err := db.New(s.Fleet.DB).TenantBalance(ctx, t.PG()); err == nil && bal <= 0 {
+				exhausted = true
+			}
+		}
+		if exhausted { // 流量耗尽立即广播限制（不等下一个续租周期）
+			if err := s.Leases.BroadcastRestrictions(ctx); err != nil {
+				s.log().Warn("restrictions after settlement", "err", err)
+			}
+		}
+	}
 	return nil
+}
+
+func sortedTenants(m map[p.UUID]bool) []p.UUID {
+	out := make([]p.UUID, 0, len(m))
+	for t := range m {
+		out = append(out, t)
+	}
+	sort.Slice(out, func(i, j int) bool { return bytes.Compare(out[i][:], out[j][:]) < 0 })
+	return out
 }
 
 func entryKind(e *backendv1.LedgerEntry) (string, p.UUID) {

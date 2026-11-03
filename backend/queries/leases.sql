@@ -76,3 +76,8 @@ SELECT id, mode FROM edge_hubs ORDER BY id;
 -- 持有未到期份额或区域额度的租户
 SELECT DISTINCT tenant_id FROM share_leases WHERE released_at IS NULL AND expires_at > now()
 UNION SELECT DISTINCT tenant_id FROM regional_budgets WHERE delegated > 0;
+
+-- name: OutstandingByHub :many
+-- 各实例已签发、尚未结算的计费字节（区域额度重算不收回这部分，MTR-013“收回尚未签发的部分”）
+SELECT hub_id, sum(reserved_billing_bytes)::bigint AS reserved FROM billing_grants
+WHERE tenant_id = $1 AND status <> 'settled' GROUP BY hub_id ORDER BY hub_id;

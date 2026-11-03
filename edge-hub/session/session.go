@@ -237,6 +237,7 @@ func Open(opt Options) (*Hub, error) {
 		usage: map[usageKey]usageSeen{}, up: opt.Upstream, configs: map[model.UUID]*nodeConfig{}, states: map[model.UUID]*nodeState{}, rules: map[model.UUID]*nodeRules{}}
 	h.Mode = mode.New(opt.Clock)
 	h.Quota = quota.New(nil)
+	h.Quota.Now = opt.Clock.Now
 	h.Issuer = issuer.New(opt.Clock, h.Quota, h.Mode.CanRenewRun)
 	h.Issuer.HubID = opt.HubID
 	h.Issuer.RunGrantTTL = opt.RunTTL

@@ -412,6 +412,37 @@ func (q *Queries) LockTenantLeases(ctx context.Context, tenantID pgtype.UUID) er
 	return err
 }
 
+const outstandingByHub = `-- name: OutstandingByHub :many
+SELECT hub_id, sum(reserved_billing_bytes)::bigint AS reserved FROM billing_grants
+WHERE tenant_id = $1 AND status <> 'settled' GROUP BY hub_id ORDER BY hub_id
+`
+
+type OutstandingByHubRow struct {
+	HubID    pgtype.UUID
+	Reserved int64
+}
+
+// 各实例已签发、尚未结算的计费字节（区域额度重算不收回这部分，MTR-013“收回尚未签发的部分”）
+func (q *Queries) OutstandingByHub(ctx context.Context, tenantID pgtype.UUID) ([]OutstandingByHubRow, error) {
+	rows, err := q.db.Query(ctx, outstandingByHub, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []OutstandingByHubRow
+	for rows.Next() {
+		var i OutstandingByHubRow
+		if err := rows.Scan(&i.HubID, &i.Reserved); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const releaseShareLeases = `-- name: ReleaseShareLeases :exec
 UPDATE share_leases SET released_at = now() WHERE id = ANY($1::uuid[]) AND released_at IS NULL
 `

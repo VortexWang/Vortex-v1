@@ -70,7 +70,10 @@ type NodeForward struct {
 	Msg  session.Passthrough
 }
 
-type BudgetRequest struct{ Tenant model.UUID }
+type BudgetRequest struct {
+	Tenant  model.UUID
+	RateBps uint64 // 近 1 小时平均计费速率（HUB-006）
+}
 
 // NodeStatusBatch 是变化的节点状态（HUB-004）。
 type NodeStatusBatch struct{ Nodes []session.NodeState }
@@ -474,7 +477,7 @@ func (l *Link) Tick() error {
 	}
 	for t := range l.hub.Quota.Versions() {
 		if l.hub.Quota.NeedsTopUp(t) {
-			l.sendUp(BudgetRequest{Tenant: t})
+			l.sendUp(BudgetRequest{Tenant: t, RateBps: l.hub.Quota.RateBps1h(t, l.hub.Clk.Now())})
 		}
 	}
 	return nil

@@ -100,7 +100,7 @@ func Up(m upstream.Up, region, version string, now time.Time) (*backendv1.HubUpM
 		}
 		return &backendv1.HubUpMessage{Body: &backendv1.HubUpMessage_Ledger{Ledger: out}}, nil
 	case upstream.BudgetRequest:
-		return &backendv1.HubUpMessage{Body: &backendv1.HubUpMessage_BudgetRequest{BudgetRequest: &backendv1.BudgetRequest{TenantId: wire.UUID(m.Tenant)}}}, nil
+		return &backendv1.HubUpMessage{Body: &backendv1.HubUpMessage_BudgetRequest{BudgetRequest: &backendv1.BudgetRequest{TenantId: wire.UUID(m.Tenant), RateBillingBps_1H: m.RateBps}}}, nil
 	case upstream.ForeignGrants:
 		f := &backendv1.ForeignGrants{NodeId: wire.UUID(m.Node)}
 		for _, g := range m.Grants {

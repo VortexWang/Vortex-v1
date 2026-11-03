@@ -13,7 +13,7 @@ import (
 
 // 真实后端驱动转发（M4 第四批）：套餐（速率、连接数、基础流量）→ 后端为执行点生成份额租约、为实例委托区域额度、
 // 下发限制快照 → Edge Hub 签发运行授权与计费授权 → 平台入口经自托管出口转发到本机目标。下调套餐速率后，执行点
-// 收到新的份额租约，旧租约作废（LIM-006）。
+// 收到新的份额租约，旧租约作废（LIM-006）。超过一次委托的流量靠结算入账与额度补充继续转发（BE-T18）。
 func TestRealBackendForwarding(t *testing.T) {
 	st := startRealStack(t, backendapp.Options{ReconcileEvery: 300 * time.Millisecond, LeaseEvery: 300 * time.Millisecond})
 	tenant := st.tenant
@@ -61,6 +61,23 @@ func TestRealBackendForwarding(t *testing.T) {
 	// 计费授权由实例从区域额度签发并入账本，账本上报到后端（HUB-012）
 	st.waitSQL("grant issued in ledger", "SELECT (count(*) > 0)::text FROM hub_ledger_entries WHERE kind = 'grant_issued' AND tenant_id = $1",
 		[]any{tenant[:]}, "true")
+
+	// 超过一次委托（64 MiB）的流量：计费授权耗尽后 final 结算 → 后端入账、扣减余额、下调 delegated 并确认 →
+	// 实例补充请求 → 后端按余额补足额度 → 流量继续（MTR-004、HUB-006）
+	const big = 48 << 20 // 回显：执行点上下行合计约 96 MiB
+	if n, _ := transfer(addr, big, 90*time.Second); n != big {
+		t.Fatalf("large transfer moved %d of %d bytes", n, big)
+	}
+	st.waitSQL("grants settled", "SELECT (count(*) >= 2)::text FROM billing_grants WHERE status = 'settled' AND tenant_id = $1", []any{tenant[:]}, "true")
+	// 定点数扣减（MTR-002；路径系数 1.0）：扣减的基础流量恰好等于已结算授权的已用字节；确认累计等于结算累计
+	st.waitSQL("balance deducted by settlements", `SELECT ($2::bigint - s.base_remaining_bytes =
+		  (SELECT coalesce(sum(used_raw_bytes), 0) FROM billing_grants WHERE status = 'settled' AND tenant_id = $1))::text
+		FROM subscriptions s WHERE s.tenant_id = $1`, []any{tenant[:], int64(1 << 30)}, "true")
+	st.waitSQL("acked = settled", `SELECT ((SELECT sum(settled_acked_total) FROM regional_budgets WHERE tenant_id = $1) =
+		  (SELECT sum(settled_billing_bytes) FROM billing_grants WHERE status = 'settled' AND tenant_id = $1))::text`, []any{tenant[:]}, "true")
+	st.waitSQL("Σ delegated ≤ balance", `SELECT ((SELECT sum(delegated) FROM regional_budgets WHERE tenant_id = $1) <=
+		  (SELECT balance_bytes FROM tenant_balances WHERE tenant_id = $1))::text`, []any{tenant[:]}, "true")
+	st.waitSQL("usage recorded", "SELECT (sum(billed_bytes) >= $2)::text FROM usage_daily WHERE tenant_id = $1", []any{tenant[:], int64(64 << 20)}, "true")
 
 	// 下调套餐速率：下一次重算生成新租约，旧租约作废
 	st.exec("UPDATE plans SET rate_bps = 40000000 WHERE id = $1", plan[:])

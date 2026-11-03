@@ -33,6 +33,7 @@ type env struct {
 	fl    *fleet.Service
 	addr  string
 	admin platform.UUID
+	gw    *Server
 }
 
 func setup(t *testing.T) *env {
@@ -50,7 +51,7 @@ func setup(t *testing.T) *env {
 	backendv1.RegisterHubControlServer(srv, gw)
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(srv.Stop)
-	return &env{t: t, dsn: dsn, ca: ca, fl: fl, addr: ln.Addr().String(), admin: apptest.Admin(t, dsn)}
+	return &env{t: t, dsn: dsn, ca: ca, fl: fl, addr: ln.Addr().String(), admin: apptest.Admin(t, dsn), gw: gw}
 }
 
 // client 连接后端；cert 为 nil 时不出示客户端证书。后端身份按平台根与 spiffe://vortex/backend 校验。

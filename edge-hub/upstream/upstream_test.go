@@ -312,6 +312,9 @@ func TestLeasesDrainAndTopUp(t *testing.T) {
 	for _, u := range f.up.take() {
 		if b, ok := u.(BudgetRequest); ok && b.Tenant == tenant {
 			req = true
+			if want := f.h.Quota.View(tenant).Issued * 8 / 3600; b.RateBps != want || want == 0 { // 近 1 小时平均计费速率
+				t.Fatalf("budget request rate %d, want %d", b.RateBps, want)
+			}
 		}
 	}
 	if !req {

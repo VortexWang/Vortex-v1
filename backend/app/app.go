@@ -20,6 +20,7 @@ import (
 	"vortex/backend/internal/fleet"
 	"vortex/backend/internal/grpcgw"
 	"vortex/backend/internal/leases"
+	"vortex/backend/internal/metering"
 	"vortex/backend/internal/pki"
 	"vortex/backend/internal/platform"
 	"vortex/backend/internal/rules"
@@ -167,6 +168,7 @@ func Run(ctx context.Context, cfg *Config, log *slog.Logger, opt Options) error 
 	gw.Apply = ap
 	ls := &leases.Service{DB: pool, Hubs: gw, Log: log}
 	gw.Leases = ls
+	gw.Metering = &metering.Service{Budgets: ls, Log: log}
 	go ls.Run(ctx, opt.LeaseEvery)
 	go gw.RunDelivery(ctx)
 	go reconcileLoop(ctx, ap, opt.ReconcileEvery, log)
