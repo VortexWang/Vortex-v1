@@ -13,11 +13,13 @@ package metering
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"math/big"
 	"math/bits"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"google.golang.org/protobuf/proto"
 
@@ -26,12 +28,14 @@ import (
 	backendv1 "vortex/proto/gen/go/vortex/backend/v1"
 	commonv1 "vortex/proto/gen/go/vortex/common/v1"
 	edgehubv1 "vortex/proto/gen/go/vortex/edgehub/v1"
+	runtimev1 "vortex/proto/gen/go/vortex/runtime/v1"
 )
 
 // Budgets 是区域额度账户（leases.Service 实现）。
 type Budgets interface {
-	// SettleBudget 在调用方事务内把实例的 delegated 下调 settled（不低于 0）、累加 settled_acked_total，版本递增。
-	SettleBudget(ctx context.Context, q *db.Queries, tenant, hub p.UUID, settled uint64) (db.SettleBudgetRow, error)
+	// SettleBudget 在调用方事务内入账一次结算：cut 时把实例的 delegated 下调 settled（不低于 0），ack 时累加
+	// settled_acked_total；版本递增。
+	SettleBudget(ctx context.Context, q *db.Queries, tenant, hub p.UUID, settled uint64, cut, ack bool) (db.SettleBudgetRow, error)
 	// ReportDemand 记录执行点的需求信号（LIM-009）。
 	ReportDemand(node, tenant p.UUID, bytes60s uint64, starvedPermille uint32)
 }
@@ -128,7 +132,7 @@ func (s *Service) issued(ctx context.Context, q *db.Queries, hub p.UUID, g *back
 	return err
 }
 
-// settled 入账一次结算。
+// settled 入账实例账本中的一次结算。
 func (s *Service) settled(ctx context.Context, q *db.Queries, hub p.UUID, m *backendv1.GrantSettled, eff *Effect) error {
 	id, ok1 := uid(m.GetGrantId())
 	tenant, ok2 := uid(m.GetTenantId())
@@ -138,6 +142,13 @@ func (s *Service) settled(ctx context.Context, q *db.Queries, hub p.UUID, m *bac
 	if !m.GetFinal() {
 		return q.NoteGrantUsage(ctx, db.NoteGrantUsageParams{ID: id.PG(), Used: int64(min(m.GetUsedRawBytes(), 1<<62))})
 	}
+	return s.settle(ctx, q, hub, hub, tenant, id, m.GetUsedRawBytes(), m.GetSettledBillingBytes(), true, eff)
+}
+
+// settle 入账一份授权的最终结算。budgetHub 是签发实例（其区域额度下调）；own 表示结算来自签发实例自己的账本，
+// 此时累加它的 settled_acked_total 并下发确认；否则是节点在其他实例上报的、失联实例签发的授权（HUB-015 ①
+// “已报告授权按正常流程结算”），只扣余额与下调委托，不确认（签发实例没有在本地结算它）。
+func (s *Service) settle(ctx context.Context, q *db.Queries, via, budgetHub, tenant, id p.UUID, used, settled uint64, own bool, eff *Effect) error {
 	if _, err := q.LockSubscription(ctx, tenant.PG()); err != nil { // MTR-004：先锁订阅行
 		return err
 	}
@@ -145,19 +156,27 @@ func (s *Service) settled(ctx context.Context, q *db.Queries, hub p.UUID, m *bac
 	if err != nil {
 		return err
 	}
-	settled := m.GetSettledBillingBytes()
 	exact := new(big.Int).Mul(new(big.Int).SetUint64(settled), big.NewInt(1000)) // 千分之一字节；授权未知时按结算值
 	if len(grants) == 1 {
 		g := grants[0]
-		if g.Status == "settled" {
-			return nil // 已结算（例如经另一实例的账本）
+		if g.Status == "settled" || g.Status == "disputed" {
+			if !own {
+				return nil
+			}
+			// 已经入账（例如节点在其他实例上报了最终用量）：只确认，使签发实例的待入账量归零
+			row, err := s.Budgets.SettleBudget(ctx, q, tenant, budgetHub, settled, false, true)
+			if err != nil {
+				return err
+			}
+			eff.Budgets = append(eff.Budgets, row)
+			return nil
 		}
-		hi, lo := bits.Mul64(m.GetUsedRawBytes(), uint64(g.PathCoefficientMilli))
+		hi, lo := bits.Mul64(used, uint64(g.PathCoefficientMilli))
 		exact = new(big.Int).Or(new(big.Int).Lsh(new(big.Int).SetUint64(hi), 64), new(big.Int).SetUint64(lo))
 	} else {
-		s.log().Warn("settlement for an unknown billing grant", "hub", hub.String(), "grant", id.String())
+		s.log().Warn("settlement for an unknown billing grant", "hub", via.String(), "grant", id.String())
 	}
-	bs, err := q.LockBudget(ctx, db.LockBudgetParams{TenantID: tenant.PG(), HubID: hub.PG()})
+	bs, err := q.LockBudget(ctx, db.LockBudgetParams{TenantID: tenant.PG(), HubID: budgetHub.PG()})
 	if err != nil {
 		return err
 	}
@@ -193,24 +212,58 @@ func (s *Service) settled(ctx context.Context, q *db.Queries, hub p.UUID, m *bac
 	if err := q.SetBillingCarry(ctx, db.SetBillingCarryParams{TenantID: tenant.PG(), RemainderMilli: int16(rem.Int64())}); err != nil {
 		return err
 	}
+	// HUB-013 ④：对账中（自治期间）出现的超额消费进入 disputed，72 小时后自动结算（MTR-009）
+	dispute := false
+	if writtenOff.Sign() > 0 && own {
+		mode, err := q.HubMode(ctx, via.PG())
+		if err != nil {
+			return err
+		}
+		dispute = mode == "reconciling"
+	}
 	if len(grants) == 1 {
 		st := int64(settled)
-		if err := q.SettleBillingGrant(ctx, db.SettleBillingGrantParams{ID: id.PG(), Used: int64(min(m.GetUsedRawBytes(), 1<<62)), Settled: &st,
-			WrittenOff: pgtype.Numeric{Int: writtenOff, Exp: -3, Valid: true}}); err != nil {
+		wo := pgtype.Numeric{Int: writtenOff, Exp: -3, Valid: true}
+		u := int64(min(used, 1<<62))
+		if dispute {
+			if err := q.DisputeBillingGrant(ctx, db.DisputeBillingGrantParams{ID: id.PG(), Used: u, Settled: &st, WrittenOff: wo}); err != nil {
+				return err
+			}
+			if err := q.OpenDispute(ctx, id.PG()); err != nil {
+				return err
+			}
+		} else if err := q.SettleBillingGrant(ctx, db.SettleBillingGrantParams{ID: id.PG(), Used: u, Settled: &st, WrittenOff: wo}); err != nil {
 			return err
 		}
 	}
 	if writtenOff.Sign() > 0 {
-		s.log().Warn("billing written off (MTR-013, C2b H4)", "tenant", tenant.String(), "hub", hub.String(), "grant", id.String(),
-			"milli_bytes", writtenOff.String())
+		s.log().Warn("billing written off (MTR-013, C2b H4)", "tenant", tenant.String(), "hub", budgetHub.String(), "grant", id.String(),
+			"milli_bytes", writtenOff.String(), "disputed", dispute)
+		action := "billing.written_off"
+		if dispute {
+			action = "billing.disputed"
+		}
+		if err := audit(ctx, q, budgetHub, tenant, action, id, map[string]any{"written_off_milli": writtenOff.String(), "via_hub": via.String()}); err != nil {
+			return err
+		}
 	}
-	row, err := s.Budgets.SettleBudget(ctx, q, tenant, hub, settled)
+	row, err := s.Budgets.SettleBudget(ctx, q, tenant, budgetHub, settled, true, own)
 	if err != nil {
 		return err
 	}
-	eff.Budgets = append(eff.Budgets, row)
+	if own {
+		eff.Budgets = append(eff.Budgets, row)
+	}
 	eff.Tenants[tenant] = true
 	return nil
+}
+
+func audit(ctx context.Context, q *db.Queries, hub, tenant p.UUID, action string, grant p.UUID, detail map[string]any) error {
+	detail["grant"] = grant.String()
+	raw, _ := json.Marshal(detail)
+	kind, target := "billing_grant", grant.String()
+	return q.InsertAudit(ctx, db.InsertAuditParams{ActorKind: "hub", ActorID: hub.PG(), TenantID: tenant.PG(), Action: action,
+		TargetKind: &kind, TargetID: &target, Detail: raw})
 }
 
 // deduct 从租户余额扣减 amount 字节：先当期基础流量，再按最早到期优先扣流量包；套餐无效时流量包暂停（PLN-003）。
@@ -255,6 +308,45 @@ func deduct(ctx context.Context, q *db.Queries, tenant p.UUID, amount uint64) (u
 	return done, nil
 }
 
+// foreign 入账节点在本实例上报的、其他实例签发的计费授权的消耗（HUB-014 切换后；HUB-015 ①“已报告授权按正常
+// 流程结算”）：本实例不结算它们（Edge Hub 只结算自己签发的），由后端在这里结算，下调签发实例的委托。
+// 签发实例自己的授权由它的结算条目入账，这里跳过。
+func (s *Service) foreign(ctx context.Context, q *db.Queries, via p.UUID, cs []*runtimev1.GrantConsumption, eff *Effect) error {
+	for _, c := range cs {
+		id, ok := uid(c.GetGrantId())
+		if !ok {
+			continue
+		}
+		info, err := q.GrantInfo(ctx, id.PG())
+		if err != nil {
+			return err
+		}
+		if len(info) != 1 || p.FromPG(info[0].HubID) == via || info[0].Status == "settled" || info[0].Status == "disputed" {
+			continue
+		}
+		used := c.GetUsedRawBytes()
+		if !c.GetFinal() {
+			if err := q.NoteGrantUsage(ctx, db.NoteGrantUsageParams{ID: id.PG(), Used: int64(min(used, 1<<62))}); err != nil {
+				return err
+			}
+			continue
+		}
+		cs, err := q.GrantCoefficient(ctx, id.PG())
+		if err != nil || len(cs) != 1 {
+			return err
+		}
+		hi, lo := bits.Mul64(used, uint64(cs[0]))
+		if hi != 0 {
+			continue
+		}
+		settled := (lo + 999) / 1000 // C2b H3：ceil
+		if err := s.settle(ctx, q, via, p.FromPG(info[0].HubID), p.FromPG(info[0].TenantID), id, used, settled, false, eff); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // usage 入账一个计量批次。
 func (s *Service) usage(ctx context.Context, q *db.Queries, hub p.UUID, u *backendv1.NodeUsage, at time.Time, eff *Effect) error {
 	node, ok := uid(u.GetNodeId())
@@ -272,6 +364,9 @@ func (s *Service) usage(ctx context.Context, q *db.Queries, hub p.UUID, u *backe
 		return err // 重复上报不重复入账（MTR-006）
 	}
 	snap := u.GetBatch().GetSnapshot()
+	if err := s.foreign(ctx, q, hub, snap.GetGrantConsumptions(), eff); err != nil {
+		return err
+	}
 	for _, d := range snap.GetDemands() {
 		if t, ok := uid(d.GetTenantId()); ok {
 			eff.demands = append(eff.demands, demand{node, t, d.GetBytes_60S(), d.GetStarvedPermille()})
@@ -345,4 +440,41 @@ func (s *Service) usage(ctx context.Context, q *db.Queries, hub p.UUID, u *backe
 		}
 	}
 	return nil
+}
+
+// ResolveDisputes 自动结算到期的争议（MTR-009）：争议授权在入账时已按 Edge Hub 账本的结算值扣减余额并核销超额，
+// 72 小时内无人工调整即转为 settled 并写审计。返回结算的数量。
+func ResolveDisputes(ctx context.Context, pool interface {
+	Begin(context.Context) (pgx.Tx, error)
+}, log *slog.Logger) (int, error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	q := db.New(tx)
+	due, err := q.DueDisputes(ctx)
+	if err != nil {
+		return 0, err
+	}
+	for _, g := range due {
+		if err := q.SettleDisputedGrant(ctx, g); err != nil {
+			return 0, err
+		}
+		if err := q.ResolveDispute(ctx, db.ResolveDisputeParams{GrantID: g, Resolution: []byte(`{"auto":true,"basis":"hub_ledger"}`)}); err != nil {
+			return 0, err
+		}
+		kind, target := "billing_grant", p.FromPG(g).String()
+		if err := q.InsertAudit(ctx, db.InsertAuditParams{ActorKind: "system", Action: "billing.dispute_auto_settled", TargetKind: &kind,
+			TargetID: &target, Detail: []byte(`{}`)}); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	if len(due) > 0 && log != nil {
+		log.Info("disputes auto-settled", "count", len(due))
+	}
+	return len(due), nil
 }

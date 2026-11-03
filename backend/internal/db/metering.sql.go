@@ -116,6 +116,54 @@ func (q *Queries) DeductPack(ctx context.Context, arg DeductPackParams) error {
 	return err
 }
 
+const disputeBillingGrant = `-- name: DisputeBillingGrant :exec
+UPDATE billing_grants SET status = 'disputed', used_raw_bytes = least($2::bigint, raw_bytes),
+  settled_billing_bytes = $3, written_off_billing = $4::numeric
+WHERE id = $1
+`
+
+type DisputeBillingGrantParams struct {
+	ID         pgtype.UUID
+	Used       int64
+	Settled    *int64
+	WrittenOff pgtype.Numeric
+}
+
+// HUB-013 ④：自治期间的超额消费进入 disputed，72 小时后自动结算（MTR-009）
+func (q *Queries) DisputeBillingGrant(ctx context.Context, arg DisputeBillingGrantParams) error {
+	_, err := q.db.Exec(ctx, disputeBillingGrant,
+		arg.ID,
+		arg.Used,
+		arg.Settled,
+		arg.WrittenOff,
+	)
+	return err
+}
+
+const dueDisputes = `-- name: DueDisputes :many
+SELECT grant_id FROM disputes WHERE resolved_at IS NULL AND auto_settle_at <= now() ORDER BY grant_id FOR UPDATE SKIP LOCKED
+`
+
+func (q *Queries) DueDisputes(ctx context.Context) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, dueDisputes)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []pgtype.UUID
+	for rows.Next() {
+		var grant_id pgtype.UUID
+		if err := rows.Scan(&grant_id); err != nil {
+			return nil, err
+		}
+		items = append(items, grant_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getBillingCarry = `-- name: GetBillingCarry :many
 SELECT remainder_milli FROM tenant_billing_carry WHERE tenant_id = $1 FOR UPDATE
 `
@@ -162,6 +210,47 @@ func (q *Queries) GrantCoefficient(ctx context.Context, id pgtype.UUID) ([]int64
 		return nil, err
 	}
 	return items, nil
+}
+
+const grantInfo = `-- name: GrantInfo :many
+SELECT hub_id, tenant_id, status FROM billing_grants WHERE id = $1
+`
+
+type GrantInfoRow struct {
+	HubID    pgtype.UUID
+	TenantID pgtype.UUID
+	Status   string
+}
+
+func (q *Queries) GrantInfo(ctx context.Context, id pgtype.UUID) ([]GrantInfoRow, error) {
+	rows, err := q.db.Query(ctx, grantInfo, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GrantInfoRow
+	for rows.Next() {
+		var i GrantInfoRow
+		if err := rows.Scan(&i.HubID, &i.TenantID, &i.Status); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const hubMode = `-- name: HubMode :one
+SELECT mode FROM edge_hubs WHERE id = $1
+`
+
+func (q *Queries) HubMode(ctx context.Context, id pgtype.UUID) (string, error) {
+	row := q.db.QueryRow(ctx, hubMode, id)
+	var mode string
+	err := row.Scan(&mode)
+	return mode, err
 }
 
 const insertBillingGrant = `-- name: InsertBillingGrant :execrows
@@ -370,6 +459,15 @@ func (q *Queries) NoteGrantUsage(ctx context.Context, arg NoteGrantUsageParams) 
 	return err
 }
 
+const openDispute = `-- name: OpenDispute :exec
+INSERT INTO disputes (grant_id, auto_settle_at) VALUES ($1, now() + interval '72 hours') ON CONFLICT (grant_id) DO NOTHING
+`
+
+func (q *Queries) OpenDispute(ctx context.Context, grantID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, openDispute, grantID)
+	return err
+}
+
 const planActive = `-- name: PlanActive :one
 SELECT EXISTS (SELECT 1 FROM subscriptions WHERE tenant_id = $1 AND expires_at > now())::boolean
 `
@@ -379,6 +477,20 @@ func (q *Queries) PlanActive(ctx context.Context, tenantID pgtype.UUID) (bool, e
 	var column_1 bool
 	err := row.Scan(&column_1)
 	return column_1, err
+}
+
+const resolveDispute = `-- name: ResolveDispute :exec
+UPDATE disputes SET resolved_at = now(), resolution = $2 WHERE grant_id = $1
+`
+
+type ResolveDisputeParams struct {
+	GrantID    pgtype.UUID
+	Resolution []byte
+}
+
+func (q *Queries) ResolveDispute(ctx context.Context, arg ResolveDisputeParams) error {
+	_, err := q.db.Exec(ctx, resolveDispute, arg.GrantID, arg.Resolution)
+	return err
 }
 
 const ruleTenant = `-- name: RuleTenant :many
@@ -483,4 +595,13 @@ func (q *Queries) SettleBudget(ctx context.Context, arg SettleBudgetParams) (Set
 		&i.BudgetVersion,
 	)
 	return i, err
+}
+
+const settleDisputedGrant = `-- name: SettleDisputedGrant :exec
+UPDATE billing_grants SET status = 'settled', settled_at = now() WHERE id = $1 AND status = 'disputed'
+`
+
+func (q *Queries) SettleDisputedGrant(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, settleDisputedGrant, id)
+	return err
 }

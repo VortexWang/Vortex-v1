@@ -37,13 +37,15 @@ func (s *Server) attach(hub p.UUID, send func(*backendv1.BackendMessage)) *hubCo
 	return c
 }
 
-// detach 移除这条流；同一实例的新流可能已经取代了它，此时不动。
-func (s *Server) detach(hub p.UUID, c *hubConn) {
+// detach 移除这条流；同一实例的新流可能已经取代了它，此时不动并返回 false。
+func (s *Server) detach(hub p.UUID, c *hubConn) bool {
 	s.hubsMu.Lock()
+	defer s.hubsMu.Unlock()
 	if s.hubs[hub] == c {
 		delete(s.hubs, hub)
+		return true
 	}
-	s.hubsMu.Unlock()
+	return false
 }
 
 func (s *Server) hubSender(hub p.UUID) func(*backendv1.BackendMessage) {

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -37,9 +38,38 @@ type realStack struct {
 	admin  [16]byte
 	tenant [16]byte
 	be     *backendapp.Backend
-	hub    string
+	hub    string // 节点注册经由的实例
+	beAddr string
+	hubs   []*realHub
 	log    *slog.Logger
 	nodes  []*realNode
+}
+
+type realHub struct {
+	id   [16]byte
+	addr string
+	stop func() // 停止并等待退出（可重复调用）
+}
+
+// addHub 引导并启动一个 Edge Hub。
+func (st *realStack) addHub(name string) *realHub {
+	t := st.t
+	addr := freePort(t).String()
+	tok, _ := st.be.CreateHubBootstrapToken(st.ctx, "test", time.Hour)
+	cfg, err := hubapp.Enroll(st.ctx, hubapp.EnrollParams{Token: tok, Backend: st.beAddr, CAFile: st.caFile, Region: "test", Listen: addr,
+		DataDir: filepath.Join(st.dir, name), ConfigPath: filepath.Join(st.dir, name+".json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(st.ctx)
+	done := make(chan error, 1)
+	go func() { done <- hubapp.Run(ctx, cfg, st.log, hubapp.Options{}) }()
+	var once sync.Once
+	h := &realHub{addr: addr, stop: func() { once.Do(func() { cancel(); <-done }) }}
+	id, _ := nodeapp.ParseUUID(cfg.HubID)
+	h.id = id
+	st.hubs = append(st.hubs, h)
+	return h
 }
 
 type realNode struct {
@@ -74,16 +104,7 @@ func startRealStack(t *testing.T, opt backendapp.Options) *realStack {
 		cancel()
 		t.Fatal(err)
 	}
-	st.hub = freePort(t).String()
-	tok, _ := st.be.CreateHubBootstrapToken(ctx, "test", time.Hour)
-	hubCfg, err := hubapp.Enroll(ctx, hubapp.EnrollParams{Token: tok, Backend: beAddr, CAFile: caFile, Region: "test", Listen: st.hub,
-		DataDir: filepath.Join(dir, "hub"), ConfigPath: filepath.Join(dir, "hub.json")})
-	if err != nil {
-		cancel()
-		t.Fatal(err)
-	}
-	hubDone := make(chan error, 1)
-	go func() { hubDone <- hubapp.Run(ctx, hubCfg, st.log, hubapp.Options{}) }()
+	st.beAddr = beAddr
 	t.Cleanup(func() {
 		cancel()
 		for _, n := range st.nodes {
@@ -91,9 +112,12 @@ func startRealStack(t *testing.T, opt backendapp.Options) *realStack {
 				<-n.done
 			}
 		}
-		<-hubDone
+		for _, h := range st.hubs {
+			h.stop()
+		}
 		<-beDone
 	})
+	st.hub = st.addHub("hub").addr
 	return st
 }
 

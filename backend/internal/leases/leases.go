@@ -60,9 +60,14 @@ type Service struct {
 	rates    map[budgetKey]uint64 // 实例上报的近 1 小时计费速率（BudgetRequest）
 	reported map[budgetKey]uint64 // 实例注册时报告的已应用额度版本
 	demand   map[demandKey]demandSignal
-	rver     uint64
-	rdigest  [32]byte
-	rsent    uint64
+	foreign  map[p.UUID]foreignReport // 节点 → 最近一次在某实例上报的、其他实例签发的授权（HUB-014）
+
+	// ReclaimAfter：失联实例自最后一次联系起超过这个时长，可回收其全部未结算额度（HUB-015 ②）；
+	// 默认 自治上限 + 运行授权有效期 + 安全余量。
+	ReclaimAfter time.Duration
+	rver         uint64
+	rdigest      [32]byte
+	rsent        uint64
 }
 
 type budgetKey struct{ tenant, hub p.UUID }
@@ -216,6 +221,8 @@ type epNode struct {
 	online          bool            // 已接入实例（有当前启动）
 	applied         bool            // 最新配置已生效
 	tenants         map[p.UUID]bool // 本节点为执行点的租户
+	region          string
+	coef            map[p.UUID]uint64 // 本节点为执行点的规则的路径系数
 }
 
 func loadEPs(ctx context.Context, q *db.Queries) (map[p.UUID]*epNode, error) {
@@ -231,10 +238,14 @@ func loadEPs(ctx context.Context, q *db.Queries) (map[p.UUID]*epNode, error) {
 		}
 		e := &epNode{node: p.FromPG(r.NodeID), hub: p.FromPG(r.EdgeHubID), boot: p.FromPG(r.CurrentBootID),
 			online:  r.Lifecycle == "online" && r.EdgeHubID.Valid && r.CurrentBootID.Valid,
-			applied: r.AppliedVersion != nil && *r.AppliedVersion == r.Version, tenants: map[p.UUID]bool{}}
+			applied: r.AppliedVersion != nil && *r.AppliedVersion == r.Version, tenants: map[p.UUID]bool{}, region: r.Region,
+			coef: map[p.UUID]uint64{}}
 		for _, rule := range cfg.GetRules() {
 			if rule.GetEnforcementPoint() && len(rule.GetTenantId().GetValue()) == 16 {
 				e.tenants[p.UUID(rule.GetTenantId().GetValue())] = true
+				if len(rule.GetRuleId().GetValue()) == 16 {
+					e.coef[p.UUID(rule.GetRuleId().GetValue())] = rule.GetPathCoefficientMilli()
+				}
 			}
 		}
 		out[e.node] = e
@@ -534,7 +545,9 @@ func (s *Service) rebudget(ctx context.Context, q *db.Queries, tenant, force p.U
 
 // SettleBudget 入账一次结算（MTR-004，C2b H3、H4）：在调用方事务内（已锁订阅行）把实例的 delegated 下调结算值
 // （不低于 0），累加 settled_acked_total，版本递增。返回新行，提交后由调用方下发 BudgetUpdate。
-func (s *Service) SettleBudget(ctx context.Context, q *db.Queries, tenant, hub p.UUID, settled uint64) (db.SettleBudgetRow, error) {
+//
+// cut = false 只确认（授权已由其他途径入账）；ack = false 只下调（失联实例签发、节点在其他实例上报的授权，HUB-015 ①）。
+func (s *Service) SettleBudget(ctx context.Context, q *db.Queries, tenant, hub p.UUID, settled uint64, cut, ack bool) (db.SettleBudgetRow, error) {
 	rows, err := q.LockBudget(ctx, db.LockBudgetParams{TenantID: tenant.PG(), HubID: hub.PG()})
 	if err != nil {
 		return db.SettleBudgetRow{}, err
@@ -546,9 +559,14 @@ func (s *Service) SettleBudget(ctx context.Context, q *db.Queries, tenant, hub p
 	s.mu.Lock()
 	rep := s.reported[budgetKey{tenant, hub}]
 	s.mu.Unlock()
-	cut := int64(min(settled, uint64(delegated)))
-	return q.SettleBudget(ctx, db.SettleBudgetParams{TenantID: tenant.PG(), HubID: hub.PG(), Delegated: delegated - cut,
-		SettledAckedTotal: acked + int64(min(settled, 1<<62)), BudgetVersion: max(version, int64(rep)) + 1})
+	if cut {
+		delegated -= int64(min(settled, uint64(delegated)))
+	}
+	if ack {
+		acked += int64(min(settled, 1<<62))
+	}
+	return q.SettleBudget(ctx, db.SettleBudgetParams{TenantID: tenant.PG(), HubID: hub.PG(), Delegated: delegated,
+		SettledAckedTotal: acked, BudgetVersion: max(version, int64(rep)) + 1})
 }
 
 // SendBudget 下发一行区域额度。
@@ -562,8 +580,9 @@ func (s *Service) SendBudget(r db.SettleBudgetRow) {
 
 // ---------------------------------------------------------------- 事件
 
-// HubRegistered：实例注册（在线）时下发限制快照与它的区域额度。reported 是实例本地已应用的额度版本。
-func (s *Service) HubRegistered(ctx context.Context, hub p.UUID, reported map[p.UUID]uint64, online bool) error {
+// HubRegistered：实例注册时下发限制快照并解冻它的区域额度，返回冻结期间被回收过的租户（HUB-017，随对账 STARTED
+// 下发）；在线注册时随后下发它的区域额度，对账中注册在 COMPLETED 之后（HubOnline）。reported 是实例本地已应用的额度版本。
+func (s *Service) HubRegistered(ctx context.Context, hub p.UUID, reported map[p.UUID]uint64, online bool) ([]p.UUID, error) {
 	s.mu.Lock()
 	if s.reported == nil {
 		s.reported = map[budgetKey]uint64{}
@@ -574,15 +593,22 @@ func (s *Service) HubRegistered(ctx context.Context, hub p.UUID, reported map[p.
 	s.mu.Unlock()
 	snap, err := s.Restrictions(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if send := s.Hubs.Sender(hub); send != nil {
 		send(&backendv1.BackendMessage{Body: &backendv1.BackendMessage_Restrictions{Restrictions: snap}})
 	}
-	if !online {
-		return nil // 对账完成后（HubOnline）再下发额度
+	revoked, err := s.thaw(ctx, hub)
+	if err != nil {
+		return nil, err
 	}
-	return s.HubOnline(ctx, hub)
+	if len(revoked) > 0 {
+		s.log().Info("hub reconnected after its budgets were reclaimed", "hub", hub.String(), "tenants", len(revoked))
+	}
+	if !online {
+		return revoked, nil
+	}
+	return revoked, s.HubOnline(ctx, hub)
 }
 
 // HubOnline：实例（重新）在线后，重算并下发与它相关的租户的区域额度。
@@ -686,6 +712,9 @@ func (s *Service) Run(ctx context.Context, every time.Duration) {
 				s.log().Warn("lease tenants", "err", err)
 			}
 			continue
+		}
+		if err := s.Reclaim(ctx); err != nil && ctx.Err() == nil {
+			s.log().Warn("reclaim", "err", err)
 		}
 		if err := s.ReallocateShares(ctx, ts...); err != nil && ctx.Err() == nil {
 			s.log().Warn("shares", "err", err)

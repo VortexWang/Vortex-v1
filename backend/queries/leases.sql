@@ -25,7 +25,7 @@ WHERE s.tenant_id = $1 AND s.expires_at > now();
 
 -- name: ListLeaseNodes :many
 -- 有运行配置的节点及其接入状态（执行点从配置中的规则得出）
-SELECT nc.node_id, nc.config, nc.version, nc.applied_version, n.edge_hub_id, n.current_boot_id, n.lifecycle
+SELECT nc.node_id, nc.config, nc.version, nc.applied_version, n.edge_hub_id, n.current_boot_id, n.lifecycle, n.region
 FROM node_configs nc JOIN nodes n ON n.id = nc.node_id
 WHERE n.deleted_at IS NULL
 ORDER BY nc.node_id;
@@ -81,3 +81,44 @@ UNION SELECT DISTINCT tenant_id FROM regional_budgets WHERE delegated > 0;
 -- 各实例已签发、尚未结算的计费字节（区域额度重算不收回这部分，MTR-013“收回尚未签发的部分”）
 SELECT hub_id, sum(reserved_billing_bytes)::bigint AS reserved FROM billing_grants
 WHERE tenant_id = $1 AND status <> 'settled' GROUP BY hub_id ORDER BY hub_id;
+
+-- 失联实例的额度（BE-T22：HUB-015～HUB-017）
+
+-- name: MarkAllHubsOffline :many
+-- 后端启动：上次运行时连接的实例一律视为失联
+UPDATE edge_hubs SET mode = 'offline' WHERE mode <> 'offline' RETURNING id;
+
+-- name: FreezeHubBudgets :exec
+UPDATE regional_budgets SET frozen = true, frozen_at = now() WHERE hub_id = $1 AND NOT frozen;
+
+-- name: ReclaimedTenants :many
+-- 本次冻结期间被回收过的租户（HUB-017）：冻结时刻之后有回收审计
+SELECT rb.tenant_id FROM regional_budgets rb
+WHERE rb.hub_id = $1 AND rb.frozen AND EXISTS (
+  SELECT 1 FROM audit_logs a WHERE a.action = 'budget.reclaim' AND a.target_kind = 'edge_hub' AND a.target_id = rb.hub_id::text
+    AND a.tenant_id = rb.tenant_id AND a.created_at >= rb.frozen_at)
+ORDER BY rb.tenant_id;
+
+-- name: UnfreezeHubBudgets :exec
+UPDATE regional_budgets SET frozen = false, frozen_at = NULL WHERE hub_id = $1 AND frozen;
+
+-- name: ListFrozenBudgets :many
+SELECT rb.tenant_id, rb.hub_id, rb.delegated, h.region, h.last_contact_at
+FROM regional_budgets rb JOIN edge_hubs h ON h.id = rb.hub_id
+WHERE rb.frozen AND rb.delegated > 0 AND h.mode = 'offline'
+ORDER BY rb.hub_id, rb.tenant_id;
+
+-- name: ReclaimBudget :exec
+UPDATE regional_budgets SET delegated = $3, budget_version = budget_version + 1 WHERE tenant_id = $1 AND hub_id = $2;
+
+-- name: OpenGrantReservations :many
+SELECT id, reserved_billing_bytes FROM billing_grants WHERE id = ANY(sqlc.arg(ids)::uuid[]) AND status <> 'settled';
+
+-- name: InsertAudit :exec
+INSERT INTO audit_logs (actor_kind, actor_id, tenant_id, action, target_kind, target_id, detail) VALUES ($1, $2, $3, $4, $5, $6, $7);
+
+-- name: LockHubBudgets :many
+SELECT tenant_id FROM regional_budgets WHERE hub_id = $1 ORDER BY tenant_id FOR UPDATE;
+
+-- name: LockFrozenBudget :many
+SELECT delegated FROM regional_budgets WHERE tenant_id = $1 AND hub_id = $2 AND frozen FOR UPDATE;

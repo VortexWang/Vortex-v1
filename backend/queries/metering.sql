@@ -81,3 +81,27 @@ ON CONFLICT (tenant_id, rule_id, minute) DO UPDATE SET raw_bytes_up = usage_minu
 INSERT INTO usage_daily (day, tenant_id, rule_id, raw_bytes, billed_bytes) VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (tenant_id, rule_id, day) DO UPDATE SET raw_bytes = usage_daily.raw_bytes + EXCLUDED.raw_bytes,
   billed_bytes = usage_daily.billed_bytes + EXCLUDED.billed_bytes;
+
+-- name: HubMode :one
+SELECT mode FROM edge_hubs WHERE id = $1;
+
+-- name: DisputeBillingGrant :exec
+-- HUB-013 ④：自治期间的超额消费进入 disputed，72 小时后自动结算（MTR-009）
+UPDATE billing_grants SET status = 'disputed', used_raw_bytes = least(sqlc.arg(used)::bigint, raw_bytes),
+  settled_billing_bytes = sqlc.arg(settled), written_off_billing = sqlc.arg(written_off)::numeric
+WHERE id = $1;
+
+-- name: OpenDispute :exec
+INSERT INTO disputes (grant_id, auto_settle_at) VALUES ($1, now() + interval '72 hours') ON CONFLICT (grant_id) DO NOTHING;
+
+-- name: DueDisputes :many
+SELECT grant_id FROM disputes WHERE resolved_at IS NULL AND auto_settle_at <= now() ORDER BY grant_id FOR UPDATE SKIP LOCKED;
+
+-- name: ResolveDispute :exec
+UPDATE disputes SET resolved_at = now(), resolution = $2 WHERE grant_id = $1;
+
+-- name: SettleDisputedGrant :exec
+UPDATE billing_grants SET status = 'settled', settled_at = now() WHERE id = $1 AND status = 'disputed';
+
+-- name: GrantInfo :many
+SELECT hub_id, tenant_id, status FROM billing_grants WHERE id = $1;

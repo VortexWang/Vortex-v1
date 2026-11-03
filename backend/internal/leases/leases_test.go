@@ -391,7 +391,7 @@ func TestBudgets(t *testing.T) {
 	// 离线实例持有 100 MiB：保持不变并从余额中扣除
 	f.exec("INSERT INTO regional_budgets (tenant_id, hub_id, delegated, budget_version) VALUES ($1, $2, $3, 4)", f.tenant.PG(), gone.PG(), int64(100<<20))
 	// 实例报告本地已应用版本 7：后端的新版本必须更大
-	if err := f.s.HubRegistered(ctx, h1, map[p.UUID]uint64{f.tenant: 7}, true); err != nil {
+	if _, err := f.s.HubRegistered(ctx, h1, map[p.UUID]uint64{f.tenant: 7}, true); err != nil {
 		t.Fatal(err)
 	}
 	ms := f.hubs.take(h1)
@@ -406,7 +406,7 @@ func TestBudgets(t *testing.T) {
 		t.Fatalf("other hub %v", b)
 	}
 	// 实例重新注册（额度未变）：仍下发当前值，版本递增
-	if err := f.s.HubRegistered(ctx, h2, nil, true); err != nil {
+	if _, err := f.s.HubRegistered(ctx, h2, nil, true); err != nil {
 		t.Fatal(err)
 	}
 	if b := budgets(f.hubs.take(h2)); len(b) != 1 || b[0].Delegated != 64<<20 || b[0].BudgetVersion != 2 {
@@ -454,7 +454,7 @@ func TestBudgets(t *testing.T) {
 	}
 	// 对账中注册：只下发限制，不下发额度
 	f.hubs.take(h1)
-	if err := f.s.HubRegistered(ctx, h1, nil, false); err != nil {
+	if _, err := f.s.HubRegistered(ctx, h1, nil, false); err != nil {
 		t.Fatal(err)
 	}
 	if b := budgets(f.hubs.take(h1)); len(b) != 0 {

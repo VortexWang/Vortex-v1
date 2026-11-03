@@ -11,6 +11,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
@@ -51,6 +52,8 @@ type Options struct {
 	ReconcileEvery time.Duration
 	// LeaseEvery 是份额重算与限制快照广播的周期；默认 60 秒（LIM-009）
 	LeaseEvery time.Duration
+	// ReclaimAfter 覆盖失联实例额度的超时回收时长（HUB-015 ②，测试用）
+	ReclaimAfter time.Duration
 }
 
 // Backend 是运行中的后端，暴露运维与测试所需的操作。
@@ -142,6 +145,22 @@ func reconcileLoop(ctx context.Context, ap *apply.Service, every time.Duration, 
 	}
 }
 
+// disputeLoop 每分钟自动结算到期的争议（MTR-009）。
+func disputeLoop(ctx context.Context, pool *pgxpool.Pool, log *slog.Logger) {
+	t := time.NewTicker(time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		if _, err := metering.ResolveDisputes(ctx, pool, log); err != nil && ctx.Err() == nil {
+			log.Warn("disputes", "err", err)
+		}
+	}
+}
+
 // Run 运行后端直至 ctx 结束。
 func Run(ctx context.Context, cfg *Config, log *slog.Logger, opt Options) error {
 	if cfg.DatabaseURL == "" {
@@ -166,10 +185,14 @@ func Run(ctx context.Context, cfg *Config, log *slog.Logger, opt Options) error 
 	gw := &grpcgw.Server{Fleet: fl, Log: log, ReconcileQuiet: opt.ReconcileQuiet}
 	ap := &apply.Service{DB: pool, Notify: gw.Wake}
 	gw.Apply = ap
-	ls := &leases.Service{DB: pool, Hubs: gw, Log: log}
+	ls := &leases.Service{DB: pool, Hubs: gw, Log: log, ReclaimAfter: opt.ReclaimAfter}
+	if err := ls.Startup(ctx); err != nil { // 上次运行时连接的实例视为失联，冻结其额度（HUB-015）
+		return fmt.Errorf("startup: %w", err)
+	}
 	gw.Leases = ls
 	gw.Metering = &metering.Service{Budgets: ls, Log: log}
 	go ls.Run(ctx, opt.LeaseEvery)
+	go disputeLoop(ctx, pool, log)
 	go gw.RunDelivery(ctx)
 	go reconcileLoop(ctx, ap, opt.ReconcileEvery, log)
 	ln, err := net.Listen("tcp", cfg.GRPCListen)

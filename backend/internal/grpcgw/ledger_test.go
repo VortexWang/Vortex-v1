@@ -3,6 +3,7 @@ package grpcgw
 import (
 	"context"
 	"testing"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -73,4 +74,65 @@ func TestLedgerSettlement(t *testing.T) {
 		}
 		return false
 	})
+}
+
+// HUB-015：控制流断开即冻结（被同一实例的新流取代时不算失联）；HUB-017：恢复联系的对账 STARTED 带上冻结期间被回收的租户。
+func TestLostHubBudgets(t *testing.T) {
+	e := setup(t)
+	ls := &leases.Service{DB: e.fl.DB, Hubs: e.gw}
+	e.gw.Leases, e.gw.Metering = ls, &metering.Service{Budgets: ls}
+	ctx := context.Background()
+	hub, cert := e.enrollHub("eu")
+	tenant := apptest.Tenant(t, e.dsn)
+	apptest.Exec(t, e.dsn, "INSERT INTO regional_budgets (tenant_id, hub_id, delegated, budget_version) VALUES ($1, $2, 500, 1)", tenant.PG(), hub.PG())
+	row := func() string {
+		var s string
+		apptest.QueryRow(t, e.dsn, "SELECT h.mode || ':' || rb.frozen FROM regional_budgets rb JOIN edge_hubs h ON h.id = rb.hub_id WHERE rb.hub_id = $1",
+			[]any{hub.PG()}, &s)
+		return s
+	}
+	wait := func(want string) {
+		t.Helper()
+		deadline := time.Now().Add(3 * time.Second)
+		for row() != want {
+			if time.Now().After(deadline) {
+				t.Fatalf("got %s, want %s", row(), want)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	register := func(s *stream, mode commonv1.HubMode) {
+		s.send(&backendv1.HubUpMessage{Body: &backendv1.HubUpMessage_Register{Register: &backendv1.HubRegister{Region: "eu", Mode: mode}}})
+		s.expect("restrictions", func(m *backendv1.BackendMessage) bool { return m.GetRestrictions() != nil })
+	}
+	s1 := e.connect(cert)
+	register(s1, commonv1.HubMode_HUB_MODE_ONLINE)
+	s2 := e.connect(cert) // 同一实例的新流取代旧流
+	register(s2, commonv1.HubMode_HUB_MODE_ONLINE)
+	_ = s1.s.CloseSend()
+	time.Sleep(300 * time.Millisecond)
+	if row() != "online:false" {
+		t.Fatalf("superseded stream marked the hub lost: %s", row())
+	}
+	_ = s2.s.CloseSend()
+	wait("offline:true")
+
+	// 注册时没有执行点，额度已被收回；模拟失联时仍持有委托
+	apptest.Exec(t, e.dsn, "UPDATE regional_budgets SET delegated = 500 WHERE hub_id = $1", hub.PG())
+	apptest.Exec(t, e.dsn, "UPDATE edge_hubs SET last_contact_at = now() - interval '13 hours' WHERE id = $1", hub.PG())
+	if err := ls.Reclaim(ctx); err != nil {
+		t.Fatal(err)
+	}
+	s3 := e.connect(cert)
+	register(s3, commonv1.HubMode_HUB_MODE_RECONCILING)
+	m := s3.expect("STARTED", func(m *backendv1.BackendMessage) bool {
+		return m.GetReconcile().GetPhase() == backendv1.ReconcilePhase_RECONCILE_PHASE_STARTED
+	})
+	ids := m.GetReconcile().GetBudgetRevokedTenantIds()
+	if len(ids) != 1 || platform.UUID(ids[0].GetValue()) != tenant {
+		t.Fatalf("revoked tenants %v", ids)
+	}
+	if row() != "reconciling:false" {
+		t.Fatalf("after reconnect %s", row())
+	}
 }

@@ -37,7 +37,6 @@ func (s *Server) Connect(stream grpc.BidiStreamingServer[backendv1.HubUpMessage,
 	ctx, cancel := context.WithCancel(stream.Context())
 	defer cancel()
 	q := db.New(s.Fleet.DB)
-	defer func() { _ = q.SetHubOffline(context.Background(), hub.PG()) }()
 
 	out := make(chan *backendv1.BackendMessage, SendQueue)
 	var overflow sync.Once
@@ -49,7 +48,17 @@ func (s *Server) Connect(stream grpc.BidiStreamingServer[backendv1.HubUpMessage,
 		}
 	}
 	conn := s.attach(hub, send)
-	defer s.detach(hub, conn)
+	defer func() {
+		if !s.detach(hub, conn) {
+			return // 已被同一实例的新流取代
+		}
+		_ = q.SetHubOffline(context.Background(), hub.PG())
+		if s.Leases != nil { // 失联即冻结该实例的区域额度（HUB-015）
+			if err := s.Leases.HubDisconnected(context.Background(), hub); err != nil {
+				s.log().Warn("freeze budgets", "hub", hub.String(), "err", err)
+			}
+		}
+	}()
 	go func() {
 		for {
 			select {
@@ -128,6 +137,10 @@ func (s *Server) Connect(stream grpc.BidiStreamingServer[backendv1.HubUpMessage,
 						}
 					}
 				}
+			case *backendv1.HubUpMessage_ForeignGrants:
+				if n, err := fromMsg(b.ForeignGrants.GetNodeId()); err == nil && s.Leases != nil {
+					s.Leases.ReportForeign(hub, n, b.ForeignGrants.GetGrants())
+				}
 			case *backendv1.HubUpMessage_BudgetRequest:
 				if t, err := fromMsg(b.BudgetRequest.GetTenantId()); err == nil && s.Leases != nil {
 					s.Leases.ReportRate(t, hub, b.BudgetRequest.GetRateBillingBps_1H())
@@ -181,6 +194,7 @@ func (s *Server) onRegister(ctx context.Context, hub p.UUID, r *backendv1.HubReg
 		send(&backendv1.BackendMessage{Body: &backendv1.BackendMessage_LedgerAck{LedgerAck: &backendv1.LedgerAck{AckedThroughSeq: uint64(acked)}}})
 	}
 	reconciling := r.GetMode() == commonv1.HubMode_HUB_MODE_RECONCILING
+	var revoked []p.UUID
 	// 限制快照（HUB-009）；在线时随后下发区域额度（HUB-006），对账中在 COMPLETED 之后下发
 	if s.Leases != nil {
 		reported := map[p.UUID]uint64{}
@@ -189,7 +203,8 @@ func (s *Server) onRegister(ctx context.Context, hub p.UUID, r *backendv1.HubReg
 				reported[t] = bv.GetBudgetVersion()
 			}
 		}
-		if err := s.Leases.HubRegistered(ctx, hub, reported, mode == "online"); err != nil {
+		var err error
+		if revoked, err = s.Leases.HubRegistered(ctx, hub, reported, mode == "online"); err != nil {
 			return err
 		}
 	} else if reconciling {
@@ -198,8 +213,12 @@ func (s *Server) onRegister(ctx context.Context, hub p.UUID, r *backendv1.HubReg
 	}
 	if reconciling {
 		// 恢复对账（HUB-013）：先下发吊销与限制，再 STARTED；Edge Hub 随后上报账本
-		send(&backendv1.BackendMessage{Body: &backendv1.BackendMessage_Reconcile{Reconcile: &backendv1.ReconcileDirective{
-			Phase: backendv1.ReconcilePhase_RECONCILE_PHASE_STARTED}}})
+		// HUB-017：冻结期间额度被回收的租户，对账完成前不得再签发
+		d := &backendv1.ReconcileDirective{Phase: backendv1.ReconcilePhase_RECONCILE_PHASE_STARTED}
+		for _, t := range revoked {
+			d.BudgetRevokedTenantIds = append(d.BudgetRevokedTenantIds, uuidMsg(t))
+		}
+		send(&backendv1.BackendMessage{Body: &backendv1.BackendMessage_Reconcile{Reconcile: d}})
 	}
 	return nil
 }

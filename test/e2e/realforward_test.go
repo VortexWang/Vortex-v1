@@ -7,6 +7,7 @@ import (
 	"time"
 
 	backendapp "vortex/backend/app"
+	"vortex/backend/apptest"
 	"vortex/backend/compiler"
 	edgehubv1 "vortex/proto/gen/go/vortex/edgehub/v1"
 )
@@ -22,28 +23,7 @@ func TestRealBackendForwarding(t *testing.T) {
 	exit := st.enroll("exit", tenant, &edgehubv1.NodeCapabilities{CanExit: true}, exitLink.String()) // 自托管出口：可访问本机（SEC-011）
 	eid, xid := entry.id(), exit.id()
 
-	// 套餐：100 Mbit/s、50 个连接、1 GiB 基础流量；计费版本 0 中入口组倍率 1.0
-	plan := [16]byte{0x9e, 1}
-	st.exec(`INSERT INTO plans (id, name, duration_days, base_traffic_bytes, traffic_reset, max_rules, rate_bps, max_conns)
-		VALUES ($1, 'basic', 30, $2, 'monthly', 10, 100000000, 50)`, plan[:], int64(1<<30))
-	st.exec(`INSERT INTO subscriptions (tenant_id, plan_id, started_at, expires_at, base_period_end, base_remaining_bytes)
-		VALUES ($1, $2, now() - interval '1 day', now() + interval '29 days', now() + interval '29 days', $3)`, tenant[:], plan[:], int64(1<<30))
-	gEntry, gExit := [16]byte{0x9f, 1}, [16]byte{0x9f, 2}
-	st.exec("UPDATE nodes SET public_addresses = '{127.0.0.1}' WHERE id IN ($1, $2)", eid[:], xid[:])
-	st.exec("INSERT INTO node_port_ranges (node_id, kind, port_min, port_max) VALUES ($1, 'link', $2, $2)", xid[:], int32(exitLink.Port()))
-	st.exec("INSERT INTO node_groups (id, name, purpose) VALUES ($1, 'entry', 'entry')", gEntry[:])
-	st.exec("INSERT INTO node_groups (id, tenant_id, name, purpose) VALUES ($1, $2, 'mine', 'exit')", gExit[:], tenant[:])
-	st.exec("INSERT INTO node_group_members (node_group_id, node_id) VALUES ($1, $2), ($3, $4)", gEntry[:], eid[:], gExit[:], xid[:])
-	st.exec("INSERT INTO segment_permits (upstream_group_id, downstream_group_id, created_by) VALUES ($1, $2, $3)", gEntry[:], gExit[:], st.admin[:])
-	st.exec(`INSERT INTO group_multipliers (billing_version_id, node_group_id, multiplier_milli)
-		SELECT id, $1, 1000 FROM billing_versions WHERE version = 0`, gEntry[:])
-	svc := freePort(t)
-	st.exec("INSERT INTO node_port_ranges (node_id, kind, port_min, port_max) VALUES ($1, 'service', $2, $2)", eid[:], int32(svc.Port()))
-
-	tg := target(t)
-	spec := backendapp.RuleSpec{Name: "web", Network: "tcp", Mode: "tunnel", EntryGroup: compiler.UUID(uuidText(gEntry)),
-		Path: []compiler.Segment{{Group: compiler.UUID(uuidText(gExit))}}, Targets: []compiler.Target{{Host: tg.Addr().String(), Port: tg.Port(), Weight: 1}},
-		TargetSchedule: "weighted_round_robin", ProxyProtocol: "off", Enabled: true}
+	plan, svc, spec := st.forwardingSetup(eid, xid, exitLink)
 	saved, err := st.be.CreateRule(st.ctx, tenant, spec)
 	if err != nil {
 		t.Fatal(err)
@@ -85,4 +65,83 @@ func TestRealBackendForwarding(t *testing.T) {
 	if !ok(addr) {
 		t.Fatal("forwarding stopped after the share update")
 	}
+}
+
+// forwardingSetup 准备套餐（100 Mbit/s、50 连接、1 GiB）、平台入口组 → 租户个人出口组、段许可、计费倍率与入口端口，
+// 返回套餐、入口端口与指向本机目标的规则。
+func (st *realStack) forwardingSetup(eid, xid [16]byte, exitLink netip.AddrPort) ([16]byte, netip.AddrPort, backendapp.RuleSpec) {
+	t := st.t
+	// 套餐：100 Mbit/s、50 个连接、1 GiB 基础流量；计费版本 0 中入口组倍率 1.0
+	plan := [16]byte{0x9e, 1}
+	st.exec(`INSERT INTO plans (id, name, duration_days, base_traffic_bytes, traffic_reset, max_rules, rate_bps, max_conns)
+		VALUES ($1, 'basic', 30, $2, 'monthly', 10, 100000000, 50)`, plan[:], int64(1<<30))
+	st.exec(`INSERT INTO subscriptions (tenant_id, plan_id, started_at, expires_at, base_period_end, base_remaining_bytes)
+		VALUES ($1, $2, now() - interval '1 day', now() + interval '29 days', now() + interval '29 days', $3)`, st.tenant[:], plan[:], int64(1<<30))
+	gEntry, gExit := [16]byte{0x9f, 1}, [16]byte{0x9f, 2}
+	st.exec("UPDATE nodes SET public_addresses = '{127.0.0.1}' WHERE id IN ($1, $2)", eid[:], xid[:])
+	st.exec("INSERT INTO node_port_ranges (node_id, kind, port_min, port_max) VALUES ($1, 'link', $2, $2)", xid[:], int32(exitLink.Port()))
+	st.exec("INSERT INTO node_groups (id, name, purpose) VALUES ($1, 'entry', 'entry')", gEntry[:])
+	st.exec("INSERT INTO node_groups (id, tenant_id, name, purpose) VALUES ($1, $2, 'mine', 'exit')", gExit[:], st.tenant[:])
+	st.exec("INSERT INTO node_group_members (node_group_id, node_id) VALUES ($1, $2), ($3, $4)", gEntry[:], eid[:], gExit[:], xid[:])
+	st.exec("INSERT INTO segment_permits (upstream_group_id, downstream_group_id, created_by) VALUES ($1, $2, $3)", gEntry[:], gExit[:], st.admin[:])
+	st.exec(`INSERT INTO group_multipliers (billing_version_id, node_group_id, multiplier_milli)
+		SELECT id, $1, 1000 FROM billing_versions WHERE version = 0`, gEntry[:])
+	svc := freePort(t)
+	st.exec("INSERT INTO node_port_ranges (node_id, kind, port_min, port_max) VALUES ($1, 'service', $2, $2)", eid[:], int32(svc.Port()))
+
+	tg := target(t)
+	spec := backendapp.RuleSpec{Name: "web", Network: "tcp", Mode: "tunnel", EntryGroup: compiler.UUID(uuidText(gEntry)),
+		Path: []compiler.Segment{{Group: compiler.UUID(uuidText(gExit))}}, Targets: []compiler.Target{{Host: tg.Addr().String(), Port: tg.Port(), Weight: 1}},
+		TargetSchedule: "weighted_round_robin", ProxyProtocol: "off", Enabled: true}
+	return plan, svc, spec
+}
+
+// 实例失联（BE-T22，HUB-014～HUB-016）：入口所在的实例停止 → 后端冻结它的区域额度 → 节点切换到同区域另一个实例并
+// 报告持有的授权 → 后端按条件 ① 回收失联实例的额度（保留已报告授权的预留）→ 释放的余额补给接管的实例 → 转发继续。
+func TestRealBackendHubFailover(t *testing.T) {
+	st := startRealStack(t, backendapp.Options{ReconcileEvery: 300 * time.Millisecond, LeaseEvery: 300 * time.Millisecond})
+	st.addHub("hub2") // 节点注册时得到同区域的两个实例
+	exitLink := freePort(t)
+	entry := st.enroll("entry", [16]byte{}, &edgehubv1.NodeCapabilities{CanEntry: true}, "")
+	exit := st.enroll("exit", st.tenant, &edgehubv1.NodeCapabilities{CanExit: true}, exitLink.String())
+	eid, xid := entry.id(), exit.id()
+	_, svc, spec := st.forwardingSetup(eid, xid, exitLink)
+	saved, err := st.be.CreateRule(st.ctx, st.tenant, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.waitSQL("rule applied", "SELECT sync_status FROM rules WHERE id = $1", []any{saved.ID[:]}, "applied")
+	addr := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), svc.Port())
+	eventually(t, "forwarding", func() bool { return ok(addr) })
+	if n, _ := transfer(addr, 4<<20, 30*time.Second); n != 4<<20 { // 签发并使用计费授权
+		t.Fatalf("transfer moved %d", n)
+	}
+
+	var lostID [16]byte
+	apptest.QueryRow(t, st.dsn, "SELECT edge_hub_id FROM nodes WHERE id = $1", []any{eid[:]}, &lostID)
+	var lost, other *realHub
+	for _, h := range st.hubs {
+		if h.id == lostID {
+			lost = h
+		} else {
+			other = h
+		}
+	}
+	if lost == nil || other == nil {
+		t.Fatalf("entry hub %x not among %d hubs", lostID, len(st.hubs))
+	}
+	st.waitSQL("lost hub holds a delegation", "SELECT (delegated > 0)::text FROM regional_budgets WHERE hub_id = $1 AND tenant_id = $2",
+		[]any{lost.id[:], st.tenant[:]}, "true")
+	lost.stop()
+	st.waitSQL("budget frozen", "SELECT frozen::text FROM regional_budgets WHERE hub_id = $1 AND tenant_id = $2", []any{lost.id[:], st.tenant[:]}, "true")
+	st.waitSQL("entry switched hubs", "SELECT (edge_hub_id = $2 AND lifecycle = 'online')::text FROM nodes WHERE id = $1", []any{eid[:], other.id[:]}, "true")
+	st.waitSQL("reclaimed after the held grants were reported", `SELECT coalesce((SELECT detail->>'reason' FROM audit_logs WHERE action = 'budget.reclaim'
+		AND target_id = $1 AND tenant_id = $2 LIMIT 1), '')`, []any{uuidText(lost.id), st.tenant[:]}, "reported")
+	st.waitSQL("taking-over hub topped up", "SELECT (count(*) > 0)::text FROM regional_budgets WHERE hub_id = $1 AND tenant_id = $2 AND delegated > 0",
+		[]any{other.id[:], st.tenant[:]}, "true")
+	eventually(t, "forwarding through the remaining hub", func() bool { return ok(addr) })
+	if n, _ := transfer(addr, 16<<20, 60*time.Second); n != 16<<20 { // 新的计费授权由接管的实例签发
+		t.Fatalf("transfer after failover moved %d", n)
+	}
+	st.waitSQL("grants issued by the taking-over hub", "SELECT (count(*) > 0)::text FROM billing_grants WHERE hub_id = $1", []any{other.id[:]}, "true")
 }

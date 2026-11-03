@@ -37,6 +37,42 @@ func (q *Queries) ExtendShareLease(ctx context.Context, arg ExtendShareLeasePara
 	return err
 }
 
+const freezeHubBudgets = `-- name: FreezeHubBudgets :exec
+UPDATE regional_budgets SET frozen = true, frozen_at = now() WHERE hub_id = $1 AND NOT frozen
+`
+
+func (q *Queries) FreezeHubBudgets(ctx context.Context, hubID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, freezeHubBudgets, hubID)
+	return err
+}
+
+const insertAudit = `-- name: InsertAudit :exec
+INSERT INTO audit_logs (actor_kind, actor_id, tenant_id, action, target_kind, target_id, detail) VALUES ($1, $2, $3, $4, $5, $6, $7)
+`
+
+type InsertAuditParams struct {
+	ActorKind  string
+	ActorID    pgtype.UUID
+	TenantID   pgtype.UUID
+	Action     string
+	TargetKind *string
+	TargetID   *string
+	Detail     []byte
+}
+
+func (q *Queries) InsertAudit(ctx context.Context, arg InsertAuditParams) error {
+	_, err := q.db.Exec(ctx, insertAudit,
+		arg.ActorKind,
+		arg.ActorID,
+		arg.TenantID,
+		arg.Action,
+		arg.TargetKind,
+		arg.TargetID,
+		arg.Detail,
+	)
+	return err
+}
+
 const insertShareLease = `-- name: InsertShareLease :exec
 INSERT INTO share_leases (id, tenant_id, node_id, boot_id, kind, amount, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7)
 `
@@ -84,6 +120,47 @@ func (q *Queries) ListActiveRestrictions(ctx context.Context) ([]ListActiveRestr
 	for rows.Next() {
 		var i ListActiveRestrictionsRow
 		if err := rows.Scan(&i.TenantID, &i.RuleID, &i.Kind); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listFrozenBudgets = `-- name: ListFrozenBudgets :many
+SELECT rb.tenant_id, rb.hub_id, rb.delegated, h.region, h.last_contact_at
+FROM regional_budgets rb JOIN edge_hubs h ON h.id = rb.hub_id
+WHERE rb.frozen AND rb.delegated > 0 AND h.mode = 'offline'
+ORDER BY rb.hub_id, rb.tenant_id
+`
+
+type ListFrozenBudgetsRow struct {
+	TenantID      pgtype.UUID
+	HubID         pgtype.UUID
+	Delegated     int64
+	Region        string
+	LastContactAt pgtype.Timestamptz
+}
+
+func (q *Queries) ListFrozenBudgets(ctx context.Context) ([]ListFrozenBudgetsRow, error) {
+	rows, err := q.db.Query(ctx, listFrozenBudgets)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListFrozenBudgetsRow
+	for rows.Next() {
+		var i ListFrozenBudgetsRow
+		if err := rows.Scan(
+			&i.TenantID,
+			&i.HubID,
+			&i.Delegated,
+			&i.Region,
+			&i.LastContactAt,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -162,7 +239,7 @@ func (q *Queries) ListHubModes(ctx context.Context) ([]ListHubModesRow, error) {
 }
 
 const listLeaseNodes = `-- name: ListLeaseNodes :many
-SELECT nc.node_id, nc.config, nc.version, nc.applied_version, n.edge_hub_id, n.current_boot_id, n.lifecycle
+SELECT nc.node_id, nc.config, nc.version, nc.applied_version, n.edge_hub_id, n.current_boot_id, n.lifecycle, n.region
 FROM node_configs nc JOIN nodes n ON n.id = nc.node_id
 WHERE n.deleted_at IS NULL
 ORDER BY nc.node_id
@@ -176,6 +253,7 @@ type ListLeaseNodesRow struct {
 	EdgeHubID      pgtype.UUID
 	CurrentBootID  pgtype.UUID
 	Lifecycle      string
+	Region         string
 }
 
 // 有运行配置的节点及其接入状态（执行点从配置中的规则得出）
@@ -196,6 +274,7 @@ func (q *Queries) ListLeaseNodes(ctx context.Context) ([]ListLeaseNodesRow, erro
 			&i.EdgeHubID,
 			&i.CurrentBootID,
 			&i.Lifecycle,
+			&i.Region,
 		); err != nil {
 			return nil, err
 		}
@@ -377,6 +456,59 @@ func (q *Queries) ListTenantStanding(ctx context.Context) ([]ListTenantStandingR
 	return items, nil
 }
 
+const lockFrozenBudget = `-- name: LockFrozenBudget :many
+SELECT delegated FROM regional_budgets WHERE tenant_id = $1 AND hub_id = $2 AND frozen FOR UPDATE
+`
+
+type LockFrozenBudgetParams struct {
+	TenantID pgtype.UUID
+	HubID    pgtype.UUID
+}
+
+func (q *Queries) LockFrozenBudget(ctx context.Context, arg LockFrozenBudgetParams) ([]int64, error) {
+	rows, err := q.db.Query(ctx, lockFrozenBudget, arg.TenantID, arg.HubID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var delegated int64
+		if err := rows.Scan(&delegated); err != nil {
+			return nil, err
+		}
+		items = append(items, delegated)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockHubBudgets = `-- name: LockHubBudgets :many
+SELECT tenant_id FROM regional_budgets WHERE hub_id = $1 ORDER BY tenant_id FOR UPDATE
+`
+
+func (q *Queries) LockHubBudgets(ctx context.Context, hubID pgtype.UUID) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, lockHubBudgets, hubID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []pgtype.UUID
+	for rows.Next() {
+		var tenant_id pgtype.UUID
+		if err := rows.Scan(&tenant_id); err != nil {
+			return nil, err
+		}
+		items = append(items, tenant_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockSubscription = `-- name: LockSubscription :many
 SELECT tenant_id FROM subscriptions WHERE tenant_id = $1 FOR UPDATE
 `
@@ -412,6 +544,62 @@ func (q *Queries) LockTenantLeases(ctx context.Context, tenantID pgtype.UUID) er
 	return err
 }
 
+const markAllHubsOffline = `-- name: MarkAllHubsOffline :many
+
+UPDATE edge_hubs SET mode = 'offline' WHERE mode <> 'offline' RETURNING id
+`
+
+// 失联实例的额度（BE-T22：HUB-015～HUB-017）
+// 后端启动：上次运行时连接的实例一律视为失联
+func (q *Queries) MarkAllHubsOffline(ctx context.Context) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, markAllHubsOffline)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []pgtype.UUID
+	for rows.Next() {
+		var id pgtype.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const openGrantReservations = `-- name: OpenGrantReservations :many
+SELECT id, reserved_billing_bytes FROM billing_grants WHERE id = ANY($1::uuid[]) AND status <> 'settled'
+`
+
+type OpenGrantReservationsRow struct {
+	ID                   pgtype.UUID
+	ReservedBillingBytes int64
+}
+
+func (q *Queries) OpenGrantReservations(ctx context.Context, ids []pgtype.UUID) ([]OpenGrantReservationsRow, error) {
+	rows, err := q.db.Query(ctx, openGrantReservations, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []OpenGrantReservationsRow
+	for rows.Next() {
+		var i OpenGrantReservationsRow
+		if err := rows.Scan(&i.ID, &i.ReservedBillingBytes); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const outstandingByHub = `-- name: OutstandingByHub :many
 SELECT hub_id, sum(reserved_billing_bytes)::bigint AS reserved FROM billing_grants
 WHERE tenant_id = $1 AND status <> 'settled' GROUP BY hub_id ORDER BY hub_id
@@ -436,6 +624,50 @@ func (q *Queries) OutstandingByHub(ctx context.Context, tenantID pgtype.UUID) ([
 			return nil, err
 		}
 		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const reclaimBudget = `-- name: ReclaimBudget :exec
+UPDATE regional_budgets SET delegated = $3, budget_version = budget_version + 1 WHERE tenant_id = $1 AND hub_id = $2
+`
+
+type ReclaimBudgetParams struct {
+	TenantID  pgtype.UUID
+	HubID     pgtype.UUID
+	Delegated int64
+}
+
+func (q *Queries) ReclaimBudget(ctx context.Context, arg ReclaimBudgetParams) error {
+	_, err := q.db.Exec(ctx, reclaimBudget, arg.TenantID, arg.HubID, arg.Delegated)
+	return err
+}
+
+const reclaimedTenants = `-- name: ReclaimedTenants :many
+SELECT rb.tenant_id FROM regional_budgets rb
+WHERE rb.hub_id = $1 AND rb.frozen AND EXISTS (
+  SELECT 1 FROM audit_logs a WHERE a.action = 'budget.reclaim' AND a.target_kind = 'edge_hub' AND a.target_id = rb.hub_id::text
+    AND a.tenant_id = rb.tenant_id AND a.created_at >= rb.frozen_at)
+ORDER BY rb.tenant_id
+`
+
+// 本次冻结期间被回收过的租户（HUB-017）：冻结时刻之后有回收审计
+func (q *Queries) ReclaimedTenants(ctx context.Context, hubID pgtype.UUID) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, reclaimedTenants, hubID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []pgtype.UUID
+	for rows.Next() {
+		var tenant_id pgtype.UUID
+		if err := rows.Scan(&tenant_id); err != nil {
+			return nil, err
+		}
+		items = append(items, tenant_id)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -479,6 +711,15 @@ func (q *Queries) TenantPlan(ctx context.Context, tenantID pgtype.UUID) (TenantP
 	var i TenantPlanRow
 	err := row.Scan(&i.RateBps, &i.MaxConns)
 	return i, err
+}
+
+const unfreezeHubBudgets = `-- name: UnfreezeHubBudgets :exec
+UPDATE regional_budgets SET frozen = false, frozen_at = NULL WHERE hub_id = $1 AND frozen
+`
+
+func (q *Queries) UnfreezeHubBudgets(ctx context.Context, hubID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, unfreezeHubBudgets, hubID)
+	return err
 }
 
 const upsertBudget = `-- name: UpsertBudget :one

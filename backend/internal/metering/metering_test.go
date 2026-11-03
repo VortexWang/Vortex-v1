@@ -189,10 +189,11 @@ func TestSettlement(t *testing.T) {
 	if got := f.query("SELECT remainder_milli::text FROM tenant_billing_carry WHERE tenant_id = $1", f.tenant.PG()); got != "500" {
 		t.Fatalf("carry %s", got)
 	}
-	// 已结算的授权不重复入账
-	f.apply(settle(f.tenant, g, 1001, 1502, true))
-	if f.base() != "8499" {
-		t.Fatalf("settled twice: base %s", f.base())
+	// 已入账的授权再次出现在实例的结算条目中（例如已由节点在其他实例上报的消耗结算）：不重复扣减，只确认，
+	// 使实例的待入账量归零
+	eff = f.apply(settle(f.tenant, g, 1001, 1502, true))
+	if f.base() != "8499" || f.budget() != "3498/3004/v3" || len(eff.Budgets) != 1 {
+		t.Fatalf("settled twice: base %s budget %s", f.base(), f.budget())
 	}
 	// 余量累计：1 × 1.5 + 0.5 = 2 字节，余量归 0
 	g2 := f.issued(10, 1500)
@@ -202,13 +203,13 @@ func TestSettlement(t *testing.T) {
 	}
 	// 授权未知（例如签发条目缺失）：按结算值入账
 	f.apply(settle(f.tenant, p.NewUUIDv7(), 0, 7, true))
-	if f.base() != "8490" || f.budget() != "3489/1511/v4" {
+	if f.base() != "8490" || f.budget() != "3489/3013/v5" {
 		t.Fatalf("unknown grant: base %s budget %s", f.base(), f.budget())
 	}
 	// 实例报告的版本更大：新版本超过它
-	f.b.HubRegistered(context.Background(), f.hub, map[p.UUID]uint64{f.tenant: 40}, false)
+	_, _ = f.b.HubRegistered(context.Background(), f.hub, map[p.UUID]uint64{f.tenant: 40}, false)
 	f.apply(settle(f.tenant, p.NewUUIDv7(), 0, 1, true))
-	if f.budget() != "3488/1512/v41" {
+	if f.budget() != "3488/3014/v41" {
 		t.Fatalf("version after report: %s", f.budget())
 	}
 }
@@ -286,5 +287,105 @@ func TestUsageAndTransfer(t *testing.T) {
 		RevokedGrantIds: []*commonv1.Uuid{m(g)}}}})
 	if got := f.query("SELECT status FROM billing_grants WHERE id = $1", g.PG()); got != "settling" {
 		t.Fatalf("status %s", got)
+	}
+}
+
+// 节点在其他实例上报的、失联实例签发的授权消耗（HUB-015 ①）：由后端结算，下调签发实例的委托，不确认、不下发。
+func TestForeignSettlement(t *testing.T) {
+	f := setup(t)
+	f.subscribe(10_000, "10 days")
+	f.delegate(5_000)
+	g := f.issued(4000, 1500) // 由 f.hub 签发
+	via := p.NewUUIDv7()
+	f.exec("INSERT INTO edge_hubs (id, region, address, mode) VALUES ($1, 'eu', 'h:2', 'online')", via.PG())
+	boot := p.NewUUIDv7()
+	batch := func(seq, used uint64, final bool, grant p.UUID) *backendv1.LedgerEntry {
+		return &backendv1.LedgerEntry{Body: &backendv1.LedgerEntry_NodeUsage{NodeUsage: &backendv1.NodeUsage{NodeId: m(f.node),
+			Batch: &edgehubv1.UsageBatch{BootId: m(boot), Seq: seq, Snapshot: &runtimev1.UsageSnapshot{
+				GrantConsumptions: []*runtimev1.GrantConsumption{{GrantId: m(grant), UsedRawBytes: used, Final: final}}}}}}}
+	}
+	apply := func(e *backendv1.LedgerEntry) *Effect {
+		t.Helper()
+		eff := &Effect{}
+		err := p.InTx(context.Background(), f.pool, func(tx pgx.Tx) error {
+			eff = &Effect{}
+			return f.s.Apply(context.Background(), db.New(tx), via, e, eff)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return eff
+	}
+	apply(batch(1, 500, false, g))
+	if got := f.query("SELECT status || ':' || used_raw_bytes FROM billing_grants WHERE id = $1", g.PG()); got != "active:500" || f.base() != "10000" {
+		t.Fatalf("partial %s", got)
+	}
+	// final：1001 × 1.5 → 扣 1501（余量 500），签发实例委托下调 ceil 值 1502，确认累计不变
+	eff := apply(batch(2, 1001, true, g))
+	if f.base() != "8499" || f.budget() != "3498/0/v2" || len(eff.Budgets) != 0 || !eff.Tenants[f.tenant] {
+		t.Fatalf("foreign settlement: base %s budget %s eff %+v", f.base(), f.budget(), eff)
+	}
+	// 签发实例恢复后在自己的账本中结算同一授权：只确认（使它的待入账量归零），不重复扣减
+	f.apply(settle(f.tenant, g, 1001, 1502, true))
+	if f.base() != "8499" || f.budget() != "3498/1502/v3" {
+		t.Fatalf("issuer settles later: base %s budget %s", f.base(), f.budget())
+	}
+	// 经签发实例自己上报的消耗：由它的结算条目入账，这里跳过
+	own := f.issued(4000, 1000)
+	f.apply(&backendv1.LedgerEntry{Body: &backendv1.LedgerEntry_NodeUsage{NodeUsage: &backendv1.NodeUsage{NodeId: m(f.node),
+		Batch: &edgehubv1.UsageBatch{BootId: m(boot), Seq: 3, Snapshot: &runtimev1.UsageSnapshot{
+			GrantConsumptions: []*runtimev1.GrantConsumption{{GrantId: m(own), UsedRawBytes: 10, Final: true}}}}}}})
+	if got := f.query("SELECT status FROM billing_grants WHERE id = $1", own.PG()); got != "active" || f.base() != "8499" {
+		t.Fatalf("own grant settled from usage: %s", got)
+	}
+}
+
+// HUB-013 ④：对账中出现的超额消费进入 disputed；72 小时后自动结算（MTR-009）。正常运行时的核销只写审计。
+func TestDisputes(t *testing.T) {
+	f := setup(t)
+	f.subscribe(10_000, "10 days")
+	f.delegate(100)
+	g := f.issued(1000, 1000)
+	f.apply(settle(f.tenant, g, 300, 300, true)) // 在线：核销 200，写审计
+	if got := f.query("SELECT status || ':' || written_off_billing FROM billing_grants WHERE id = $1", g.PG()); got != "settled:200.000" {
+		t.Fatalf("online overrun %s", got)
+	}
+	if got := f.query("SELECT count(*)::text FROM audit_logs WHERE action = 'billing.written_off' AND tenant_id = $1", f.tenant.PG()); got != "1" {
+		t.Fatalf("audit %s", got)
+	}
+	f.exec("UPDATE edge_hubs SET mode = 'reconciling' WHERE id = $1", f.hub.PG())
+	f.delegate(100)
+	g0 := f.issued(1000, 1000) // 对账中、未超额：正常结算
+	f.apply(settle(f.tenant, g0, 50, 50, true))
+	if got := f.query("SELECT status FROM billing_grants WHERE id = $1", g0.PG()); got != "settled" {
+		t.Fatalf("reconciling without overrun %s", got)
+	}
+	f.delegate(100)
+	g2 := f.issued(1000, 1000)
+	f.apply(settle(f.tenant, g2, 300, 300, true))
+	if got := f.query("SELECT status || ':' || written_off_billing || ':' || (settled_at IS NULL) FROM billing_grants WHERE id = $1", g2.PG()); got != "disputed:200.000:true" {
+		t.Fatalf("reconciling overrun %s", got)
+	}
+	if got := f.query("SELECT (auto_settle_at > now() + interval '71 hours')::text FROM disputes WHERE grant_id = $1", g2.PG()); got != "true" {
+		t.Fatalf("dispute %s", got)
+	}
+	// 争议授权的再次结算：只确认
+	f.apply(settle(f.tenant, g2, 300, 300, true))
+	if f.base() != "9750" {
+		t.Fatalf("base %s", f.base())
+	}
+	if n, err := ResolveDisputes(context.Background(), f.pool, nil); err != nil || n != 0 {
+		t.Fatalf("resolved early: %d %v", n, err)
+	}
+	f.exec("UPDATE disputes SET auto_settle_at = now() - interval '1 second'")
+	if n, err := ResolveDisputes(context.Background(), f.pool, nil); err != nil || n != 1 {
+		t.Fatalf("resolve %d %v", n, err)
+	}
+	if got := f.query("SELECT status || ':' || (settled_at IS NOT NULL) || ':' || (SELECT resolution->>'auto' FROM disputes WHERE grant_id = $1) FROM billing_grants WHERE id = $1",
+		g2.PG()); got != "settled:true:true" {
+		t.Fatalf("after auto-settle %s", got)
+	}
+	if got := f.query("SELECT count(*)::text FROM audit_logs WHERE action IN ('billing.disputed', 'billing.dispute_auto_settled')"); got != "2" {
+		t.Fatalf("audit %s", got)
 	}
 }
