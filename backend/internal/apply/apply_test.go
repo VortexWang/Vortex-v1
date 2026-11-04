@@ -41,6 +41,7 @@ func setup(t *testing.T) *fixture {
 	apptest.Exec(t, dsn, "INSERT INTO node_groups (id, name, purpose) VALUES ($1, 'e', 'entry'), ($2, 'x', 'exit')", f.entry.PG(), f.exit.PG())
 	apptest.Exec(t, dsn, "INSERT INTO node_group_members (node_group_id, node_id) VALUES ($1, $2), ($3, $4)", f.entry.PG(), f.e1.PG(), f.exit.PG(), f.x1.PG())
 	apptest.Exec(t, dsn, "INSERT INTO segment_permits (upstream_group_id, downstream_group_id, created_by) VALUES ($1, $2, $3)", f.entry.PG(), f.exit.PG(), admin.PG())
+	apptest.Entitle(t, dsn, f.tenant)
 	return f
 }
 

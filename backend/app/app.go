@@ -17,8 +17,10 @@ import (
 	"google.golang.org/grpc/keepalive"
 
 	"vortex/backend/internal/apply"
+	"vortex/backend/internal/billing"
 	"vortex/backend/internal/db"
 	"vortex/backend/internal/fleet"
+	"vortex/backend/internal/groups"
 	"vortex/backend/internal/grpcgw"
 	"vortex/backend/internal/leases"
 	"vortex/backend/internal/metering"
@@ -54,6 +56,8 @@ type Options struct {
 	LeaseEvery time.Duration
 	// ReclaimAfter 覆盖失联实例额度的超时回收时长（HUB-015 ②，测试用）
 	ReclaimAfter time.Duration
+	// BillingEvery 是套餐定时任务的周期；默认 1 分钟
+	BillingEvery time.Duration
 }
 
 // Backend 是运行中的后端，暴露运维与测试所需的操作。
@@ -62,6 +66,7 @@ type Backend struct {
 	Rules  *rules.Service
 	Apply  *apply.Service
 	Leases *leases.Service
+	Groups *groups.Service // 节点组、成员、组倍率、段许可（BE-T09）
 }
 
 // CreateRule 保存规则并部署（RUL-010 ①～②：校验、编译、下发准备）。
@@ -193,6 +198,7 @@ func Run(ctx context.Context, cfg *Config, log *slog.Logger, opt Options) error 
 	gw.Metering = &metering.Service{Budgets: ls, Log: log}
 	go ls.Run(ctx, opt.LeaseEvery)
 	go disputeLoop(ctx, pool, log)
+	go (&billing.Service{DB: pool, Budgets: ls, Log: log}).Run(ctx, opt.BillingEvery) // 月度重置、流量包作废、限制记录（BE-T16）
 	go gw.RunDelivery(ctx)
 	go reconcileLoop(ctx, ap, opt.ReconcileEvery, log)
 	ln, err := net.Listen("tcp", cfg.GRPCListen)
@@ -208,7 +214,16 @@ func Run(ctx context.Context, cfg *Config, log *slog.Logger, opt Options) error 
 		opt.OnListen(ln.Addr().String())
 	}
 	if opt.OnReady != nil {
-		opt.OnReady(&Backend{Fleet: fl, Rules: &rules.Service{DB: pool}, Apply: ap, Leases: ls})
+		opt.OnReady(&Backend{Fleet: fl, Rules: &rules.Service{DB: pool}, Apply: ap, Leases: ls, Groups: &groups.Service{DB: pool,
+			Changed: func(ctx context.Context) { // 成员与段许可变化：重新部署（PRT-007）并推进
+				if _, err := ap.Deploy(ctx); err != nil {
+					log.Warn("deploy after a group change", "err", err)
+				}
+				if _, err := ap.Advance(ctx); err != nil {
+					log.Warn("advance after a group change", "err", err)
+				}
+			},
+			BillingChanged: gw.BroadcastBillingVersions}})
 	}
 	<-ctx.Done()
 	srv.Stop()

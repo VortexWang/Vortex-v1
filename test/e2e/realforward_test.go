@@ -88,6 +88,7 @@ func (st *realStack) forwardingSetup(eid, xid [16]byte, exitLink netip.AddrPort)
 		SELECT id, $1, 1000 FROM billing_versions WHERE version = 0`, gEntry[:])
 	svc := freePort(t)
 	st.exec("INSERT INTO node_port_ranges (node_id, kind, port_min, port_max) VALUES ($1, 'service', $2, $2)", eid[:], int32(svc.Port()))
+	apptest.Entitle(t, st.dsn, st.tenant)
 
 	tg := target(t)
 	spec := backendapp.RuleSpec{Name: "web", Network: "tcp", Mode: "tunnel", EntryGroup: compiler.UUID(uuidText(gEntry)),

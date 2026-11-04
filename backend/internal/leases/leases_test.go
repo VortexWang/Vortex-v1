@@ -568,6 +568,7 @@ func (f *fixture) rules() (p.UUID, p.UUID) {
 	f.exec("INSERT INTO billing_versions (id, version, effective_at) VALUES ($1, 0, now()) ON CONFLICT (version) DO NOTHING", p.NewUUIDv7().PG())
 	f.exec(`INSERT INTO group_multipliers (billing_version_id, node_group_id, multiplier_milli)
 		SELECT id, g, 1000 FROM billing_versions, unnest(ARRAY[$1::uuid, $2::uuid]) g WHERE version = 0`, ge.PG(), gx.PG())
+	apptest.Entitle(f.t, f.dsn, f.tenant)
 	svc := &rules.Service{DB: f.s.DB}
 	var ids []p.UUID
 	for _, port := range []uint16{20001, 20002} {
@@ -657,5 +658,21 @@ func TestBudgetKeepsIssued(t *testing.T) {
 	}
 	if d() != "104857600" { // 40 MiB 已签发 + 余额中未签发的 60 MiB
 		t.Fatalf("participant: %s", d())
+	}
+}
+
+// PLN-001：份额按有效上限（套餐与平台硬限制取最小值）切分。
+func TestSharesUsePlatformLimits(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	f.subscribe(f.tenant, 1000, 10, 1<<30)
+	h := f.hub("online", true)
+	a, _ := f.node(h, true, f.tenant)
+	f.exec(`INSERT INTO settings (key, value) VALUES ('platform_limits', '{"rate_bps":600,"max_conns":20}')`)
+	if err := f.s.ReallocateShares(ctx, f.tenant); err != nil {
+		t.Fatal(err)
+	}
+	if f.live(a) != "conn:10,rate:600" {
+		t.Fatalf("shares %s", f.live(a))
 	}
 }

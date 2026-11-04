@@ -133,3 +133,24 @@ func QueryRow(t testing.TB, dsn, sql string, args []any, dest ...any) {
 		t.Fatal(err)
 	}
 }
+
+// Entitle 让租户可以保存规则（测试用）：没有主套餐时建一个宽松的套餐（1 TiB、10 Gbit/s、10000 连接、1000 条规则）；
+// 给其主套餐授予全部协议与转发方式、自托管，以及调用时已存在的全部平台节点组（不含反向建链）。可重复调用。
+func Entitle(t testing.TB, dsn string, tenant platform.UUID) {
+	t.Helper()
+	plan := platform.NewUUIDv7()
+	exec(t, dsn, `INSERT INTO plans (id, name, duration_days, base_traffic_bytes, traffic_reset, max_rules, rate_bps, max_conns)
+		SELECT $1, 'test', 365, 1099511627776, 'monthly', 1000, 10000000000, 10000
+		WHERE NOT EXISTS (SELECT 1 FROM subscriptions WHERE tenant_id = $2)`, plan.PG(), tenant.PG())
+	exec(t, dsn, `INSERT INTO subscriptions (tenant_id, plan_id, started_at, expires_at, base_period_end, base_remaining_bytes)
+		SELECT $1, id, now() - interval '1 day', now() + interval '364 days', now() + interval '29 days', base_traffic_bytes
+		FROM plans WHERE id = $2 AND NOT EXISTS (SELECT 1 FROM subscriptions WHERE tenant_id = $1)`, tenant.PG(), plan.PG())
+	exec(t, dsn, `INSERT INTO plan_entitlements (plan_id, kind, value)
+		SELECT s.plan_id, e.kind, e.value FROM subscriptions s,
+		  (VALUES ('protocol','tcp'), ('protocol','udp'), ('forward_mode','direct'), ('forward_mode','tunnel'), ('forward_mode','multi_hop'),
+		          ('self_hosted','true')) AS e(kind, value)
+		WHERE s.tenant_id = $1
+		UNION ALL
+		SELECT s.plan_id, 'node_group', g.id::text FROM subscriptions s, node_groups g WHERE s.tenant_id = $1 AND g.tenant_id IS NULL
+		ON CONFLICT DO NOTHING`, tenant.PG())
+}

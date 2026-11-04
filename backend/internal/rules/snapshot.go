@@ -9,12 +9,13 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"vortex/backend/compiler"
+	"vortex/backend/internal/billing"
 	"vortex/backend/internal/db"
 	p "vortex/backend/internal/platform"
 )
 
 // LoadSnapshot 从数据库装载编译快照（不含 NodeVersions：由下发编排填写）。规则内容取自各规则当前期望版本的
-// 快照，路径代次取期望版本（BE-T15 引入成员变化时的代次递增）。权益暂按“无反向建链权益”（BE-T16 接入套餐）。
+// 快照，路径代次取期望版本（BE-T15 引入成员变化时的代次递增）。权益（反向建链）取各租户的有效权益（BE-T16，PLN-001）。
 func LoadSnapshot(ctx context.Context, q *db.Queries) (*compiler.Snapshot, error) {
 	s := &compiler.Snapshot{Groups: map[compiler.UUID]compiler.Group{}, Nodes: map[compiler.UUID]compiler.Node{},
 		NodeVersions: map[compiler.UUID]uint64{}, Entitlements: map[compiler.UUID]compiler.Entitled{}}
@@ -136,6 +137,14 @@ func LoadSnapshot(ctx context.Context, q *db.Queries) (*compiler.Snapshot, error
 			cr.Port = uint16(*r.ServicePort) // 已预留的端口（指定或自动分配）
 		}
 		s.Rules = append(s.Rules, cr)
+		if _, ok := s.Entitlements[cr.Tenant]; !ok {
+			tid, _ := ParseUUID(string(cr.Tenant))
+			e, err := billing.Entitlements(ctx, q, tid)
+			if err != nil {
+				return nil, err
+			}
+			s.Entitlements[cr.Tenant] = compiler.Entitled{ReverseDial: e.ReverseDial}
+		}
 	}
 	return s, nil
 }

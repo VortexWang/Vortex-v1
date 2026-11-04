@@ -19,7 +19,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"errors"
 	"log/slog"
 	"sort"
 	"sync"
@@ -32,6 +31,7 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"vortex/backend/internal/billing"
 	"vortex/backend/internal/db"
 	p "vortex/backend/internal/platform"
 	backendv1 "vortex/proto/gen/go/vortex/backend/v1"
@@ -300,11 +300,11 @@ func (s *Service) reallocate(ctx context.Context, q *db.Queries, tenant p.UUID) 
 	if err != nil {
 		return nil, err
 	}
-	plan, err := q.TenantPlan(ctx, tenant.PG())
-	noPlan := errors.Is(err, pgx.ErrNoRows)
-	if err != nil && !noPlan {
+	ent, err := billing.Entitlements(ctx, q, tenant) // PLN-001：套餐 ∩ 平台硬限制
+	if err != nil {
 		return nil, err
 	}
+	noPlan := !ent.Active
 	live, err := q.ListLiveLeases(ctx, tenant.PG())
 	if err != nil {
 		return nil, err
@@ -350,7 +350,7 @@ func (s *Service) reallocate(ctx context.Context, q *db.Queries, tenant p.UUID) 
 	}
 	var out []push
 	if !noPlan && len(set) > 0 {
-		limits := map[string]uint64{"rate": uint64(plan.RateBps), "conn": uint64(plan.MaxConns)}
+		limits := map[string]uint64{"rate": uint64(max(ent.RateBps, 0)), "conn": uint64(max(ent.MaxConns, 0))}
 		for _, k := range kinds {
 			avail := limits[k.name] - min(limits[k.name], outside[k.name])
 			demand := make([]uint64, len(set))
@@ -423,6 +423,20 @@ func (s *Service) Rebudget(ctx context.Context, tenant p.UUID, force p.UUID) err
 		}
 	}
 	return nil
+}
+
+// RebudgetIn 在调用方事务内重算租户的区域额度（MTR-013：余额被动减少的同一事务），返回提交后执行的下发。
+func (s *Service) RebudgetIn(ctx context.Context, q *db.Queries, tenant p.UUID) (func(), error) {
+	out, err := s.rebudget(ctx, q, tenant, p.UUID{})
+	if err != nil {
+		return nil, err
+	}
+	return func() {
+		for _, r := range out {
+			s.SendBudget(db.SettleBudgetRow{TenantID: r.TenantID, HubID: r.HubID, Delegated: r.Delegated,
+				SettledAckedTotal: r.SettledAckedTotal, BudgetVersion: r.BudgetVersion})
+		}
+	}, nil
 }
 
 func (s *Service) rebudget(ctx context.Context, q *db.Queries, tenant, force p.UUID) ([]*db.UpsertBudgetRow, error) {

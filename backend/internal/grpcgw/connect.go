@@ -181,13 +181,9 @@ func (s *Server) onRegister(ctx context.Context, hub p.UUID, r *backendv1.HubReg
 		return err
 	}
 	send(&backendv1.BackendMessage{Body: &backendv1.BackendMessage_Revocations{Revocations: &runtimev1.RevocationList{Serial: uint64(ver), CertSerials: serials}}})
-	bvs, err := q.ListBillingVersions(ctx)
+	sync, err := s.billingVersions(ctx)
 	if err != nil {
 		return err
-	}
-	sync := &backendv1.BillingVersionSync{}
-	for _, bv := range bvs {
-		sync.Versions = append(sync.Versions, &backendv1.BillingVersion{Version: uint64(bv.Version), EffectiveAt: timestamppb.New(bv.EffectiveAt.Time)})
 	}
 	send(&backendv1.BackendMessage{Body: &backendv1.BackendMessage_BillingVersions{BillingVersions: sync}})
 	if acked, err := q.MaxLedgerSeq(ctx, hub.PG()); err == nil && acked > 0 {
@@ -329,4 +325,42 @@ func entryKind(e *backendv1.LedgerEntry) (string, p.UUID) {
 		return "grant_transferred", t
 	}
 	return "", t
+}
+
+// billingVersions 是全部计费版本及其组倍率（HUB-018）。
+func (s *Server) billingVersions(ctx context.Context) (*backendv1.BillingVersionSync, error) {
+	q := db.New(s.Fleet.DB)
+	bvs, err := q.ListBillingVersions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ms, err := q.ListAllGroupMultipliers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	by := map[p.UUID][]*backendv1.GroupMultiplier{}
+	for _, m := range ms {
+		v := p.FromPG(m.BillingVersionID)
+		by[v] = append(by[v], &backendv1.GroupMultiplier{NodeGroupId: uuidMsg(p.FromPG(m.NodeGroupID)), MultiplierMilli: uint64(m.MultiplierMilli)})
+	}
+	out := &backendv1.BillingVersionSync{}
+	for _, bv := range bvs {
+		out.Versions = append(out.Versions, &backendv1.BillingVersion{Version: uint64(bv.Version), EffectiveAt: timestamppb.New(bv.EffectiveAt.Time),
+			Multipliers: by[p.FromPG(bv.ID)]})
+	}
+	return out, nil
+}
+
+// BroadcastBillingVersions 把全部计费版本同步到已连接的实例（新计费版本创建后，HUB-018：提前 24 小时同步）。
+func (s *Server) BroadcastBillingVersions(ctx context.Context) {
+	sync, err := s.billingVersions(ctx)
+	if err != nil {
+		s.log().Warn("billing versions", "err", err)
+		return
+	}
+	for _, h := range s.Connected() {
+		if send := s.Sender(h); send != nil {
+			send(&backendv1.BackendMessage{Body: &backendv1.BackendMessage_BillingVersions{BillingVersions: sync}})
+		}
+	}
 }

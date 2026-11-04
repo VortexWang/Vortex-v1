@@ -18,11 +18,6 @@ SELECT tenant_id, rule_id, kind FROM restrictions WHERE cleared_at IS NULL ORDER
 -- name: ListTenantRuleIDs :many
 SELECT id, tenant_id FROM rules ORDER BY tenant_id, id;
 
--- name: TenantPlan :one
--- 生效中的套餐的速率与连接上限（LIM-002、LIM-003）
-SELECT p.rate_bps, p.max_conns FROM subscriptions s JOIN plans p ON p.id = s.plan_id
-WHERE s.tenant_id = $1 AND s.expires_at > now();
-
 -- name: ListLeaseNodes :many
 -- 有运行配置的节点及其接入状态（执行点从配置中的规则得出）
 SELECT nc.node_id, nc.config, nc.version, nc.applied_version, n.edge_hub_id, n.current_boot_id, n.lifecycle, n.region

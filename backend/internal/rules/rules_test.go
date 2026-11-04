@@ -7,6 +7,7 @@ import (
 
 	"vortex/backend/apptest"
 	"vortex/backend/compiler"
+	"vortex/backend/internal/billing"
 	"vortex/backend/internal/db"
 	p "vortex/backend/internal/platform"
 )
@@ -69,6 +70,8 @@ func setup(t *testing.T) *fixture {
 	apptest.Exec(t, dsn, "INSERT INTO billing_versions (id, version, effective_at) VALUES ($1, 0, now() - interval '1 minute')", bv.PG())
 	apptest.Exec(t, dsn, "INSERT INTO group_multipliers (billing_version_id, node_group_id, multiplier_milli) VALUES ($1, $2, 1000), ($1, $3, 800)",
 		bv.PG(), f.entry.PG(), f.exit.PG())
+	apptest.Entitle(t, dsn, f.tenant)
+	apptest.Entitle(t, dsn, f.other)
 	return f
 }
 
@@ -175,6 +178,7 @@ func TestValidationOnSave(t *testing.T) {
 	noPermit := p.NewUUIDv7()
 	apptest.Exec(t, f.dsn, "INSERT INTO node_groups (id, name, purpose) VALUES ($1, 'np', 'exit')", noPermit.PG())
 	apptest.Exec(t, f.dsn, "INSERT INTO node_group_members (node_group_id, node_id) VALUES ($1, $2)", noPermit.PG(), f.nodes["x1"].PG())
+	apptest.Entitle(t, f.dsn, f.tenant)
 	cases := []struct {
 		name string
 		mut  func(*Spec)
@@ -225,4 +229,114 @@ func upper(s string) string {
 		}
 	}
 	return string(b)
+}
+
+// 权益（PLN-001）：套餐 ∩ 平台硬限制；保存时检查套餐有效、规则数、平台节点组、个人组、协议、转发方式、规则级限制、反向建链。
+func TestEntitlements(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	bare := apptest.Tenant(t, f.dsn)
+	if _, err := f.svc.Create(ctx, bare, f.spec(f.exit)); len(problems(err)) == 0 || problems(err)[0] != billing.ErrPlanInactive {
+		t.Fatalf("no plan: %v", err)
+	}
+	// 反向建链权益：授予后可以手动选择反向建链（RUL-004）
+	rev := f.spec(f.exit)
+	rev.ServicePort, rev.Path[0].Dial = 22990, "reverse"
+	if _, err := f.svc.Create(ctx, f.tenant, rev); !hasProblem(err, compiler.ErrReverseNotEntitled) {
+		t.Fatalf("reverse without the entitlement: %v", err)
+	}
+	apptest.Exec(t, f.dsn, "INSERT INTO plan_entitlements (plan_id, kind, value) SELECT plan_id, 'reverse_dial', 'false' FROM subscriptions WHERE tenant_id = $1", f.tenant.PG())
+	if _, err := f.svc.Create(ctx, f.tenant, rev); !hasProblem(err, compiler.ErrReverseNotEntitled) {
+		t.Fatalf("reverse_dial = false: %v", err)
+	}
+	apptest.Exec(t, f.dsn, "INSERT INTO plan_entitlements (plan_id, kind, value) SELECT plan_id, 'reverse_dial', 'true' FROM subscriptions WHERE tenant_id = $1", f.tenant.PG())
+	revSaved, err := f.svc.Create(ctx, f.tenant, rev)
+	if err != nil {
+		t.Fatalf("reverse with the entitlement: %v", err)
+	}
+	// 部署时的编译同样按租户的有效权益
+	snap, err := LoadSnapshot(ctx, f.q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if probs := compiler.Compile(snap).Problems[CID(revSaved.ID)]; len(probs) != 0 {
+		t.Fatalf("deploy-time compile: %v", probs)
+	}
+	apptest.Exec(t, f.dsn, "UPDATE rules SET deleted_at = now() WHERE tenant_id = $1", f.tenant.PG())
+	// 收窄 f.tenant 的套餐：只授予入口组、tcp、tunnel，规则数 2，速率 1000，连接 10，不允许自托管
+	apptest.Exec(t, f.dsn, `DELETE FROM plan_entitlements WHERE plan_id = (SELECT plan_id FROM subscriptions WHERE tenant_id = $1)
+		AND NOT (kind = 'node_group' AND value IN ($2, $3)) AND NOT (kind = 'protocol' AND value = 'tcp') AND NOT (kind = 'forward_mode' AND value = 'tunnel')`,
+		f.tenant.PG(), f.entry.String(), f.exit.String())
+	apptest.Exec(t, f.dsn, "UPDATE plans SET max_rules = 2, rate_bps = 1000, max_conns = 10 WHERE id = (SELECT plan_id FROM subscriptions WHERE tenant_id = $1)", f.tenant.PG())
+	apptest.Exec(t, f.dsn, "INSERT INTO plan_entitlements (plan_id, kind, value) SELECT plan_id, 'self_hosted', 'false' FROM subscriptions WHERE tenant_id = $1", f.tenant.PG())
+	base := func() Spec { s := f.spec(f.exit); s.Network = "tcp"; return s }
+	relay := p.NewUUIDv7()
+	apptest.Exec(t, f.dsn, "INSERT INTO node_groups (id, name, purpose) VALUES ($1, 'r', 'relay')", relay.PG())
+	cases := []struct {
+		name string
+		mut  func(*Spec)
+		want string
+	}{
+		{"udp not granted", func(s *Spec) { s.Network = "tcp_udp" }, billing.ErrProtocol},
+		{"direct not granted", func(s *Spec) { s.Mode = "direct"; s.Path = nil }, billing.ErrForwardMode},
+		{"personal group needs self_hosted", func(s *Spec) { s.Path[0].Group = CID(f.priv); s.Targets[0].Host = "127.0.0.1" }, billing.ErrSelfHosted},
+		{"platform group not granted", func(s *Spec) {
+			s.Mode = "multi_hop"
+			s.Path = []compiler.Segment{{Group: CID(relay)}, {Group: CID(f.exit)}}
+		}, billing.ErrGroupEntitlement},
+		{"rule rate above the plan", func(s *Spec) { s.RateBps = 1001 }, billing.ErrRuleRate},
+		{"rule connections above the plan", func(s *Spec) { s.MaxConns = 11 }, billing.ErrRuleConns},
+	}
+	for i, c := range cases {
+		s := base()
+		s.ServicePort = uint16(23000 + i)
+		c.mut(&s)
+		if _, err := f.svc.Create(ctx, f.tenant, s); !hasProblem(err, c.want) {
+			t.Errorf("%s: %v", c.name, err)
+		}
+	}
+	// 规则数上限 2：第三条被拒；修改不受规则数限制
+	var saved []*Saved
+	for i := 0; i < 2; i++ {
+		s := base()
+		s.ServicePort = uint16(24000 + i)
+		sv, err := f.svc.Create(ctx, f.tenant, s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		saved = append(saved, sv)
+	}
+	s := base()
+	s.ServicePort = 24010
+	if _, err := f.svc.Create(ctx, f.tenant, s); !hasProblem(err, billing.ErrRuleLimit) {
+		t.Fatalf("third rule: %v", err)
+	}
+	up := base()
+	up.ServicePort = 24000
+	up.RateBps = 500
+	if _, err := f.svc.Update(ctx, f.tenant, saved[0].ID, saved[0].RowVersion, up); err != nil {
+		t.Fatalf("update within the limits: %v", err)
+	}
+	// 平台硬限制取交集：平台不允许 tunnel 时修改被拒；速率上限取最小值
+	apptest.Exec(t, f.dsn, `INSERT INTO settings (key, value) VALUES ('platform_limits', '{"forward_modes":["direct"],"rate_bps":400}')`)
+	if _, err := f.svc.Update(ctx, f.tenant, saved[0].ID, saved[0].RowVersion+1, up); !hasProblem(err, billing.ErrForwardMode) || !hasProblem(err, billing.ErrRuleRate) {
+		t.Fatalf("platform limits: %v", err)
+	}
+	e, err := billing.Entitlements(ctx, f.q, f.tenant)
+	if err != nil || e.RateBps != 400 || e.ForwardModes["tunnel"] || e.MaxConns != 10 || e.MaxRules != 2 || !e.Protocols["tcp"] {
+		t.Fatalf("effective %+v %v", e, err)
+	}
+	apptest.Exec(t, f.dsn, `UPDATE settings SET value = '{"protocols":["udp"],"max_rules":1,"max_conns":5}' WHERE key = 'platform_limits'`)
+	if e, err := billing.Entitlements(ctx, f.q, f.tenant); err != nil || e.MaxRules != 1 || e.MaxConns != 5 || e.Protocols["tcp"] || e.RateBps != 1000 {
+		t.Fatalf("effective %+v %v", e, err)
+	}
+}
+
+func hasProblem(err error, code string) bool {
+	for _, c := range problems(err) {
+		if c == code {
+			return true
+		}
+	}
+	return false
 }

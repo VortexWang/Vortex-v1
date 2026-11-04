@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"vortex/backend/compiler"
+	"vortex/backend/internal/billing"
 	"vortex/backend/internal/db"
 	p "vortex/backend/internal/platform"
 	"vortex/backend/internal/ports"
@@ -271,11 +272,76 @@ func (s *Service) validate(ctx context.Context, q *db.Queries, tenant, id p.UUID
 	if err != nil {
 		return err
 	}
+	ent, err := billing.Entitlements(ctx, q, tenant)
+	if err != nil {
+		return err
+	}
+	if probs := entitled(ctx, q, snap, ent, tenant, version, spec); len(probs) > 0 {
+		return &ValidationError{Problems: probs}
+	}
+	snap.Entitlements[CID(tenant)] = compiler.Entitled{ReverseDial: ent.ReverseDial}
 	r := ToCompiler(id, tenant, version, 0, spec)
 	if probs := compiler.Validate(snap, r); len(probs) > 0 {
 		return &ValidationError{Problems: probs}
 	}
 	return nil
+}
+
+// entitled 按有效权益检查规则（PLN-001）：套餐有效、规则数（新建时）、平台节点组、个人组、协议、转发方式、规则级限制。
+func entitled(ctx context.Context, q *db.Queries, snap *compiler.Snapshot, e *billing.Effective, tenant p.UUID, version uint64, spec Spec) []compiler.Problem {
+	if !e.Active {
+		return []compiler.Problem{{Code: billing.ErrPlanInactive, Detail: "no active plan"}}
+	}
+	var out []compiler.Problem
+	bad := func(code, format string, args ...any) {
+		out = append(out, compiler.Problem{Code: code, Detail: fmt.Sprintf(format, args...)})
+	}
+	if version == 1 {
+		n, err := q.CountTenantRules(ctx, tenant.PG())
+		if err != nil {
+			bad(compiler.ErrInvalid, "%v", err)
+		} else if n >= e.MaxRules { // 新建的规则已插入或尚未插入均不超过上限
+			bad(billing.ErrRuleLimit, "the plan allows %d rules", e.MaxRules)
+		}
+	}
+	groups := []compiler.UUID{spec.EntryGroup}
+	for _, sg := range spec.Path {
+		groups = append(groups, sg.Group)
+	}
+	for _, g := range groups {
+		gr, ok := snap.Groups[g]
+		if !ok {
+			continue // 由编译器报告不存在
+		}
+		if gr.Tenant != "" {
+			if !e.SelfHosted {
+				bad(billing.ErrSelfHosted, "personal group %s needs the self_hosted entitlement", g)
+			}
+			continue
+		}
+		if u, err := ParseUUID(string(g)); err != nil || !e.Groups[u] {
+			bad(billing.ErrGroupEntitlement, "node group %s is not granted by the plan", g)
+		}
+	}
+	protos := []string{spec.Network}
+	if spec.Network == "tcp_udp" {
+		protos = []string{"tcp", "udp"}
+	}
+	for _, pr := range protos {
+		if !e.Protocols[pr] {
+			bad(billing.ErrProtocol, "protocol %s is not granted by the plan", pr)
+		}
+	}
+	if !e.ForwardModes[spec.Mode] {
+		bad(billing.ErrForwardMode, "forward mode %s is not granted by the plan", spec.Mode)
+	}
+	if spec.RateBps > 0 && int64(spec.RateBps) > e.RateBps {
+		bad(billing.ErrRuleRate, "rule rate %d bit/s exceeds the plan's %d", spec.RateBps, e.RateBps)
+	}
+	if spec.MaxConns > 0 && int64(spec.MaxConns) > e.MaxConns {
+		bad(billing.ErrRuleConns, "rule connections %d exceed the plan's %d", spec.MaxConns, e.MaxConns)
+	}
+	return out
 }
 
 func writeChildren(ctx context.Context, q *db.Queries, id p.UUID, spec Spec) error {

@@ -185,6 +185,7 @@ func TestRealBackendApply(t *testing.T) {
 	svc := freePort(t)
 	apptest.Exec(t, dsn, "INSERT INTO node_port_ranges (node_id, kind, port_min, port_max) VALUES ($1, 'service', $2, $2)", eid[:], int32(svc.Port()))
 
+	apptest.Entitle(t, dsn, tenant)
 	tg := target(t)
 	spec := backendapp.RuleSpec{Name: "web", Network: "tcp", Mode: "tunnel", EntryGroup: compiler.UUID(uuidText(gEntry)),
 		Path: []compiler.Segment{{Group: compiler.UUID(uuidText(gExit))}}, Targets: []compiler.Target{{Host: tg.Addr().String(), Port: tg.Port(), Weight: 1}},

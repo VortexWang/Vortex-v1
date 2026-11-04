@@ -695,24 +695,6 @@ func (q *Queries) TenantBalance(ctx context.Context, tenantID pgtype.UUID) (int6
 	return balance_bytes, err
 }
 
-const tenantPlan = `-- name: TenantPlan :one
-SELECT p.rate_bps, p.max_conns FROM subscriptions s JOIN plans p ON p.id = s.plan_id
-WHERE s.tenant_id = $1 AND s.expires_at > now()
-`
-
-type TenantPlanRow struct {
-	RateBps  int64
-	MaxConns int32
-}
-
-// 生效中的套餐的速率与连接上限（LIM-002、LIM-003）
-func (q *Queries) TenantPlan(ctx context.Context, tenantID pgtype.UUID) (TenantPlanRow, error) {
-	row := q.db.QueryRow(ctx, tenantPlan, tenantID)
-	var i TenantPlanRow
-	err := row.Scan(&i.RateBps, &i.MaxConns)
-	return i, err
-}
-
 const unfreezeHubBudgets = `-- name: UnfreezeHubBudgets :exec
 UPDATE regional_budgets SET frozen = false, frozen_at = NULL WHERE hub_id = $1 AND frozen
 `

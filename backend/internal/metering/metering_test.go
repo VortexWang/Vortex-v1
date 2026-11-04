@@ -79,6 +79,7 @@ func setup(t *testing.T) *fixture {
 	f.exec("INSERT INTO billing_versions (id, version, effective_at) VALUES ($1, 0, now())", p.NewUUIDv7().PG())
 	f.exec(`INSERT INTO group_multipliers (billing_version_id, node_group_id, multiplier_milli)
 		SELECT id, g, 750 FROM billing_versions, unnest(ARRAY[$1::uuid, $2::uuid]) g WHERE version = 0`, ge.PG(), gx.PG())
+	apptest.Entitle(t, dsn, f.tenant)
 	saved, err := (&rules.Service{DB: pool}).Create(context.Background(), f.tenant, rules.Spec{Name: "r", Network: "tcp", Mode: "tunnel",
 		EntryGroup: rules.CID(ge), ServicePort: 20001, Path: []compiler.Segment{{Group: rules.CID(gx)}},
 		Targets: []compiler.Target{{Host: "198.51.100.7", Port: 443, Weight: 1}}, TargetSchedule: "weighted_round_robin", ProxyProtocol: "off", Enabled: true})
@@ -99,6 +100,7 @@ func (f *fixture) query(sql string, args ...any) string {
 }
 
 func (f *fixture) subscribe(base int64, expires string) {
+	f.exec("DELETE FROM subscriptions WHERE tenant_id = $1", f.tenant.PG()) // 替换 setup 中授予权益用的套餐
 	plan := p.NewUUIDv7()
 	f.exec(`INSERT INTO plans (id, name, duration_days, base_traffic_bytes, traffic_reset, max_rules, rate_bps, max_conns)
 		VALUES ($1, 'p', 30, $2, 'none', 10, 1000, 10)`, plan.PG(), base)

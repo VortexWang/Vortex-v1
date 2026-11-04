@@ -136,3 +136,24 @@ func TestLostHubBudgets(t *testing.T) {
 		t.Fatalf("after reconnect %s", row())
 	}
 }
+
+// HUB-018：计费版本连同组倍率同步到已连接的实例。
+func TestBillingVersionSync(t *testing.T) {
+	e := setup(t)
+	_, cert := e.enrollHub("eu")
+	g := platform.NewUUIDv7()
+	bv := platform.NewUUIDv7()
+	apptest.Exec(t, e.dsn, "INSERT INTO billing_versions (id, version, effective_at) VALUES ($1, 0, now())", bv.PG())
+	apptest.Exec(t, e.dsn, "INSERT INTO node_groups (id, name, purpose) VALUES ($1, 'g', 'exit')", g.PG())
+	apptest.Exec(t, e.dsn, "INSERT INTO group_multipliers (billing_version_id, node_group_id, multiplier_milli) VALUES ($1, $2, 1500)", bv.PG(), g.PG())
+	s := e.connect(cert)
+	s.send(&backendv1.HubUpMessage{Body: &backendv1.HubUpMessage_Register{Register: &backendv1.HubRegister{Region: "eu", Mode: commonv1.HubMode_HUB_MODE_ONLINE}}})
+	check := func(m *backendv1.BackendMessage) bool {
+		vs := m.GetBillingVersions().GetVersions()
+		return len(vs) == 1 && len(vs[0].Multipliers) == 1 && vs[0].Multipliers[0].MultiplierMilli == 1500 &&
+			platform.UUID(vs[0].Multipliers[0].NodeGroupId.GetValue()) == g
+	}
+	s.expect("billing versions on register", check)
+	e.gw.BroadcastBillingVersions(context.Background())
+	s.expect("billing versions broadcast", check)
+}
